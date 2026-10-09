@@ -7,6 +7,33 @@
 
 ### 新增
 
+- **下游导入实测：CLIProxyAPI 已打通，并纠正了文档里一处会让人白查半天的错误**。
+  统一入口对外就是一个 OpenAI 兼容上游，但**「base URL 带不带 `/v1`」各家相反**。
+  - 原文档写「统一不要带 `/v1`」，并把 new-api / CPA / sub2api 列成同一个填法。
+    **对 CPA 是错的**：它自己的十个 provider 全部带 `/v1`
+    （`https://integrate.api.nvidia.com/v1`、`http://sub2api:8080/v1` …），
+    填成不带就是 `/v1/v1/chat/completions` → 404，而聚合器通常把这归结成
+    「上游不可用」，于是你去查冷却、换 key、查出口，全查错方向。
+  - 本轮改用**独立别名**（`zenproxy-test`）验证 CPA 接入，因为同名模型可能同时
+    存在于别的 provider 上，用真名无法证明请求走了 zenproxy。
+    实测链路：CPA 载入 provider（57 → 58 个 client）→ 别名出现在 `/v1/models`
+    → 请求转发到网关 → 网关认证并选账号/出口 → 上游返回 `PONG`。
+  - 记录了两条**非显然的运维现象**：① CPA 会把失败的凭据冷却，并把它
+    **从 `/v1/models` 里摘掉**（实测 46 → 45 个模型），请求变成
+    `auth_unavailable`——这不是配置错；② sub2api 有 `SECURITY_URL_ALLOWLIST_*`，
+    默认关闭所以能直接用，但一旦打开，私有主机名和 http 都会被拦，且报错不提及白名单。
+- **`scripts/verify-openai-compat-contract.sh`：导入前的对外契约验证**。
+  聚合器掉一个上游几乎从来不是因为模型少了，而是某个响应缺了它要解析的字段，
+  表现出来却是一句看不懂的 `no auth available`。脚本查形状不查模型：
+  `/v1/models` 是不是 `object=list`、每项有没有 `id/object=model/created/owned_by`；
+  对话有没有 `object=chat.completion`/`choices[].message`/`finish_reason`/`usage`；
+  流式是不是 `text/event-stream` 且以 `data: [DONE]` 收尾；错误 key 与未知模型
+  是不是规规矩矩的 4xx JSON。可指向**任何** OpenAI 兼容网关，不是 zenproxy 专用。
+  在临时实例上实测 18/18 通过。
+- **`scripts/redact-config.py`：按结构递归脱敏的配置打印器**。
+  上一轮我用按行的正则读 CPA 配置，漏掉了 YAML 列表项，把一整条入站密钥打进了会话记录。
+  这次换成正则匹配**键名**、并让键名沿列表**向下传递**，所以 `keys:` 下的每一条都会被
+  替换而不是只有第一条。实测在 CPA 配置上正确遮蔽了 41 条 nvidia key 等全部凭据。
 - **地区限制：按「出口 × 模型」记账的第二条轴**。上游用 `403 RegionError` 说
   "这个模型在你这个出口所在的国家不可用"。以前它落到 `ClassAuth`，不是 IP 可归因的，
   于是**根本不轮换**——调用方直接收到那句 "not available in your country"，

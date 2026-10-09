@@ -433,17 +433,90 @@ x-api-key: <key>                # Anthropic 系
 
 ## 六、接下游
 
-统一入口对外就是标准的 OpenAI 兼容上游，所以三类下游都是同一个填法。
+统一入口对外就是标准的 OpenAI 兼容上游，所以三类下游填的东西是一样的：
+**一个 base URL + 一个 gateway key + 让它自己拉模型列表**。
 
-> ★ **Base URL 不要带 `/v1`。** new-api 会自己把 `/v1/chat/completions` 拼上去，
-> 带了就变成 `/v1/v1/chat/completions` → 404。这条踩过，见 [NEW-API.md](NEW-API.md)。
+> ★ **但「base URL 带不带 `/v1`」各家相反，这是接下游最容易踩的一步。**
+> 原以为可以一句「统一不带 `/v1`」打发掉，实测发现不行——填错的后果是
+> `/v1/v1/chat/completions` → 404，而聚合器通常把它归结成「上游不可用」，
+> 于是你在冷却、换 key、查出口上白花时间。
 
-| 下游 | Base URL | Key |
+| 下游 | base URL | 是否实测 |
 | :--- | :--- | :--- |
-| new-api | `http://zenproxy:9000` | gateway key |
-| CLIProxyAPI | `http://zenproxy:9000` | gateway key |
-| sub2api | `http://zenproxy:9000` | gateway key |
-| LiteLLM | `api_base: http://zenproxy:9000` | gateway key |
+| new-api | `http://zenproxy:9000` —— **不带 `/v1`** | 实测（渠道 16） |
+| CLIProxyAPI `api-keys.openai-compatibility` | `http://zenproxy:9000/v1` —— **带 `/v1`** | 实测（本轮） |
+| sub2api（作为上游被别的系统导入时同此） | `http://sub2api:8080/v1` —— 带 | 实测（它是 CPA 里已有的 provider） |
+| LiteLLM `api_base` | 未实测，按它自己的文档填 | ✗ |
+
+CPA 那条的依据是**它自己的十个 provider 全都是带 `/v1` 的**
+（`https://integrate.api.nvidia.com/v1`、`https://ollama.com/v1`、
+`http://windsurfapi:3003/v1`、`http://sub2api:8080/v1` …），
+不是推理出来的。new-api 那条相反，见 [NEW-API.md](NEW-API.md)。
+
+### CLIProxyAPI：`openai-compatibility` 的最小可用填法
+
+CPA v8 的 provider 不写在 `openai-compatibility` 顶层段，而是挂在 `api-keys` 下。
+`base-url` 属于**组**而不是属于 key，组里可以放多条 key 做加权轮询：
+
+```yaml
+api-keys:
+  openai-compatibility:
+    - name: zenproxy
+      base-url: "http://zenproxy:9000/v1"   # ★ 带 /v1
+      keys:
+        - api-key: "sk-..."                 # gateway key
+      models:
+        - name: big-pickle                  # 上游真名
+          alias: big-pickle                 # 对客户端暴露的名字；省略则用 name
+```
+
+接入后 CPA 的日志会打印
+`server clients and configuration updated: N clients (... + N OpenAI-compat)`，
+数字加一就说明它认了这个 provider。
+
+> **别名必须唯一，且请求要用别名。** 本轮验证时故意用了 `zenproxy-test` 这个
+> 独立别名——不是为了好看，是因为**同名模型可能同时存在于别的 provider 上**，
+> 用真名根本分不清请求到底走了哪条路。测试时要让「走到了 zenproxy」这件事
+> 无法被别的上游冒充。
+
+> **CPA 会把失败的凭据冷却，并从 `/v1/models` 里摘掉它。** 上游抖动导致几次
+> 失败之后，该 provider 的模型会**从列表里消失**（本轮实测 46 → 45 个模型），
+> 请求变成 `auth_unavailable: no auth available`。这不是配置错了，是 CPA 在保护
+> 自己；`routing.cooldown.transient-error-cooldown-seconds` 只管瞬时错误，
+> 认证类冷却长得多。排查时先看这句话，别去改 base URL。
+
+### sub2api：先看它的 URL 白名单
+
+sub2api 有 `SECURITY_URL_ALLOWLIST_*` 一组环境变量。默认是关的，所以
+`http://zenproxy:9000/v1` 能直接用；但**一旦打开白名单，私有主机名和 http 都会被拦**，
+zenproxy 就会从上游列表里消失，且报错不会提到白名单：
+
+```
+SECURITY_URL_ALLOWLIST_ENABLED=true
+SECURITY_URL_ALLOWLIST_ALLOW_PRIVATE_HOSTS=true      # 容器名是私有主机
+SECURITY_URL_ALLOWLIST_ALLOW_INSECURE_HTTP=true      # 内网是 http
+SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=zenproxy
+```
+
+它的上游存在 Postgres 里（`config.yaml` 只有 server/database/redis/jwt），
+所以只能走它的管理面加，不能改文件。
+
+### 导入之前先用契约脚本验一遍
+
+聚合器掉一个上游，几乎从来不是因为「模型少了」，而是**某个响应缺了它要解析的字段**——
+表现出来却是一句看不懂的 `no auth available`，或者模型悄悄从列表里消失。
+所以先把「别人眼中的你」验一遍，再决定接不接：
+
+```bash
+scripts/verify-openai-compat-contract.sh http://127.0.0.1:9000 "$ZENPROXY_KEY"
+```
+
+它查的是形状不是模型：`/v1/models` 是不是 `object=list`、每项有没有
+`id/object=model/created/owned_by`；对话返回有没有
+`object=chat.completion` / `choices[].message` / `finish_reason` / `usage`；
+流式是不是 `text/event-stream` 且以 `data: [DONE]` 收尾；错误 key 与未知模型
+是不是规规矩矩的 4xx JSON 对象（聚合器靠这个决定冷却还是换 key）。
+脚本可以指向**任何** OpenAI 兼容网关，不是 zenproxy 专用。
 
 ### LiteLLM：从 N 条 deployment 塌缩成 1 条
 
@@ -500,6 +573,12 @@ model_list:
 
 `require_key` 默认 **true**（只要配了 key）。要开匿名访问得显式写
 `require_key: false`。
+
+配置校验只管**自己的**配置对不对，管不了「别人能不能把你接进去」。
+后者用 `scripts/verify-openai-compat-contract.sh` 验，见 [六、接下游](#六接下游)。
+两者的分工值得记一下：本轮实测时配置一路全绿，而网关面有约六成请求返回
+上游的 `Invalid credential`——**配置校验永远不会告诉你上游此刻在拒你**，
+那要靠契约脚本和真实调用。
 
 ---
 

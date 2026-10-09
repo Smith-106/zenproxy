@@ -480,7 +480,10 @@ func TestGatewayModelListReflectsTheKeysPool(t *testing.T) {
 	var listing struct {
 		Object string `json:"object"`
 		Data   []struct {
-			ID string `json:"id"`
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Created int64  `json:"created"`
+			OwnedBy string `json:"owned_by"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&listing); err != nil {
@@ -488,6 +491,22 @@ func TestGatewayModelListReflectsTheKeysPool(t *testing.T) {
 	}
 	if listing.Object != "list" {
 		t.Errorf("object = %q, want \"list\"", listing.Object)
+	}
+	// The per-item fields are not decoration. An aggregator that imports this as
+	// an upstream parses them, and one missing field is enough for it to drop the
+	// model from its own listing - which surfaces as "the upstream has no models"
+	// rather than as a field it could not read. Asserted per item, so a single
+	// entry built on a different path cannot slip through.
+	for _, m := range listing.Data {
+		if m.Object != "model" {
+			t.Errorf("%s: object = %q, want \"model\"", m.ID, m.Object)
+		}
+		if m.Created == 0 {
+			t.Errorf("%s: created is missing; aggregators sort and display it", m.ID)
+		}
+		if m.OwnedBy == "" {
+			t.Errorf("%s: owned_by is missing; it is the only hint of where a model came from", m.ID)
+		}
 	}
 	var got []string
 	for _, m := range listing.Data {
