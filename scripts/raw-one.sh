@@ -24,8 +24,16 @@ CODE=$(curl -sS --max-time 40 -D "$WORK/hdr.txt" -o "$WORK/body.txt" -w '%{http_
   --data-binary "@${BODY}" \
   "https://opencode.ai/zen/v1${APATH}")
 echo "http_code=${CODE} exit=$?"
-echo "--- body ---"
+echo "--- body (first 900 bytes) ---"
 head -c 900 "$WORK/body.txt"
+# A streamed 200 is long and its answer is at the end: the head only proves the
+# envelope landed, the tail is where the model actually says something.
+SIZE=$(wc -c < "$WORK/body.txt")
+if [ "$SIZE" -gt 900 ]; then
+  echo
+  echo "--- body (last 1400 of ${SIZE} bytes) ---"
+  tail -c 1400 "$WORK/body.txt"
+fi
 echo
 echo "--- headers of interest ---"
 grep -iE 'retry-after|ratelimit|^HTTP|x-request' "$WORK/hdr.txt" | head -20

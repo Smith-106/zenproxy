@@ -95,6 +95,8 @@ free_tier:
     - step-5-preview-free
     - longcat-2.5-preview-free
     - nemotron-3.5-lightning-free
+    - muse-spark-1.3-contributor-free   # 只在 /responses 上接单：走 chat 会回 400 ModelProtocolUnsupported，看起来像废模型
+    - muse-spark-1.2-contributor-free   # 同上
   user_agent: ""               # 留空 = 镜像抓包得到的官方客户端 UA；
                                # 上游开始拒绝这个版本时才需要覆盖
 #
