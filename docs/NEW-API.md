@@ -203,7 +203,7 @@ OpenCode Zen 对 `*-free` 系列返回：
 zenproxy 的处理是**把请求补齐成官方客户端的样子**（`free_tier`，默认开）：
 User-Agent、`x-opencode-*` 身份头、强制流式、逐字复述客户端的 system prompt、
 工具名补齐——判据与阈值逐条实测，见 [`FREE-TIER.md`](FREE-TIER.md)。
-new-api 这边不需要任何特殊配置，照常按下面第六节接 `/<账号ID>` 即可；
+new-api 这边不需要任何特殊配置，照常按上面的「建渠道」一节接 `/<账号ID>` 即可；
 调用免费模型时留意两点：
 
 - **非流式调用会被折叠**：免费额度只回 SSE，zenproxy 会读完整条流再折回一个

@@ -65,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/proxies/prune", s.auth(s.handlePrune))
 	mux.HandleFunc("POST /admin/api/proxies/{id}/retire", s.auth(s.handleRetireExit))
 	mux.HandleFunc("POST /admin/api/proxies/{id}/revive", s.auth(s.handleReviveExit))
+	mux.HandleFunc("POST /admin/api/proxies/{id}/uncool", s.auth(s.handleUncoolExit))
 	mux.HandleFunc("GET /admin/", s.auth(s.handleUI))
 	return mux
 }
@@ -140,6 +141,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		learned = s.free.Learned()
 		sort.Strings(learned)
 	}
+	cooled := s.pool.QuotaCooledIDs()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uptime_seconds":   time.Since(s.started).Seconds(),
 		"listen":           s.cfg.Server.Listen,
@@ -185,6 +187,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// and which pool each may draw from, never the keys themselves.
 		"gateway": gateway.New(s.cfg.Gateway, s.cfg.ModelList).View(),
 		"pools":   s.poolView(),
+		// Which exits the upstream has told us are out of allowance, and when
+		// each comes back. This is the question an operator actually asks when
+		// every request is being refused: is the pool broken, or is it simply
+		// spent — and the two need different answers, one of which is "wait".
+		"quota": map[string]any{
+			"cooled": cooled,
+			"count":  len(cooled),
+			"total":  s.pool.Len(),
+		},
 	})
 }
 
@@ -393,6 +404,31 @@ func (s *Server) handleReviveExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revived": id})
+}
+
+// handleUncoolExit ends a quota cooldown early.
+//
+// Nothing in the request path calls this: cooldowns expire on their own, and
+// that is deliberate, because the upstream stated the deadline and second-
+// guessing it would put traffic straight back into a refusal. But an operator
+// who has just topped an account up, or who is looking at a Retry-After they
+// believe was wrong, has no other way to say so — and without one they would
+// wait out a cooldown they know to be stale.
+func (s *Server) handleUncoolExit(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, _, cool := s.pool.QuotaCooled(id); !cool {
+		// Distinguish "not cooled" from "no such exit": the first is a no-op the
+		// operator should be told about, the second is a typo.
+		if _, known := s.pool.Get(id); !known {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown exit " + id})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"uncooled": id, "changed": false})
+		return
+	}
+	s.pool.ClearQuotaCool(id)
+	s.log.Info("quota cooldown cleared by hand", "exit", id)
+	writeJSON(w, http.StatusOK, map[string]any{"uncooled": id, "changed": true})
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {

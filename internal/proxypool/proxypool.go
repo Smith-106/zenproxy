@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -330,6 +331,25 @@ type member struct {
 	retired       bool
 	retiredReason string
 	retiredAt     time.Time
+
+	// quotaUntil is a different axis from quarantineUntil, and conflating the
+	// two would be a bug in both directions.
+	//
+	// Quarantine means "this exit is broken" — transport, TLS, 407 — and a
+	// successful probe is evidence it is fixed, so it clears. Quota means the
+	// opposite: the exit is working perfectly and the upstream has said its
+	// allowance is spent until a stated moment. A probe through this exit to
+	// some unrelated host would succeed and must NOT be allowed to clear it,
+	// and retrying before the deadline only burns a request to be told the same
+	// thing again.
+	//
+	// So it is kept separately, it is only ever cleared by the clock, and Pick
+	// demotes it without ever discarding it: an exit whose quota comes back is
+	// the most valuable thing in the pool, and dropping it would throw away the
+	// only member that is about to work.
+	quotaUntil  time.Time
+	quotaReason string
+	quotaHits   int
 }
 
 // Pool owns every configured exit.
@@ -415,6 +435,13 @@ func (p *Pool) Get(id string) (*Proxy, bool) {
 // Pick chooses an exit for an account, skipping exclude (the exit that just
 // failed). Healthy exits win; quarantined ones are tried only as a last
 // resort, so a fully broken pool still limps instead of failing outright.
+//
+// Quota-cooled exits sit between those two tiers. They are usually in perfect
+// health — an upstream that has spent an IP's allowance answers promptly and
+// politely — so health alone would rank them first and hand out the one exit
+// that is guaranteed to be refused. They are demoted, and among themselves the
+// one whose allowance returns soonest goes first, because that is the order in
+// which the pool actually regains capacity.
 func (p *Pool) Pick(exclude string) *Proxy {
 	if len(p.members) == 0 {
 		return nil
@@ -424,7 +451,7 @@ func (p *Pool) Pick(exclude string) *Proxy {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	var healthy, degraded, quarantined []*member
+	var healthy, degraded, cooled, quarantined []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -435,6 +462,7 @@ func (p *Pool) Pick(exclude string) *Proxy {
 		}
 		m.mu.Lock()
 		q := now.Before(m.quarantineUntil)
+		_, _, cool := p.quotaCooledLocked(m, now)
 		h := m.healthy
 		ret := m.retired
 		fails := m.failures
@@ -453,7 +481,12 @@ func (p *Pool) Pick(exclude string) *Proxy {
 		}
 		switch {
 		case q:
+			// Broken outranks out-of-quota: a cooled exit that is also
+			// quarantined is the worse of the two, and quarantine is the
+			// signal that lasts until proven otherwise.
 			quarantined = append(quarantined, m)
+		case cool:
+			cooled = append(cooled, m)
 		case h && !slow:
 			healthy = append(healthy, m)
 		default:
@@ -474,6 +507,26 @@ func (p *Pool) Pick(exclude string) *Proxy {
 	}
 	if m := pick(degraded); m != nil {
 		return m.Proxy
+	}
+	if len(cooled) > 0 {
+		// Not round-robin: when every exit is out of quota they share one reset
+		// instant, so spreading load across them buys nothing, while going
+		// soonest-first means the pool starts using the first allowance back
+		// rather than discovering it by luck.
+		soonest := cooled[0]
+		best := time.Time{}
+		soonest.mu.Lock()
+		best = soonest.quotaUntil
+		soonest.mu.Unlock()
+		for _, m := range cooled[1:] {
+			m.mu.Lock()
+			u := m.quotaUntil
+			m.mu.Unlock()
+			if u.Before(best) {
+				soonest, best = m, u
+			}
+		}
+		return soonest.Proxy
 	}
 	if m := pick(quarantined); m != nil {
 		return m.Proxy
@@ -589,6 +642,116 @@ func (p *Pool) MarkSoftFailure(id, reason string) {
 	m.mu.Unlock()
 }
 
+// CoolForQuota records that an upstream has refused this exit until a stated
+// moment, which is what an HTTP 429 with Retry-After is actually saying.
+//
+// It deliberately takes an absolute deadline rather than a duration: the
+// upstream's Retry-After counts down to one fixed reset, so every exit that
+// reports it agrees on the same instant. Storing a duration per exit would let
+// each one drift by however long it took to be discovered, and the whole point
+// of reading the header is to stop guessing when the allowance returns.
+//
+// A deadline in the past is ignored rather than recorded. It means the exit was
+// already usable again by the time the failure was classified, and cooling it
+// would take a working exit out of rotation on the strength of stale news.
+func (p *Pool) CoolForQuota(id string, until time.Time, reason string) bool {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok || until.IsZero() || !time.Now().Before(until) {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// An exit may be reported by several requests in flight at once. Keeping
+	// the later deadline never shortens a cooldown that a sibling request
+	// already established.
+	if until.After(m.quotaUntil) {
+		m.quotaUntil = until
+		m.quotaReason = reason
+		m.quotaHits++
+	}
+	return true
+}
+
+// QuotaCooled reports whether an exit is inside a quota cooldown, and until
+// when. An expired cooldown reads as not cooled: the clock is the only thing
+// that ends one, so there is nothing to clean up and no sweep to forget to run.
+func (p *Pool) QuotaCooled(id string) (time.Time, string, bool) {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return time.Time{}, "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return p.quotaCooledLocked(m, time.Now())
+}
+
+// quotaCooledLocked reads one member's cooldown with its lock already held.
+func (p *Pool) quotaCooledLocked(m *member, now time.Time) (time.Time, string, bool) {
+	if m.quotaUntil.IsZero() || !now.Before(m.quotaUntil) {
+		return time.Time{}, "", false
+	}
+	return m.quotaUntil, m.quotaReason, true
+}
+
+// ClearQuotaCool ends a cooldown early. Nothing in the request path calls it —
+// cooldowns end on their own — but an operator who has just topped up an
+// upstream, or who knows the header was wrong, needs a way to say so.
+func (p *Pool) ClearQuotaCool(id string) bool {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	had := !m.quotaUntil.IsZero() && time.Now().Before(m.quotaUntil)
+	m.quotaUntil = time.Time{}
+	m.quotaReason = ""
+	return had
+}
+
+// QuotaCooledIDs lists every exit currently inside a cooldown, soonest to
+// return first. The order is the useful part: it is the order in which the pool
+// will get capacity back.
+func (p *Pool) QuotaCooledIDs() []QuotaCool {
+	now := time.Now()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []QuotaCool
+	for _, m := range p.members {
+		m.mu.Lock()
+		until, reason, held := p.quotaCooledLocked(m, now)
+		id := m.ID
+		m.mu.Unlock()
+		if held {
+			out = append(out, QuotaCool{
+				ExitID: id,
+				Until:  until,
+				Reason: reason,
+				After:  until.Sub(now).Round(time.Second).String(),
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Until.Before(out[j].Until) })
+	return out
+}
+
+// QuotaCool is one exit's outstanding quota cooldown.
+type QuotaCool struct {
+	ExitID string    `json:"exit_id"`
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason,omitempty"`
+	// After is how long is left, filled in for the operator's benefit: reading
+	// an absolute instant tells you nothing about whether to wait or go fix
+	// something else.
+	After string `json:"after,omitempty"`
+}
+
 // Bind records that an account currently egresses through this exit.
 func (p *Pool) Bind(exitID, accountID string) {
 	p.mu.RLock()
@@ -637,6 +800,12 @@ func (p *Pool) Health() []model.ProxyHealth {
 		if !m.quarantineUntil.IsZero() && time.Now().Before(m.quarantineUntil) {
 			t := m.quarantineUntil
 			h.QuarantinedTill = &t
+		}
+		if until, reason, cool := p.quotaCooledLocked(m, time.Now()); cool {
+			t := until
+			h.QuotaUntil = &t
+			h.QuotaReason = reason
+			h.QuotaHits = m.quotaHits
 		}
 		if !m.lastCheck.IsZero() {
 			t := m.lastCheck

@@ -156,9 +156,18 @@ type ProxyHealth struct {
 	SoftFails       int64      `json:"soft_failures"`
 	ConsecFails     int        `json:"consecutive_failures"`
 	QuarantinedTill *time.Time `json:"quarantined_until,omitempty"`
-	LastError       string     `json:"last_error,omitempty"`
-	LastCheck       *time.Time `json:"last_check,omitempty"`
-	BoundAccounts   []string   `json:"bound_accounts,omitempty"`
+	// QuotaUntil is when the upstream said this exit's allowance returns. It is
+	// separate from QuarantinedTill because the two mean opposite things about
+	// the exit: quarantine says the exit is broken, quota says the exit is fine
+	// and the upstream is refusing it anyway. An exit can be both, and an
+	// operator reading the panel needs to tell them apart — one is repaired by
+	// fixing the exit, the other has no fix at all but waiting.
+	QuotaUntil    *time.Time `json:"quota_until,omitempty"`
+	QuotaReason   string     `json:"quota_reason,omitempty"`
+	QuotaHits     int        `json:"quota_hits,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+	LastCheck     *time.Time `json:"last_check,omitempty"`
+	BoundAccounts []string   `json:"bound_accounts,omitempty"`
 	// Retired exits are out of rotation for good. Quarantine expires on its
 	// own; retirement does not, which is the whole point: a dead IP that keeps
 	// coming back every 30 minutes is not a pool member, it is noise.

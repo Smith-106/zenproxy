@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"zenproxy/internal/config"
 	"zenproxy/internal/model"
@@ -223,5 +224,101 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 	if got := view["headers"]; got == nil {
 		t.Error("account view drops the headers the UI edits back")
+	}
+}
+
+// --- quota cooldown on the admin surface ------------------------------------
+
+// quotaServer builds a server over a pool with real exits, which the shared
+// fixture cannot do: it is built with an empty pool, and a cooldown has nothing
+// to attach to without one.
+func quotaServer(t *testing.T, exits ...string) (*Server, *proxypool.Pool) {
+	t.Helper()
+	specs := make([]proxypool.Spec, 0, len(exits))
+	for _, id := range exits {
+		specs = append(specs, proxypool.Spec{ID: id, URL: "http://127.0.0.1:9"})
+	}
+	pool, err := proxypool.NewPool(specs, config.Health{}, discardLogger())
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	reg := registry.New("", pool, discardLogger())
+	cfg := config.Config{}
+	cfg.Server.AdminToken = "sekret"
+	return New(reg, pool, cfg, nil, discardLogger()), pool
+}
+
+func TestStatusReportsWhichExitsAreOutOfQuota(t *testing.T) {
+	s, pool := quotaServer(t, "slot-01", "slot-02")
+	pool.CoolForQuota("slot-01", time.Now().Add(time.Hour), "429")
+
+	body := decode(t, authed(s, http.MethodGet, "/admin/api/status", ""))
+	quota, ok := body["quota"].(map[string]any)
+	if !ok {
+		t.Fatalf("status has no quota block: %v", body)
+	}
+	if got := quota["count"].(float64); got != 1 {
+		t.Errorf("quota.count = %v, want 1", got)
+	}
+	if got := quota["total"].(float64); got != 2 {
+		t.Errorf("quota.total = %v, want 2", got)
+	}
+	cooled, _ := quota["cooled"].([]any)
+	if len(cooled) != 1 {
+		t.Fatalf("quota.cooled = %v, want one entry", cooled)
+	}
+	entry := cooled[0].(map[string]any)
+	if entry["exit_id"] != "slot-01" {
+		t.Errorf("quota.cooled[0].exit_id = %v", entry["exit_id"])
+	}
+	// The operator needs the remaining time, not just the fact.
+	if entry["after"] == nil || entry["after"] == "" {
+		t.Error("quota.cooled[0].after is empty; the panel would have to do date arithmetic")
+	}
+
+	// And the per-exit listing must distinguish spent from broken.
+	exits := decode(t, authed(s, http.MethodGet, "/admin/api/proxies", ""))["exits"].([]any)
+	for _, raw := range exits {
+		e := raw.(map[string]any)
+		switch e["id"] {
+		case "slot-01":
+			if e["quota_until"] == nil {
+				t.Error("the cooled exit has no quota_until in /admin/api/proxies")
+			}
+			if e["healthy"] != true {
+				t.Error("a quota-cooled exit must still report healthy")
+			}
+			if e["quarantined_until"] != nil {
+				t.Error("a quota cooldown must not be reported as a quarantine")
+			}
+		case "slot-02":
+			if e["quota_until"] != nil {
+				t.Error("an uncooled exit reported a cooldown")
+			}
+		}
+	}
+}
+
+func TestUncoolEndsACooldownAndSaysWhatItDid(t *testing.T) {
+	s, pool := quotaServer(t, "slot-01")
+	pool.CoolForQuota("slot-01", time.Now().Add(time.Hour), "429")
+
+	body := decode(t, authed(s, http.MethodPost, "/admin/api/proxies/slot-01/uncool", ""))
+	if body["changed"] != true {
+		t.Fatalf("uncool reported changed=%v, want true", body["changed"])
+	}
+	if _, _, cool := pool.QuotaCooled("slot-01"); cool {
+		t.Fatal("the exit is still cooled after uncool")
+	}
+	// Idempotent, and honest about it: a second call is a no-op, not an error.
+	body = decode(t, authed(s, http.MethodPost, "/admin/api/proxies/slot-01/uncool", ""))
+	if body["changed"] != false {
+		t.Errorf("second uncool reported changed=%v, want false", body["changed"])
+	}
+	// An unknown exit is a typo and must be distinguished from a no-op, or the
+	// operator cannot tell whether they named the wrong thing.
+	rec := authed(s, http.MethodPost, "/admin/api/proxies/nope/uncool", "")
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("uncool on an unknown exit = %d, want 404", rec.Code)
 	}
 }

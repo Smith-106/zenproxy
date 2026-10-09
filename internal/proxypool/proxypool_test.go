@@ -632,3 +632,211 @@ func TestReviveRestoresARetiredExit(t *testing.T) {
 		t.Error("Retire on an unknown exit must fail")
 	}
 }
+
+// --- quota cooldown ---------------------------------------------------------
+//
+// These pin down the claim that quota is a separate axis from health, because
+// the whole design rests on it: an exit that is out of quota is perfectly
+// healthy, so every health-shaped signal about it is a lie that says "use me".
+
+func TestCoolForQuotaDemotesButKeepsTheExit(t *testing.T) {
+	pool, _ := healthyPool(t, 3)
+	until := time.Now().Add(time.Hour)
+
+	if !pool.CoolForQuota("a", until, "429 FreeUsageLimitError") {
+		t.Fatal("CoolForQuota reported it did not record the cooldown")
+	}
+	// Demoted: never handed out while a warmer exit exists.
+	for i := 0; i < 40; i++ {
+		if got := pool.Pick(""); got == nil || got.ID == "a" {
+			t.Fatalf("Pick handed out a quota-cooled exit: %v", got)
+		}
+	}
+	// But kept: once it is the only thing left, it is better to try it than to
+	// fail the request outright. The cooldown is a demotion, never a removal.
+	// A one-exit pool is the only way to express "nothing else remains" here,
+	// because Pick takes a single exclusion.
+	solo, _ := healthyPool(t, 1)
+	solo.CoolForQuota("a", until, "429")
+	if got := solo.Pick(""); got == nil || got.ID != "a" {
+		t.Fatalf("a cooled exit must still be reachable as a last resort, got %v", got)
+	}
+}
+
+func TestQuotaCoolExpiresOnTheClockAndNothingElse(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	pool.CoolForQuota("a", time.Now().Add(50*time.Millisecond), "429")
+
+	if _, _, cool := pool.QuotaCooled("a"); !cool {
+		t.Fatal("the exit should read as cooled before its deadline")
+	}
+	// A successful probe through this exit must NOT end a quota cooldown. The
+	// exit was never broken — the probe would succeed precisely because of
+	// that — so treating it as repair would send traffic straight back into a
+	// refusal.
+	pool.MarkSuccess("a", time.Millisecond)
+	if _, _, cool := pool.QuotaCooled("a"); !cool {
+		t.Fatal("MarkSuccess cleared a quota cooldown; quota is not a health state")
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	if _, _, cool := pool.QuotaCooled("a"); cool {
+		t.Fatal("the cooldown should have ended on its own once the deadline passed")
+	}
+	for i := 0; i < 40; i++ {
+		if got := pool.Pick("b"); got == nil || got.ID != "a" {
+			t.Fatalf("an expired cooldown must return the exit to normal rotation, got %v", got)
+		}
+	}
+}
+
+func TestCoolForQuotaIgnoresADeadlineThatHasPassed(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	// Stale news: by the time the failure was classified the exit was already
+	// usable again. Recording it would take a working exit out of rotation.
+	if pool.CoolForQuota("a", time.Now().Add(-time.Second), "429") {
+		t.Fatal("a past deadline must not be recorded")
+	}
+	if _, _, cool := pool.QuotaCooled("a"); cool {
+		t.Fatal("a past deadline left the exit cooled")
+	}
+	if pool.CoolForQuota("nope", time.Now().Add(time.Hour), "429") {
+		t.Error("CoolForQuota on an unknown exit must report failure")
+	}
+	if pool.CoolForQuota("a", time.Time{}, "429") {
+		t.Error("a zero deadline must not be recorded")
+	}
+}
+
+func TestCoolForQuotaKeepsTheLaterDeadline(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	near := time.Now().Add(time.Minute)
+	far := time.Now().Add(time.Hour)
+
+	pool.CoolForQuota("a", far, "first")
+	// Several requests can be in flight when the upstream starts refusing, and
+	// they race to report it. A later report must never shorten a cooldown a
+	// sibling request already established, or the exit is retried early and
+	// refused again for nothing.
+	if !pool.CoolForQuota("a", near, "second") {
+		t.Fatal("a second, earlier report should be accepted as a no-op")
+	}
+	until, reason, _ := pool.QuotaCooled("a")
+	if !until.Equal(far) {
+		t.Fatalf("the cooldown was shortened to %v, want %v", until, far)
+	}
+	if reason != "first" {
+		t.Fatalf("reason = %q, want the one that set the surviving deadline", reason)
+	}
+	// And a genuinely later deadline does extend it.
+	later := time.Now().Add(2 * time.Hour)
+	pool.CoolForQuota("a", later, "third")
+	if until, reason, _ = pool.QuotaCooled("a"); !until.Equal(later) || reason != "third" {
+		t.Fatalf("a later deadline did not win: %v %q", until, reason)
+	}
+}
+
+func TestCooledExitsRankAboveQuarantinedOnes(t *testing.T) {
+	pool, _ := healthyPool(t, 3)
+	// 'a' is broken: quarantined by repeated failures.
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("a", "dial: refused")
+	if ok, _ := pool.Healthy("a"); ok {
+		t.Fatal("the fixture failed to quarantine 'a'")
+	}
+	// 'b' is out of quota but otherwise fine. Both are unusable; 'b' is the one
+	// with a stated time at which it stops being unusable, so it goes first.
+	pool.CoolForQuota("b", time.Now().Add(time.Hour), "429")
+
+	if got := pool.Pick("c"); got == nil || got.ID != "b" {
+		t.Fatalf("Pick = %v, want the cooled 'b' ahead of the quarantined 'a'", got)
+	}
+	// A member that is both is treated as broken, which is the worse of the two.
+	pool.CoolForQuota("a", time.Now().Add(2*time.Hour), "429")
+	if got := pool.Pick("c"); got == nil || got.ID != "b" {
+		t.Fatalf("Pick = %v, want 'b'; 'a' is both broken and cooled", got)
+	}
+}
+
+func TestPickAmongCooledExitsTakesTheSoonestToReturn(t *testing.T) {
+	pool, _ := healthyPool(t, 3)
+	pool.CoolForQuota("a", time.Now().Add(3*time.Hour), "429")
+	pool.CoolForQuota("b", time.Now().Add(time.Hour), "429")
+	pool.CoolForQuota("c", time.Now().Add(2*time.Hour), "429")
+
+	// With nothing else left this is a losing request either way, but the pool
+	// should spend it on the exit that is closest to working rather than pick
+	// by round-robin and learn nothing.
+	for i := 0; i < 20; i++ {
+		if got := pool.Pick(""); got == nil || got.ID != "b" {
+			t.Fatalf("Pick = %v, want 'b' (soonest to return)", got)
+		}
+	}
+}
+
+func TestQuotaCooledIDsAreOrderedByReturn(t *testing.T) {
+	pool, _ := healthyPool(t, 4)
+	pool.CoolForQuota("c", time.Now().Add(3*time.Hour), "third")
+	pool.CoolForQuota("a", time.Now().Add(time.Hour), "first")
+	pool.CoolForQuota("b", time.Now().Add(2*time.Hour), "second")
+
+	got := pool.QuotaCooledIDs()
+	if len(got) != 3 {
+		t.Fatalf("QuotaCooledIDs returned %d entries, want 3: %+v", len(got), got)
+	}
+	for i, want := range []string{"a", "b", "c"} {
+		if got[i].ExitID != want {
+			t.Fatalf("entry %d = %q, want %q (soonest return first)", i, got[i].ExitID, want)
+		}
+	}
+	if got[0].After == "" {
+		t.Error("After should be filled in so the operator does not have to do date arithmetic")
+	}
+	if got[0].Reason != "first" {
+		t.Errorf("reason = %q, want %q", got[0].Reason, "first")
+	}
+}
+
+func TestClearQuotaCoolEndsACooldownEarly(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	pool.CoolForQuota("a", time.Now().Add(time.Hour), "429")
+
+	if !pool.ClearQuotaCool("a") {
+		t.Fatal("ClearQuotaCool reported nothing to clear")
+	}
+	if _, _, cool := pool.QuotaCooled("a"); cool {
+		t.Fatal("the exit is still cooled after ClearQuotaCool")
+	}
+	if pool.ClearQuotaCool("a") {
+		t.Error("clearing an already-clear exit should report nothing was done")
+	}
+	if pool.ClearQuotaCool("nope") {
+		t.Error("clearing an unknown exit must report nothing was done")
+	}
+}
+
+func TestHealthReportsTheQuotaCooldown(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	pool.CoolForQuota("a", time.Now().Add(time.Hour), "429 FreeUsageLimitError")
+
+	h := healthOf(t, pool, "a")
+	if h.QuotaUntil == nil {
+		t.Fatal("ProxyHealth must expose the quota cooldown, or the panel cannot show it")
+	}
+	if h.QuotaReason != "429 FreeUsageLimitError" {
+		t.Errorf("quota_reason = %q", h.QuotaReason)
+	}
+	if h.QuotaHits != 1 {
+		t.Errorf("quota_hits = %d, want 1", h.QuotaHits)
+	}
+	// The distinction the panel has to be able to draw: cooled is not broken.
+	if !h.Healthy {
+		t.Error("a cooled exit must still report healthy; quota is not a health state")
+	}
+	if h.QuarantinedTill != nil {
+		t.Error("a quota cooldown must not masquerade as a quarantine")
+	}
+	if other := healthOf(t, pool, "b"); other.QuotaUntil != nil {
+		t.Error("an uncooled exit reported a cooldown")
+	}
+}

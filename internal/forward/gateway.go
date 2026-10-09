@@ -194,7 +194,7 @@ func (c *poolChooser) budget() int {
 }
 
 func (c *poolChooser) first() (candidate, bool) {
-	ent := c.eng.reg.PickInPool(c.pool, c.pol.Strategy, nil)
+	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, nil)
 	if ent == nil {
 		return candidate{}, false
 	}
@@ -239,7 +239,7 @@ func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID st
 }
 
 func (c *poolChooser) switchAccount() (candidate, bool) {
-	ent := c.eng.reg.PickInPool(c.pool, c.pol.Strategy, c.tried)
+	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, c.tried)
 	if ent == nil {
 		return candidate{}, false
 	}

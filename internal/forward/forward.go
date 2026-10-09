@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -239,6 +240,10 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
 		return
 	}
+	// The reverse ingress has no account to choose between, so its ledger
+	// applies to the exit: if this account is parked on one whose quota is
+	// spent, move it now instead of paying for the refusal and moving after.
+	e.avoidCooledExit(ent.ID)
 	e.proxyLoop(w, r, &fixedChooser{eng: e, ent: ent, up: up, target: target, limit: e.pol.MaxAttempts}, body, truncated)
 }
 
@@ -360,6 +365,18 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		class := classifyStatus(resp.StatusCode, resp.Header, errBody)
 		upstreamErr := fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncate(errBody, 300))
 		e.reg.Record(ent.ID, class, upstreamErr)
+
+		// An upstream that names a time at which it will serve this exit again
+		// has told us something no amount of retrying will change. Recording it
+		// here — before the rotation decision, and against the exit that
+		// actually carried the request — is what turns "rotate and find out" into
+		// "do not send that one next time".
+		if until, cooled := e.coolExit(ent.ID, resp.Header, class); cooled {
+			e.log.Info("exit is out of quota until the upstream's stated time",
+				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class,
+				"until", until.Format(time.RFC3339),
+				"after", time.Until(until).Round(time.Second).String())
+		}
 
 		if class == model.ClassTierGate {
 			// A model that is free but missing from the configured list is
@@ -659,6 +676,170 @@ func classifyTransport(err error) model.ErrorClass {
 		return model.ClassProxyAuth
 	}
 	return model.ClassTransport
+}
+
+// quotaDeadline reads the upstream's own statement of when it will serve this
+// exit again, in preference to any guess the proxy could make.
+//
+// This is the whole reason a ledger is worth having. An exit that is out of
+// quota looks exactly like a healthy one from the outside: it connects, it
+// answers, it is fast. The only thing distinguishing it is a header on the
+// refusal, and Retry-After names a fixed instant rather than a fresh countdown
+// per request — measured across a whole pool, the readings counted down
+// together toward one reset. So the deadline is stored absolute, and every exit
+// that reports it agrees about when the allowance returns.
+//
+// Both Retry-After encodings are accepted. The delta form is what this upstream
+// sends; the HTTP-date form is what the RFC prefers and what other upstreams
+// send, and silently ignoring it would leave those upstreams rotating blind.
+//
+// A missing or unparseable header is not an error: it just means this refusal
+// carried no timing information, and reactive rotation — which existed before
+// the ledger and still works — remains the fallback.
+func quotaDeadline(h http.Header, now time.Time) (time.Time, bool) {
+	raw := strings.TrimSpace(h.Get("Retry-After"))
+	if raw == "" {
+		return time.Time{}, false
+	}
+	// Delta-seconds. The RFC allows only a non-negative integer here, so a
+	// float is not a duration to be generous about — it is a different header
+	// that happened to land in this slot, and parsing it as 1.5s would cool an
+	// exit for a duration nobody asked for.
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs <= 0 {
+			return time.Time{}, false
+		}
+		return now.Add(time.Duration(secs) * time.Second), true
+	}
+	// HTTP-date, in any of the three formats the RFC requires parsers to accept.
+	for _, layout := range []string{http.TimeFormat, time.RFC850, time.ANSIC} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// onCooledExit reports whether an account is currently parked on an exit that
+// is inside a quota cooldown.
+func (e *Engine) onCooledExit(accountID string) bool {
+	if e.pool == nil {
+		return false
+	}
+	px := e.reg.ExitFor(accountID)
+	if px == nil {
+		return false
+	}
+	_, _, cool := e.pool.QuotaCooled(px.ID)
+	return cool
+}
+
+// coolExit records an upstream's refusal against the exit that carried it.
+//
+// The exit is identified by the binding at the time of the request rather than
+// by anything the caller passes, because the header describes the connection
+// that was just refused and nothing else. A 429 is not evidence that the
+// account, the key or the model is at fault — measured, the same account on the
+// same key succeeds from a different exit within the same second.
+func (e *Engine) coolExit(accountID string, h http.Header, class model.ErrorClass) (time.Time, bool) {
+	if class != model.ClassRateLimit || e.pool == nil {
+		return time.Time{}, false
+	}
+	until, ok := quotaDeadline(h, time.Now())
+	if !ok {
+		return time.Time{}, false
+	}
+	px := e.reg.ExitFor(accountID)
+	if px == nil {
+		return time.Time{}, false
+	}
+	if !e.pool.CoolForQuota(px.ID, until, string(class)) {
+		return time.Time{}, false
+	}
+	return until, true
+}
+
+// avoidCooledExit moves an account off an exit that is out of quota, before the
+// request is sent rather than after it is refused.
+//
+// This is what a ledger buys over pure reaction. Without it the pool learns the
+// same fact once per account per request: send, get refused, rotate. With it,
+// the refusal is paid for once and every later request starts on an exit that
+// can actually serve.
+//
+// It declines to move when there is nothing warmer to move to. Rotating into
+// another cooled exit would churn the binding, spend a rotation, and change
+// nothing about the outcome.
+func (e *Engine) avoidCooledExit(accountID string) {
+	if e.pool == nil {
+		return
+	}
+	px := e.reg.ExitFor(accountID)
+	if px == nil {
+		return
+	}
+	until, reason, cool := e.pool.QuotaCooled(px.ID)
+	if !cool {
+		return
+	}
+	next := e.pool.Pick(px.ID)
+	if next == nil {
+		return
+	}
+	if _, _, nextCooled := e.pool.QuotaCooled(next.ID); nextCooled {
+		// Everything available is out of quota too. Staying put is the honest
+		// move: the request is going to be refused wherever it goes, and the
+		// exit we are on at least knows when its allowance returns.
+		e.log.Warn("every candidate exit is out of quota; the request will most likely be refused",
+			"account", accountID, "exit", px.ID, "until", until.Format(time.RFC3339), "reason", reason)
+		return
+	}
+	e.log.Info("moving off an exit whose quota is spent, before sending",
+		"account", accountID, "from", px.ID, "to", next.ID,
+		"until", until.Format(time.RFC3339), "reason", reason)
+	e.reg.Rotate(accountID, px.ID)
+}
+
+// pickAccount chooses an account for a gateway request, preferring one that is
+// not parked on an exit whose quota is spent.
+//
+// The reverse ingress cannot do this — the caller named the account, so the
+// only lever is that account's exit. The gateway can, and it is the difference
+// between a pool that degrades and one that keeps working: with four usable
+// exits out of twenty-four, choosing by strategy alone means most requests land
+// on a spent exit and are refused before the rotation loop even starts.
+//
+// When every account in the pool is out of quota it returns the strategy's own
+// choice rather than nothing. The request is going to be refused wherever it
+// goes; failing it outright would be strictly worse, and the refusal is what
+// tells the caller when the pool comes back.
+func (e *Engine) pickAccount(pool, strategy string, exclude map[string]bool) *registry.Entry {
+	ent := e.reg.PickInPool(pool, strategy, exclude)
+	if ent == nil || e.pool == nil || !e.onCooledExit(ent.ID) {
+		return ent
+	}
+	skip := make(map[string]bool, len(exclude))
+	for k, v := range exclude {
+		skip[k] = v
+	}
+	warm := false
+	for _, m := range e.reg.PoolMembers(pool) {
+		if skip[m.ID] {
+			continue
+		}
+		if e.onCooledExit(m.ID) {
+			skip[m.ID] = true
+			continue
+		}
+		warm = true
+	}
+	if !warm {
+		return ent
+	}
+	if better := e.reg.PickInPool(pool, strategy, skip); better != nil {
+		return better
+	}
+	return ent
 }
 
 func truncate(b []byte, n int) string {
