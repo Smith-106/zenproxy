@@ -446,12 +446,37 @@ x-api-key: <key>                # Anthropic 系
 | new-api | `http://zenproxy:9000` —— **不带 `/v1`** | 实测（渠道 16） |
 | CLIProxyAPI `api-keys.openai-compatibility` | `http://zenproxy:9000/v1` —— **带 `/v1`** | 实测（本轮） |
 | sub2api（作为上游被别的系统导入时同此） | `http://sub2api:8080/v1` —— 带 | 实测（它是 CPA 里已有的 provider） |
-| LiteLLM `api_base` | 未实测，按它自己的文档填 | ✗ |
+| LiteLLM `api_base` | `http://zenproxy:9000/v1` —— **带 `/v1`** | 实测（本轮） |
 
 CPA 那条的依据是**它自己的十个 provider 全都是带 `/v1` 的**
 （`https://integrate.api.nvidia.com/v1`、`https://ollama.com/v1`、
 `http://windsurfapi:3003/v1`、`http://sub2api:8080/v1` …），
 不是推理出来的。new-api 那条相反，见 [NEW-API.md](NEW-API.md)。
+LiteLLM 那条是**跑起来测的**——它把 `api_base` 和 `/chat/completions` 直接拼起来，
+自己不补 `/v1`，见下面「LiteLLM」一节。
+
+#### 少写 `/v1` 为什么这么难查
+
+因为症状完全没有指向性。缺前缀的请求**不会**得到「找不到路径」，而是掉进
+反向入口（`/<账号ID>/<路径>`），第一个路径段被当成账号名：
+
+```
+POST /chat/completions  ->  404 {"message":"unknown or disabled account: chat"}
+```
+
+看到这句话的人会去查账号配置，而账号配置没有任何问题。同一个错误到三个系统里
+有三副面孔——LiteLLM 包成 `NotFoundError`、CPA 包成 `500 server_error`、
+new-api 表现为渠道测试一直失败——**它们没有一句会提到 base URL**。
+
+多写一层同样错（`/v1/v1/chat/completions`），所以两个方向都得实测。部署前先跑：
+
+```bash
+scripts/check-api-base.sh http://zenproxy:9000/v1 "$ZENPROXY_KEY"
+```
+
+它拿 `<base>/models` 探一次：对就是 200，错就报出实际错误**并给出两个候选写法
+各自的结果**，让你直接看出该用哪个。三种情形都实测过（带 `/v1` 200、
+不带 404 `unknown or disabled account: models`、多写一层 400）。
 
 ### CLIProxyAPI：`openai-compatibility` 的最小可用填法
 
@@ -518,7 +543,34 @@ scripts/verify-openai-compat-contract.sh http://127.0.0.1:9000 "$ZENPROXY_KEY"
 是不是规规矩矩的 4xx JSON 对象（聚合器靠这个决定冷却还是换 key）。
 脚本可以指向**任何** OpenAI 兼容网关，不是 zenproxy 专用。
 
-### LiteLLM：从 N 条 deployment 塌缩成 1 条
+### LiteLLM：跑起来测出来的三条
+
+在临时实例上真起了一个 LiteLLM 容器（`ghcr.io/berriai/litellm:main-latest`），
+配 `api_base` 的两个变体各一条 deployment，同一时刻对比：
+
+| 配置 | 结果 |
+| :--- | :--- |
+| `api_base: http://…/v1` 非流式 | **200**，`object=chat.completion`，`usage` 含 `prompt_tokens_details.cached_tokens`，`finish_reason=stop` |
+| `api_base: http://…/v1` 流式 | **200**，`text/event-stream`，142 个事件，以 `data: [DONE]` 收尾 |
+| `api_base: http://…/v1` + 名字映射 | **200**，zenproxy 侧 `model_list` 的 `upstream_model` 生效 |
+| `api_base: http://…`（不带 `/v1`） | **404 `unknown or disabled account: chat`**，稳定复现 |
+
+1. **`api_base` 必须带 `/v1`，LiteLLM 不会自己补。** 它把 `api_base` 和
+   `/chat/completions` 直接拼接，于是少前缀的请求掉进反向入口。
+   完整说明见上面「少写 `/v1` 为什么这么难查」。
+2. **LiteLLM 的 cooldown 确实是按 deployment 记账的**——这条是模板里早有的论断，
+   本轮实测到了。上游连续拒绝几次之后它直接回
+   `No deployments available for selected model … All deployments for selected
+   model are in cooldown`，期间**一个上游请求都不发**。
+   这正是「路线 A 更好」的理由：某个账号被限流时，LiteLLM 只能把整个 deployment
+   冷却掉，而 zenproxy 可以只换一个出口 IP 继续用。
+3. **名字映射要在两边都写。** LiteLLM 的 `model:` 决定发给 zenproxy 的名字，
+   zenproxy 的 `model_list` 再决定发给上游的真名。两层可以各自映射，也可以只有一层。
+
+`deploy/litellm.config.yaml` 已按实测结果改正：**路线 A 现在是可直接编辑使用的
+配置**（只改 `<模型名>` 一处），路线 B 保留为注释。
+
+### LiteLLM：为什么统一入口比 N 条 deployment 好
 
 用统一入口之前，LiteLLM 必须**一个账号一条 deployment**，因为
 「换账号」只能由 LiteLLM 的 cooldown/fallback 机制做：
@@ -540,7 +592,7 @@ model_list:
   - model_name: "big-pickle"
     litellm_params:
       model: "openai/big-pickle"
-      api_base: "http://zenproxy:9000"
+      api_base: "http://zenproxy:9000/v1"   # ★ 带 /v1
       api_key: "os.environ/ZENPROXY_KEY"
 ```
 

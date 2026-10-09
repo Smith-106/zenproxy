@@ -24,9 +24,13 @@ zenproxy 在同一个监听端口上同时干三件事，靠请求形态自动�
 
 | 模式 | 怎么用 | 谁在用 |
 | :--- | :--- | :--- |
-| **统一入口** | `http://zenproxy:9000/v1/chat/completions` + `Authorization: Bearer <key>` | 任何 OpenAI 兼容客户端；new-api / CLIProxyAPI / sub2api / LiteLLM 直接当上游导入 |
-| **反代** | `http://zenproxy:9000/<账号ID>/<上游路径>` | new-api 的渠道 Base URL、LiteLLM 的 `api_base` |
+| **统一入口** | `http://zenproxy:9000/v1/chat/completions` + `Authorization: Bearer <key>` | 任何 OpenAI 兼容客户端；LiteLLM / CLIProxyAPI / sub2api 直接当上游导入（`api_base` / `base-url` 写 `http://zenproxy:9000/v1`） |
+| **反代** | `http://zenproxy:9000/<账号ID>/v1/chat/completions`（账号名写进路径） | 需要把请求固定到某个账号时。new-api 的渠道 Base URL 填 `http://zenproxy:9000/<账号ID>`——它自己会补 `/v1/...` |
 | **正向代理** | `http://<账号ID>:x@zenproxy:9000` | new-api 的渠道「代理」字段、任何只支持代理设置的工具 |
+
+> ★ **填 base URL 前先跑 `scripts/check-api-base.sh`。** 少写或多写一个 `/v1`
+> 都不会得到「找不到路径」，而是掉进反向入口、报成「账号不存在」——
+> 三个聚合器有三副面孔，没有一句会提到 base URL。见 [GATEWAY.md](docs/GATEWAY.md)。
 
 **统一入口是唯一不需要调用方知道账号名的形状。** 它对外只有一个 URL 和一个 key，
 账号与出口都由 zenproxy 在内部决定——所以「上游按 IP 限额就自动换」这件事不用调用方配合：

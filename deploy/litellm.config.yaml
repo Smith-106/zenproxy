@@ -1,42 +1,90 @@
-# LiteLLM 配置模板 —— 与 deploy/docker-compose.yml 配套
-#
-# ★ 先看这个选择：zenproxy 现在有统一入口（docs/GATEWAY.md），
-#   「一个账号一条 deployment」不再是必需的。两种路线选一种，别混着写。
-#
-#   路线 A（推荐，zenproxy 统一入口）：1 条 deployment，账号与出口切换都在 zenproxy 内
-#   路线 B（本文档下半部分，保留）：N 条 deployment，切换由 LiteLLM 的 cooldown 做
+# LiteLLM 配置模板 —— 与 deploy/docker-compose.litellm.yml 配套
 #
 # =============================================================================
-# 路线 A：统一入口 —— 一条 deployment 就够
+# ★★ 最重要的一条：api_base 必须带 /v1
 # =============================================================================
 #
-#   zenproxy config.yaml 里打开 gateway.enabled，把 key 绑到池上：
+# 这条是本文件曾经写错、并在部署环境里实测纠正过的。
+#
+# LiteLLM 的 openai/ provider 把 api_base 和 /chat/completions **直接拼起来**，
+# 它自己不会补 /v1。所以：
+#
+#     api_base: "http://zenproxy:9000"      ✗  → 请求 /chat/completions
+#     api_base: "http://zenproxy:9000/v1"   ✓  → 请求 /v1/chat/completions
+#
+# 写错时的症状**完全没有指向性**——不是 404 "找不到路径"，而是：
+#
+#     litellm.NotFoundError: OpenAIException - unknown or disabled account: chat
+#
+# 因为 zenproxy 只把网关挂在 /v1/ 下，缺了前缀的请求掉进了**反向入口**
+# （/<账号ID>/<路径>），于是 chat 被当成了账号名。看到这句话的人第一反应是去查
+# 账号配置，而账号配置没有任何问题。
+#
+# 实测记录（临时实例，2026-10-09）：
+#   带 /v1  → 非流式 200（object=chat.completion，usage 含 cached_tokens）
+#             流式   200（text/event-stream，142 个事件，以 [DONE] 收尾）
+#             经 model_list 改名同样 200
+#   不带    → 稳定 404 unknown or disabled account: chat
+#
+# =============================================================================
+# 两种路线选一种，别混着写
+# =============================================================================
+#
+#   路线 A（推荐）：1 条 deployment，账号与出口切换都在 zenproxy 内部
+#   路线 B：N 条 deployment，切换由 LiteLLM 的 cooldown 做
+#
+# 为什么 A 更好：LiteLLM 的 cooldown 是**按 deployment 记账**的，所以「某个账号
+# 被限流」只能靠「把这个 deployment 整体冷却掉」来表达——冷却期间这个账号连试都
+# 不试，哪怕换一个出口 IP 本来就能用。zenproxy 能做后者，LiteLLM 不能。
+# 这一点实测到了：上游连续拒绝几次之后，LiteLLM 直接回
+#   "No deployments available for selected model ... All deployments for selected
+#    model are in cooldown"，期间不会再发一个上游请求。
+
+# =============================================================================
+# 路线 A（推荐）：统一入口 —— 一条 deployment 就够
+# =============================================================================
+#
+# 前提：zenproxy 的 config.yaml 里打开 gateway.enabled，把 key 绑到池上：
 #
 #     gateway:
 #       enabled: true
 #       keys: [{id: main, key: "${ZENPROXY_KEY}", pool: zen}]
 #
-#   然后 LiteLLM 只写一条。★ 注意 api_base 不带 /v1，也不带账号名：
-#
-#   model_list:
-#     - model_name: "<模型名>"
-#       litellm_params:
-#         model: "openai/<模型名>"
-#         api_base: "http://zenproxy:9000"
-#         api_key: "os.environ/ZENPROXY_KEY"
-#         timeout: 600
-#
-#   router_settings:
-#     # 换账号/换出口都发生在 zenproxy 内部了，这一层只剩「整路都不行」的兜底。
-#     # 设大没有意义：两层的重试次数是相乘的。
-#     num_retries: 1
-#     routing_strategy: simple-shuffle
-#     fallbacks: []
-#
-#   为什么更好：LiteLLM 的 cooldown 是**按 deployment 记账**的，所以「某个账号被限流」
-#   只能靠「把这个 deployment 整体冷却掉」来表达 —— 冷却期间这个账号连试都不试，
-#   哪怕换一个出口 IP 本来就能用。zenproxy 能做后者，LiteLLM 不能。
-#
+# 然后把下面 <模型名> 换成真实模型名即可直接用。★ 注意 api_base 带 /v1，
+# 且不带账号名。
+
+model_list:
+  - model_name: "<模型名>"                # 对外暴露的名字，客户端用它调用
+    litellm_params:
+      model: "openai/<模型名>"             # openai/ 前缀 = 走 OpenAI 兼容协议
+      api_base: "http://zenproxy:9000/v1"  # ★ 带 /v1；不带会 404 且报账号错误
+      api_key: "os.environ/ZENPROXY_KEY"   # 网关 key，不是上游账号的 key
+      timeout: 600                         # 与 zenproxy 的 upstream_timeout 对齐，
+                                           # 别设小了把长流掐断
+
+  # 名字需要翻译时（zenproxy 侧 model_list 写 upstream_model），两边都要写：
+  #
+  # - model_name: "fast"                   # LiteLLM 对外的名字
+  #   litellm_params:
+  #     model: "openai/gpt-oss-20b"        # 给 zenproxy 的名字（它再映到上游真名）
+  #     api_base: "http://zenproxy:9000/v1"
+  #     api_key: "os.environ/ZENPROXY_KEY"
+
+router_settings:
+  # 换账号/换出口都发生在 zenproxy 内部了，这一层只剩「整路都不行」的兜底。
+  # 设大没有意义：两层的重试次数是相乘的。
+  num_retries: 1
+  routing_strategy: simple-shuffle
+  fallbacks: []
+
+litellm_settings:
+  drop_params: true        # 丢掉上游不认的参数，避免 4xx 直接打穿
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  database_connection_pool_limit: 10
+
 # =============================================================================
 # 路线 B：一个账号一条 deployment（不使用统一入口时）
 # =============================================================================
@@ -59,59 +107,46 @@
 #
 # 注意路径：反代模式是 /<账号ID>/<上游路径>，**没有 /a/ 前缀**。
 # 老版本文档里写的 http://zenproxy:9000/a/zen-01 是错的，会 404。
+# ★ 反代模式同样带 /v1：api_base 是 "http://zenproxy:9000/zen-01/v1"，
+#   不是 "http://zenproxy:9000/zen-01"——理由与路线 A 完全相同。
 #
-# 占位说明：<模型名> / <账号ID> / <主模型组名> 都需要替换成真实值。
-
-model_list:
-  # ---- 账号 zen-01 ----
-  - model_name: "<模型名>"              # 对外暴露的模型名，客户端用这个名字调用
-    litellm_params:
-      model: "openai/<模型名>"          # openai/ 前缀 = 走 OpenAI 兼容协议
-      api_base: "http://zenproxy:9000/zen-01"
-      api_key: "REPLACED-BY-ZENPROXY"   # zenproxy 会按账号注入真实 key，这里放非空占位即可
-      rpm: 600                          # 每账号限速，防止单账号把配额打满
-      timeout: 600                      # 与 zenproxy 的 upstream_timeout 对齐，别设小了掐断长流
-
-  # ---- 账号 zen-02 ----
-  # 同一 model_name 的第二个 deployment：LiteLLM 会在两者之间做负载与容错。
-  - model_name: "<模型名>"
-    litellm_params:
-      model: "openai/<模型名>"
-      api_base: "http://zenproxy:9000/zen-02"
-      api_key: "REPLACED-BY-ZENPROXY"
-      rpm: 600
-      timeout: 600
-
-router_settings:
-  # simple-shuffle: 不用 Redis，单实例最省事。多副本 + 需要跨副本一致性时再换
-  # usage-based-routing（那需要 Redis）。
-  routing_strategy: simple-shuffle
-
-  # LiteLLM 这一层重试。与 zenproxy 的 policy.max_attempts 是两套独立机制：
-  #   zenproxy  在同一账号内换出口 IP 重试（解决「这个 IP 坏了」）
-  #   litellm   换账号 / 换 deployment 重试（解决「这个账号坏了」）
-  # 两者相乘是理论最大上游请求数，别都设大。2 × 3 = 6 已经够用。
-  num_retries: 3
-  allowed_fails: 3                     # 连续失败 3 次才判定 deployment 不可用（与 health.failure_threshold 对齐）
-  cooldown_time: 60                    # 冷却 60s（与 health.quarantine 同量级）
-
-  # 同一模型组内的 deployment 互为兜底，靠 simple-shuffle + cooldown 自动生效。
-  # 如果后续接了别的 provider（例如官方直连），在这里登记跨模型组回退：
-  #   fallbacks: [{"<主模型组名>": ["<备用模型组名>"]}]
-  # 目前只有同一个模型组，没有第二个组可回退，故留空。★ 注意：写一个不存在的模型组名，
-  # LiteLLM 启动就会报错，别照抄网上的示例。
-  fallbacks: []
-
-  # 重试时换一个 deployment，而不是原地重打同一个账号。
-  retry_after: 5
-
-litellm_settings:
-  drop_params: true                    # 丢掉上游不认的参数，避免 4xx 直接打穿
-  # num_retries 已在 router_settings 里设过，这里不重复。
-  request_timeout: 600                # 全局兜底超时，与 deployment 的 timeout 保持一致
-
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-  database_url: os.environ/DATABASE_URL
-  # 数据库连接池。单机够用，别设太大把 Postgres 连接数吃满。
-  database_connection_pool_limit: 10
+# model_list:
+#   # ---- 账号 zen-01 ----
+#   - model_name: "<模型名>"
+#     litellm_params:
+#       model: "openai/<模型名>"
+#       api_base: "http://zenproxy:9000/zen-01/v1"   # ★ 带 /v1
+#       api_key: "REPLACED-BY-ZENPROXY"   # zenproxy 会按账号注入真实 key，这里放非空占位即可
+#       rpm: 600                          # 每账号限速，防止单账号把配额打满
+#       timeout: 600
+#
+#   # ---- 账号 zen-02 ----
+#   # 同一 model_name 的第二个 deployment：LiteLLM 会在两者之间做负载与容错。
+#   - model_name: "<模型名>"
+#     litellm_params:
+#       model: "openai/<模型名>"
+#       api_base: "http://zenproxy:9000/zen-02/v1"
+#       api_key: "REPLACED-BY-ZENPROXY"
+#       rpm: 600
+#       timeout: 600
+#
+# router_settings:
+#   routing_strategy: simple-shuffle   # 不用 Redis，单实例最省事。多副本 + 跨副本
+#                                      # 一致性时再换 usage-based-routing（需要 Redis）
+#   num_retries: 3                     # 与 zenproxy 的 policy.max_attempts 是两套独立
+#                                      # 机制，两者相乘是理论最大上游请求数，别都设大
+#   allowed_fails: 3                   # 连续失败 3 次才判定 deployment 不可用
+#                                      # （与 zenproxy 的 health.failure_threshold 对齐）
+#   cooldown_time: 60                  # 冷却 60s（与 health.quarantine 同量级）
+#   retry_after: 5                     # 重试时换一个 deployment，而不是原地重打同一个账号
+#   fallbacks: []
+#   # ★ fallbacks 里写一个不存在的模型组名，LiteLLM 启动就会报错，别照抄网上的示例。
+#
+# litellm_settings:
+#   drop_params: true
+#   request_timeout: 600
+#
+# general_settings:
+#   master_key: os.environ/LITELLM_MASTER_KEY
+#   database_url: os.environ/DATABASE_URL
+#   database_connection_pool_limit: 10

@@ -7,6 +7,34 @@
 
 ### 新增
 
+- **LiteLLM 兼容改为实测，并纠正了模板里一处会让人查错方向的错误**。
+  `deploy/litellm.config.yaml` 原本写着「api_base 不带 `/v1`」，**这是错的**：
+  LiteLLM 的 `openai/` provider 把 `api_base` 和 `/chat/completions` **直接拼接**，
+  它自己不补 `/v1`。
+  - 错误写法的症状**没有指向性**：不是「找不到路径」，而是掉进 zenproxy 的反向入口、
+    第一个路径段被当成账号名，得到 `404 unknown or disabled account: chat`。
+    看到这句话的人会去查账号配置，而账号配置没有问题。
+  - 真起了一个 LiteLLM 容器把两个变体并排测：带 `/v1` 非流式 200
+    （`object=chat.completion`、`usage` 含 `cached_tokens`、`finish_reason=stop`）、
+    流式 200（`text/event-stream`、142 个事件、以 `[DONE]` 收尾）、
+    经 zenproxy `model_list` 改名后同样 200；不带 `/v1` 则稳定 404。
+  - `deploy/litellm.config.yaml` 的**路线 A 现在是可直接编辑使用的配置**（只改
+    `<模型名>` 一处），路线 B 保留为注释；反代模式的 `api_base` 也补上了 `/v1`。
+  - 顺带实测到模板里早有的论断：**LiteLLM 的 cooldown 确实按 deployment 记账**——
+    上游连续拒绝后它回 `No deployments available for selected model … All
+    deployments for selected model are in cooldown`，期间一个上游请求都不发。
+    这正是「统一入口优于 N 条 deployment」的理由。
+- **`scripts/check-api-base.sh`：填 base URL 之前的自检**。
+  少写或多写一个 `/v1` **在两个方向上都错得起**（LiteLLM/CPA 要带、new-api 不能带），
+  而症状在三套系统里有三副面孔且都不提 base URL。脚本拿 `<base>/models` 探一次，
+  错时报出实际错误**并列出两个候选写法各自的结果**。三种情形实测过：
+  带 `/v1` → 200；不带 → 404 `unknown or disabled account: models`；
+  多写一层 → 400。
+- **测试：`/v1` 前缀的边界被钉住了**。
+  新增 `TestAPathWithoutV1IsAnAccountLookupNotAGatewayRoute`——断言缺前缀的请求
+  **不会**被网关服务，且错误里必须提到账号。后者是有意的：那句「账号」正是调用方
+  唯一能据以认出误读的线索，也是防止有人日后「顺手修好」`/chat/completions`
+  （账号真有可能就叫 chat，那样两个入口就无法区分了）。
 - **下游导入实测：CLIProxyAPI 已打通，并纠正了文档里一处会让人白查半天的错误**。
   统一入口对外就是一个 OpenAI 兼容上游，但**「base URL 带不带 `/v1`」各家相反**。
   - 原文档写「统一不要带 `/v1`」，并把 new-api / CPA / sub2api 列成同一个填法。

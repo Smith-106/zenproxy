@@ -585,3 +585,41 @@ func TestReverseIngressStillWorksAlongsideTheGateway(t *testing.T) {
 		t.Fatalf("reverse ingress status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// A gateway-only deployment is reached at /v1/<path>. Omitting the prefix does
+// not produce a gateway 404: the request falls through to the reverse ingress,
+// which reads the first segment as an account id and answers
+// "unknown or disabled account: chat".
+//
+// That is exactly how an aggregator fails when its base URL is written without
+// /v1 - LiteLLM concatenates api_base with /chat/completions - and it fails with
+// a message about accounts, which sends the reader off to inspect account
+// configuration instead of the base URL. Pinned so the message cannot drift, and
+// so nobody "fixes" it by also serving /chat/completions: an account may
+// legitimately be named chat, and then neither ingress could be resolved.
+func TestAPathWithoutV1IsAnAccountLookupNotAGatewayRoute(t *testing.T) {
+	h := newGW(t, gwOptions{
+		gateway:  gwConfig(config.GatewayKey{ID: "main", Key: "secret-key", Pool: "pool"}),
+		accounts: zenAccounts("a"),
+		upstream: http.HandlerFunc(alwaysOK),
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, h.srv.URL+"/chat/completions",
+		strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer secret-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("a request without /v1 was served; the two ingresses are now ambiguous")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "account") {
+		t.Errorf("body = %s; want it to name the account, because that misreading "+
+			"is the only clue the caller gets", body)
+	}
+}
