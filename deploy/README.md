@@ -492,6 +492,83 @@ sudo docker exec postgres psql -U root -d new-api -c \
 
 ---
 
+## 7.3 再接一个上游（以 CLIProxyAPI 为例）
+
+`create-newapi-channel.sh` 是泛化的，任何 OpenAI 兼容上游都能用它接进来：
+
+```bash
+sudo CH_NAME="cli-proxy-api (CPA)" \
+     CH_BASE_URL="http://cli-proxy-api:8317" \
+     CH_MODELS_URL="http://127.0.0.1:8317/v1/models" \
+     CH_KEY_CMD="python3 scripts/extract-cpa-inbound-key.py /opt/cli-proxy-api/config.yaml" \
+     CH_REMARK="经 CLIProxyAPI 聚合的多家上游" \
+     scripts/create-newapi-channel.sh
+```
+
+### ★ Base URL 千万不要带 `/v1`
+
+这是最容易踩、而且报错最不像元凶的一个：
+
+| 你填的 base_url | new-api 实际请求的路径 | 结果 |
+| :--- | :--- | :--- |
+| `http://cli-proxy-api:8317/v1` | `/v1/v1/chat/completions` | 上游 **404** |
+| `http://cli-proxy-api:8317` | `/v1/chat/completions` | 正常 |
+
+new-api 会把 **`/v1/chat/completions` 整段**追加到 base_url 后面。多写一个 `/v1` 就变成
+`/v1/v1/...`，上游回 404，而 new-api 把这包装成
+`bad_response_status_code: openai_error` —— 看着像上游挂了，其实是路径重复。
+（对照：zenproxy 渠道写 `http://zenproxy:9000/zen-01`，也不带 `/v1`，就是这个原因。）
+
+想确认上游到底收到了什么，看上游自己的访问日志最直接：
+
+```bash
+sudo grep -aE '404|chat/completions' /opt/cli-proxy-api/logs/main.log | tail -5
+# 期望看到 POST "/v1/chat/completions"
+```
+
+### 其余三个必须知道的点
+
+1. **网络要自己打通。** new-api 默认只在 `new-api_default` 上，够不到别的容器。
+   `scripts/connect-newapi-to-llm-internal.sh` 会把它接进 `llm-internal`
+   （与 `cli-proxy-api` / `sub2api` / `windsurfapi` 同网），**并且写进 compose** ——
+   手工 `docker network connect` 只是给当前容器加了张网卡，容器一旦被 compose 重建就没了。
+2. **`CH_MODELS_URL` 往往要单独给。** 渠道的 base_url 是给 new-api **容器**用的地址
+   （容器名），而拉模型清单是脚本在**宿主机**上做的事，宿主机解析不了容器名。
+   所以 base_url 写 `http://cli-proxy-api:8317`，清单地址写 `http://127.0.0.1:8317/v1/models`。
+3. **建完等约 60 秒。** new-api 的渠道/路由是内存缓存，60 秒同步一次。
+   刚建好的渠道会一直返回 `503 No available channel for model ...`，
+   等一轮同步就好 —— **不要**因为看到 503 就以为渠道建错了。
+
+### 更新已有渠道时：PUT 不能带 `status`
+
+实测（new-api，2026-10-10）：同一份渠道 JSON，`POST` 带 `status: 1` 正常，
+而 `PUT` 只要 body 里有 `status` 就回：
+
+```json
+{"message":"Invalid parameters","success":false}
+```
+
+去掉 `status` 后其余字段照常更新，而且已发布的启用状态会被保留 —— 正是更新时想要的语义。
+脚本的更新分支因此会主动剥掉 `status`（见 `create-newapi-channel.sh` 里的注释）。
+
+> 顺带一个教训：拿真实线上渠道做「试探性 PUT」来定位字段时，
+> **校验通过的请求是会真的改数据的**。定位这类问题时要么用新建的临时渠道，
+> 要么先记下原值（`select models, weight, auto_ban from channels where id=N`），
+> 事后按记录恢复。
+
+### CPA 的入站 key 藏在哪
+
+`/opt/cli-proxy-api/config.yaml` 里有两个同名但完全不相关的字段：
+
+| 字段 | 是什么 |
+| :--- | :--- |
+| `access.api-keys` | **入站 key** —— 客户端访问 CPA 时带的，接渠道要的就是它 |
+| 顶层 `api-keys` | **provider 凭据**段（`codex` / `claude` / `xai` / `openai-compatibility`），里面是各家上游的 key |
+
+`scripts/extract-cpa-inbound-key.py` 只取前者，且只打印第一条。
+
+---
+
 ## 8. 已知限制（务必读）
 
 ### 8.1 `*-free` 模型是客户端身份门槛，换出口解决不了
