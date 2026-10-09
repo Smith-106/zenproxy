@@ -260,7 +260,9 @@ func TestPrepareScope(t *testing.T) {
 	ft := testFreeTier(t)
 	chat := []byte(`{"model":"big-pickle","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 
-	// Only the chat-completions shape has been characterised.
+	// /messages carries a third prompt template that has not been
+	// characterised, so it is left alone. /responses is enveloped — see
+	// freegate_responses_test.go.
 	if plan := ft.Prepare("/zen/v1/messages", chat, false); plan != nil {
 		t.Error("/messages must not be enveloped")
 	}

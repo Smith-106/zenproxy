@@ -338,7 +338,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if plan != nil && !plan.Stream {
 				// The client asked for a single response and the free tier only
 				// answers streams, so the stream is folded back here.
-				e.writeFolded(w, resp)
+				e.writeFolded(w, resp, plan.Surface)
 				cancel()
 				return
 			}
@@ -553,7 +553,11 @@ func (e *Engine) writeStream(w http.ResponseWriter, resp *http.Response) {
 // writeFolded reads a streamed reply to the end and answers the client that
 // asked for a single JSON object with one. The stream is folded rather than
 // replayed, so Content-Length and the transfer encoding are recomputed.
-func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response) {
+//
+// The fold is chosen by the surface that was enveloped: chat and Responses
+// stream different events, and the wrong folder does not fail loudly, it
+// returns an empty answer.
+func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, s surface) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, e.pol.MaxBodyBytes))
 	resp.Body.Close()
 	if err != nil {
@@ -561,6 +565,9 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response) {
 		return
 	}
 	out := foldStream(raw)
+	if s == surfaceResponses {
+		out = foldResponsesStream(raw)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
 	w.Header().Del("Transfer-Encoding")

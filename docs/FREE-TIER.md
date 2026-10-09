@@ -22,8 +22,13 @@ opencode 的 `*-free` 模型对"客户端身份"有门禁：
 | 1 | `User-Agent` 必须是官方客户端的 | 去掉即 403；`opencode/1.18.35 … runtime/bun/1.3.14` | 原样镜像 |
 | 2 | 需要 `x-opencode-client: cli` 与请求/会话 ID | ID **只校验形状**，不校验状态：`msg_`/`ses_` + 12 位小写 hex + 14 位 base62，共 26 字符。新铸的 ID 一样通过 | 每个请求现场铸 |
 | 3 | body 里必须有 `"stream": true` | 去掉即 403（头再完美也没用） | 强制置 true，见 §3.2 |
-| 4 | 首条 system 消息要逐字复述客户端自己的 prompt | 见 §1.1 | 从抓包生成常量 |
+| 4 | 要逐字复述客户端自己的 prompt | 见 §1.1 | 从抓包生成常量 |
 | 5 | 带 `tools` 时，工具名要命中客户端自己的工具集 | 命中 **5** 个通过，**4** 个失败；schema、顺序、多余的工具都不看 | 补名字，见 §3.3 |
+
+第 1–3 条**所有端点共用**；第 4、5 条每个端点各表述一遍，因为**字段名不一样**：
+chat 把 prompt 放成首条 system 消息，`/responses` 放在 `instructions`。
+**头和体是两件事，两个都要**：在 `/responses` 上，一个标识头完美、但没有 prompt 的请求
+仍然回 403 `FreeTierError`（实测，见 §五）。
 
 **确认不需要的**（都做过对照实验）：TLS/ClientHello 指纹（纯 Node `fetch` 就能过；
 连 `session_ticket` 扩展都复刻的 uTLS 复刻版一样 403，说明这条路本来就不通）、出口 IP、
@@ -105,25 +110,47 @@ below and answer the user's request normally, using only the tools the client ad
   走的是上游自己的 `Model is unavailable`，与门禁无关。
 - **已经带了官方 prompt 的请求不重复套壳**：真·官方客户端打过来时，它自己就满足门禁，
   再包一层只会白烧 token。
-- `/messages`（Anthropic 形状）**不套壳**：它的模板没特征化，宁可让它以 `tier_gate`
-  警告出现，也不做半个套壳。
+- **两个端点套壳：`/chat/completions` 和 `/responses`。** 两者的字段名不一样
+  （见 §五的端点维度表），所以是两个 builder，不是一套逻辑套两次参数。
+  `/responses` 的提示词进 `instructions`（**前缀**在调用方自己的 instructions 前面，
+  不是替换——调用方的提示词仍要到达模型）；`input` 是它的"用户内容"，原样不动。
+- `/messages`（Anthropic 形状）**不套壳**：它是第三个模板，没特征化，
+  宁可让它以 `tier_gate` 警告出现，也不做半个套壳。
 - 正向代理模式（CONNECT 隧道）、以及超过 `policy.max_body_bytes` 的大 body **无法改写**：
   前者是盲隧道，后者压根没在内存里完整落过地。
 
 ### 3.2 流式强制 + 折叠
 
 免费额度**只回 SSE**，而客户端可能要的是单个 JSON。实现是：上游一律收到
-`"stream": true`，如果调用方本来要的是非流式，响应路径把 SSE 折回一个
-`chat.completion` 对象（`internal/forward/ssefold.go`）：内容拼接、
-`tool_calls` 按 index 归并、usage 与 `finish_reason` 保留，连 `reasoning_content`
-这类额外文本字段也一起带回来。
+`"stream": true`，如果调用方本来要的是非流式，响应路径把 SSE 折回一个单对象
+（`internal/forward/ssefold.go`）。
+
+**折叠按端点分流，这是必须的，不是优化。** 两个端点的流事件完全不同：
+chat 是 `choices[].delta`，Responses 是 `response.output_text.delta` 和
+`response.completed`。用错折叠器**不会报错**——它会把对方的流读成"没有内容"，
+然后返回一个合法但为空的答案，而客户端会以为成功了。这比报错更糟。
+
+- chat：内容拼接、`tool_calls` 按 index 归并、usage 与 `finish_reason` 保留，
+  连 `reasoning_content` 这类额外文本字段也一起带回来。
+- Responses：`response.completed` 事件里的 `response` 字段**本身就是**非流式对象，
+  所以直接**原字节透传**；流提前断掉时才从 delta 兜底重建。
+  两条路都走不通就回错误信封，**绝不返回空答案**。
+
+同一个理由，chat 折叠器也只把"带 `choices` 的事件"当作读到了东西：
+任何别的形状的流（比如 Responses 的）都能被 JSON 解析，但匹配不到 `choices`，
+算作"读到了"就会折叠出一个空答案。
 
 `stream` 字段的语义按 OpenAI 默认：**不写 = 非流式**，所以不写就会被折叠成 JSON。
 
 ### 3.3 工具名补齐
 
 调用方自己的 tools **原样排在前面**（工具调用照常工作），后面按需补几个占位定义，
-把"命中数"抬到 6（阈值 5 + 1 余量）。占位定义的描述写着"Reserved by the proxied runtime.
+把"命中数"抬到 6（阈值 5 + 1 余量）。**补齐的条目形状跟着调用方走**：chat 是嵌套的
+`{"type":"function","function":{"name":…}}`，Responses 是扁平的 `{"type":"function","name":…}`，
+一个数组里不混两种形状。读取名字时两种都认——只认一种的话，
+Responses 的请求会被看成"没有工具"，从而被发下 title 模板，那是错的模板。
+
+占位定义的描述写着"Reserved by the proxied runtime.
 Do not call this tool."，实测模型会去调用调用方自己的那个工具：
 
 ```
@@ -206,69 +233,110 @@ sudo docker restart zenproxy
 会给出 `content: ""` + `finish_reason: "length"`——那是模型把预算烧在 `reasoning_content` 上了，
 **不是不通**，加 `MT=1500` 再测一次即可确认。
 
-2026-10-10 实测可用的 7 个：`big-pickle`、`ling-3.1-flash-free`、`mimo-v2.6-flash-free`、
-`space-bunny-free`、`step-5-preview-free`、`longcat-2.5-preview-free`、`nemotron-3.5-lightning-free`。
+2026-10-10 实测可用的 7 个（**均在 `/chat/completions` 上验活**）：`big-pickle`、
+`ling-3.1-flash-free`、`mimo-v2.6-flash-free`、`space-bunny-free`、`step-5-preview-free`、
+`longcat-2.5-preview-free`、`nemotron-3.5-lightning-free`。
+
+另外 2 个**只在 `/responses` 上可用**，用上面那套流程（它只打 `/chat/completions`）**验不出来**，
+会被误判成不可用：`muse-spark-1.3-contributor-free`、`muse-spark-1.2-contributor-free`。
+验活脚本的端点是个参数，见 §五。
 
 ### 失败类型速查（2026-10-10 实测定稿）
 
-模型列表里有名字 ≠ 能用。除了 403 `FreeTierError`（套壳没生效），还有四种失败，
+模型列表里有名字 ≠ 能用。除了 403 `FreeTierError`（套壳没生效），还有五种失败，
 **没有一种是换出口或换账号能解决的**：
 
 | 响应 | 含义 | 能救吗 |
 | :--- | :--- | :--- |
 | 410 `ModelDeprecated` | 上游已下线，名字还留在列表里 | 不能。已在名单里的要删掉（实测 `exo-free`） |
-| 400 `ModelProtocolUnsupported` | 名字在售，但**不接公开端点**。`chat/completions` 和 `messages` 都不支持 | 不能，见下 |
-| 403 `RegionError` | 出口 IP 所在国家被限制 | 见下 |
-| 402 `server_error` | 是**付费模型**，账号没额度 | 充值才行（实测 `jev-1.13`、`muse-spark-1.2/1.3`） |
+| 400 `ModelProtocolUnsupported` | **这个端点**不接这个模型 —— 必须换端点再试，见下 | 见下 |
+| 429 `FreeUsageLimitError` | **通了**：过了地区、门禁和协议，只是免费额度用完了 | 等 `retry-after` 秒后重试 |
+| 403 `RegionError` | 出口 IP 所在国家被限制 | 换个国家的出口 |
+| 402 `server_error` | 是**付费模型**，账号没额度 | 充值才行（实测 `jev-1.13`、`muse-spark-1.2/1.3` 的付费同名款） |
 
-**「不接公开端点」是实测结论，不是推测。** 判断过程如下（`muse-spark-1.3-contributor-free`）：
+**★ 端点是一个维度，不是背景板。** 这是本项目最容易踩、也踩得最久的一个坑。
 
-- 该模型**已经在 `learned` 里**，说明 403 门禁触发过、套壳也确实生效了，但仍然
-  `ModelProtocolUnsupported` —— 所以门禁不是瓶颈。
-- 给 `/v1/messages` 手动补上完整官方标识（UA + 四个 `x-opencode-*` 头 + 注入那 1608 字节
-  提示词）后，它从 403 `FreeTierError` 变成 400 `ModelProtocolUnsupported` ——
-  **证明官方标识是有效的**（门禁确实被它打开了），瓶颈换成了协议。
-- 于是做了「出口国家 × 协议」矩阵：**16 个住宅出口**（US/NL/FR/RU/GB/HK/JP/NO/RO/IN）、
-  `chat/completions` 与 `messages` 两条路，**全部 400 `ModelProtocolUnsupported`**。
+上游有三个请求形状：`/chat/completions`、`/responses`、`/messages`。**同一个模型在其中一个
+上能用、在另一个上回 `ModelProtocolUnsupported`，是完全正常的**，那只是说"这条路不对"，
+不是"这个模型拿不到"。早期版本的本文档只看前两个形状里的 `/chat/completions` 和 `/messages`，
+就下了"不接公开端点"的结论——**那个结论是错的**，代价是两个本来能用的模型被当成废品：
 
-**注意 `RegionError` 会误导人。** 同一个模型：
+| 模型 | `/chat/completions` | `/responses` |
+| :--- | :--- | :--- |
+| `muse-spark-1.3-contributor-free` | 400 `ModelProtocolUnsupported` | **429 `FreeUsageLimitError`**（额度用尽，不是拒绝） |
+| `muse-spark-1.2-contributor-free` | 400 `ModelProtocolUnsupported` | **429 `FreeUsageLimitError`** |
+| `jev-1.13-free` | 400 `ModelProtocolUnsupported` | 400 `ModelProtocolUnsupported`（**16 个出口一致，确实没有**） |
+
+所以判断一个模型"能不能用"的正确顺序是：
+
+1. 先按下面的方法分开"地区 / 门禁 / 协议"三道门；
+2. 拿到 `ModelProtocolUnsupported` 时，**换另一个端点重试，而不是下结论**；
+3. 只有**所有端点**都回 `ModelProtocolUnsupported` 才叫拿不到。
+
+`zenproxy` 给 `/chat/completions` 和 `/responses` 都套壳（`/messages` 的提示词模板尚未特征化）。
+**没有套壳的端点永远只会回 403 `FreeTierError`**，那个 403 是"你没被套壳"，
+和模型能力无关——把它当成"模型不行"是另一个常见的误判。
+
+**注意 `RegionError` 也会误导人。** 它排在门禁**前面**（`/responses` 上尤其明显：
+裸请求也回 `RegionError` 而不是 `FreeTierError`），所以同一个模型：
 
 | 从哪出去 | 结果 |
 | :--- | :--- |
-| 住宅出口（Resin） | 过了地区检查 → 卡在 `ModelProtocolUnsupported` |
-| **服务器自己的机房 IP** | 卡在 `RegionError` |
+| 住宅出口（Resin，国家不受限） | 过了地区检查 → 卡在协议或额度 |
+| 受限国家 / 机房 IP（如 RU、HK） | 卡在 `RegionError` |
 
-所以「把账号指向一个没有出口 IP 的 slot」= 流量走服务器直连 = 看到 `RegionError`，
-而换成有住宅 IP 的出口又变成 `ModelProtocolUnsupported` —— 看起来像"换出口有用"，
-其实是**卡点从地区检查挪到了协议检查**，两条路都到不了终点。
-（这就是本项目里 `zen-01` 绑的 `resin-slot-01` 当时没有出口 IP 时的表现。）
+看起来像"换出口有用"，其实只是卡点在**地区 → 协议**之间挪了一格。
 
 ### 怎么自己把这几道门分开
 
 上游的检查是按顺序来的，看**响应类型的变化**就能判断自己走到了哪一步。
-办法是手动重放一个带完整官方标识的请求（标识的 5 个条件见 `internal/forward/freegate.go` 顶部注释）：
+
+最省事的办法是用仓库里的脚本，它会把三道门一次性分开：
 
 ```bash
-# 那两段提示词不用手抄，从源码导出来（临时加个 test 打印即可，或直接读 gateprompts.go）
-# 然后带上 UA + x-opencode-* 四个头 + stream:true + 提示词，打任意路径：
-curl -sS -X POST http://127.0.0.1:9000/<账号>/v1/messages \
+node scripts/gen-gate-bodies.mjs /tmp/zp muse-spark-1.3-contributor-free
+# 上传后，在部署机上按出口逐槽位跑，一次看两条协议：
+sudo scripts/probe-slots-by-protocol.sh /tmp/zp/chat.json /tmp/zp/resp.json
+```
+
+手工重放也可以（标识的 5 个条件见 `internal/forward/freegate.go` 顶部注释）：
+
+```bash
+# 那两段提示词不用手抄，从 gateprompts.go 导出即可
+curl -sS -X POST http://127.0.0.1:9000/<账号>/v1/responses \
   -H 'Content-Type: application/json' \
   -H 'User-Agent: opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14' \
   -H 'x-opencode-client: cli' -H 'x-opencode-project: global' \
   -H 'x-opencode-request: msg_0123456789abABCDEFGHIJKLMN' \
   -H 'x-opencode-session: ses_0123456789abABCDEFGHIJKLMN' \
   -H 'x-opencode-session-id: ses_0123456789abABCDEFGHIJKLMN' \
-  -d '{"model":"…","max_tokens":120,"stream":true,"system":"<提示词>","messages":[{"role":"user","content":"Say OK"}]}'
+  -d '{"model":"…","stream":true,"instructions":"<提示词>","input":"Say OK"}'
 ```
+
+**`/responses` 的套壳形状和 chat 不一样**，这是它当初没被套壳的原因，也是手工重放时最容易搞错的地方：
+
+| | `/chat/completions` | `/responses` |
+| :--- | :--- | :--- |
+| 提示词放哪 | 开头插一条 system message | `instructions` 字段 |
+| 用户内容 | `messages` | `input` |
+| 工具名形状 | 嵌套：`{"type":"function","function":{"name":…}}` | 扁平：`{"type":"function","name":…}` |
+
+**只带标识头、不带提示词是不够的**：在 `/responses` 上，一个标识完美但没有提示词的请求
+仍然回 403 `FreeTierError`。头和体是**两个都要**。
 
 响应类型的含义：
 
 | 你看到 | 说明 |
 | :--- | :--- |
-| `FreeTierError` | 官方标识没生效（缺头、缺提示词、或没 `stream:true`）——**问题在你自己这边** |
-| `RegionError` | 标识生效了，卡在出口 IP 的国家 |
-| `ModelProtocolUnsupported` | 标识和国家都过了，这个模型就是不接这个端点 |
-| `402` | 标识和国家都过了，模型是付费的 |
+| `FreeTierError` | 官方标识没生效（缺头、缺提示词、提示词与工具配对错了、或没 `stream:true`）——**问题在你自己这边** |
+| `RegionError` | 标识生效了（或被地区检查抢先），卡在出口 IP 的国家 |
+| `ModelProtocolUnsupported` | 地区和国家都过了，**这个端点**不接这个模型 → 换端点 |
+| `429 FreeUsageLimitError` | **全过了**，等 `retry-after` 秒 |
+| `402` | 地区和国家都过了，模型是付费的 |
+
+`retry-after` 指向的是一个**固定的重置时刻**，不是"每请求一个窗口"：
+连续测同一模型，读数会随时间单调递减（实测 9148 → 8437），
+所以它可以直接用来算什么时候回来。
 
 ---
 
@@ -303,7 +371,9 @@ curl -sS -X POST http://127.0.0.1:9000/<账号>/v1/messages \
   > 这个名字就会**永久留在 `learned` 里**，而它其实一次也跑不通。
   > 往 `free_tier.models` 里搬之前，先按 §五 逐个验活。
   > （2026-10-10 实测：`learned` 里 3 个条目——`jev-1.13-free`、
-  > `muse-spark-1.2/1.3-contributor-free`——**全部不可用**，一个都没通过验活。）
+  > `muse-spark-1.2/1.3-contributor-free`。其中 `jev-1.13-free` 确实不可用；
+  > **`muse-spark-1.2/1.3` 是可用的**，只是只在 `/responses` 上可用，
+  > 而当时 `/responses` 没被套壳，所以它们看起来像废品。见 §五 的端点维度表。）
 
 - 日志：
   - `upstream refused this client for a free model; retrying inside the OpenCode envelope`

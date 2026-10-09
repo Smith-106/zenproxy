@@ -107,3 +107,94 @@ func TestFoldStreamToleratesNoise(t *testing.T) {
 		t.Errorf("a stream without a finish reason must still be reported as complete: %s", out)
 	}
 }
+
+// The Responses stream ends with `response.completed`, and that event's
+// `response` field already is the non-streaming object. Passing it through
+// byte-exact is both simpler and more faithful than reassembling the deltas.
+func TestFoldResponsesStreamPassesThroughTheCompletedResponse(t *testing.T) {
+	response := `{"id":"resp_1","object":"response","created_at":1791559409,"model":"muse-spark-1.3-contributor-free","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Paris","annotations":[]}]}],"usage":{"input_tokens":3,"output_tokens":2}}`
+	stream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_1"}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"Par"}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"is"}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":` + response + "}\n\n"
+
+	out := foldResponsesStream([]byte(stream))
+	if string(out) != response {
+		t.Errorf("the completed response must pass through byte-exact:\ngot  %s\nwant %s", out, response)
+	}
+}
+
+// A stream that ends before `response.completed` still has the text in its
+// deltas, so the answer is rebuilt rather than thrown away.
+func TestFoldResponsesStreamRebuildsFromDeltas(t *testing.T) {
+	stream := "event: response.created\n" +
+		`data: {"type":"response.created","response":{"id":"resp_2","model":"big-pickle","created_at":1791559409}}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"Paris"}` + "\n\n" +
+		"event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":" is the capital."}` + "\n\n"
+
+	var got struct {
+		ID     string `json:"id"`
+		Object string `json:"object"`
+		Model  string `json:"model"`
+		Status string `json:"status"`
+		Output []struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(foldResponsesStream([]byte(stream)), &got); err != nil {
+		t.Fatalf("folded output is not JSON: %v", err)
+	}
+	if got.Object != "response" || got.Status != "completed" {
+		t.Errorf("object = %q status = %q", got.Object, got.Status)
+	}
+	if got.ID != "resp_2" || got.Model != "big-pickle" {
+		t.Errorf("id = %q model = %q", got.ID, got.Model)
+	}
+	if len(got.Output) != 1 || len(got.Output[0].Content) != 1 {
+		t.Fatalf("output shape = %+v", got.Output)
+	}
+	tc := got.Output[0].Content[0]
+	if tc.Type != "output_text" || tc.Text != "Paris is the capital." {
+		t.Errorf("content = %+v", tc)
+	}
+}
+
+// The one outcome worse than an error is a valid-looking empty answer: the
+// client believes it succeeded. A Responses stream that carried no answer must
+// never fold into one.
+func TestFoldResponsesStreamNeverInventsAnEmptySuccess(t *testing.T) {
+	for _, tc := range []struct{ name, stream string }{
+		{"nothing at all", ""},
+		{"a keep-alive only", ": ping\n\n"},
+		{"html from a gateway", "<html>502</html>"},
+		{"events but no answer", "event: response.created\n" + `data: {"type":"response.created","response":{"id":"r"}}` + "\n\n"},
+		{"the response failed", "event: response.failed\n" + `data: {"type":"response.failed","response":{"id":"r"}}` + "\n\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := foldResponsesStream([]byte(tc.stream))
+			if !strings.Contains(string(out), "zenproxy_error") {
+				t.Errorf("folded to %s, want an error envelope", out)
+			}
+		})
+	}
+}
+
+// The chat folder must not be able to read a Responses stream at all — that is
+// the whole reason the surface is threaded through to the fold.
+func TestChatFolderCannotReadAResponsesStream(t *testing.T) {
+	stream := "event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"id":"r","output":[]}}` + "\n\n"
+	out := foldStream([]byte(stream))
+	if !strings.Contains(string(out), "zenproxy_error") {
+		t.Errorf("the chat folder read a Responses stream as %s", out)
+	}
+}

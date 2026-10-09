@@ -15,18 +15,28 @@
 //  3. `"stream": true` in the body. A non-streaming request is refused even
 //     with a perfect header set, which is why the engine asks the upstream for
 //     a stream and folds the answer back for a non-streaming client.
-//  4. The first system message must repeat a long verbatim chunk (>= ~1200
-//     characters) of one of the client's own system prompts, and which prompt
-//     is accepted depends on the shape of the request: the title-generation
-//     prompt only passes with no `tools` at all, the agent prompt only passes
-//     when `tools` is present. gateprompts.go holds both chunks, generated from
-//     a capture rather than retyped.
+//  4. The prompt must repeat a long verbatim chunk (>= ~1200 characters) of one
+//     of the client's own system prompts, and which prompt is accepted depends
+//     on the shape of the request: the title-generation prompt only passes with
+//     no `tools` at all, the agent prompt only passes when `tools` is present.
+//     gateprompts.go holds both chunks, generated from a capture rather than
+//     retyped. Where the chunk goes depends on the surface: chat carries it as
+//     a leading system message, Responses carries it in `instructions`.
 //  5. A request that carries `tools` must advertise at least five of the names
 //     the client's own tool set uses (bash, edit, glob, …). Schemas, order and
 //     extra client tools are all ignored — four names are refused, five pass —
 //     so a request whose tools are entirely its own is refused even when
-//     everything else is right. ensureToolNames tops the list up rather than
+//     everything else is right. topUpToolNames tops the list up rather than
 //     dropping the caller's tools, which keeps tool calling working.
+//
+// Conditions 1-3 are shared by every surface; 4 and 5 are re-stated per surface
+// because the field names differ. Two surfaces are enveloped, and they are not
+// interchangeable: a model can answer on one and refuse the other with
+// ModelProtocolUnsupported, which is exactly how both muse-spark variants
+// behave. Enveloping only chat therefore makes working models look broken —
+// the client sees a FreeTierError that is really "you were not enveloped".
+// /messages remains un-enveloped: it carries a third prompt template that has
+// not been characterised.
 //
 // Two things that do NOT matter, and are therefore deliberately not
 // implemented: the TLS fingerprint (a plain Go or Node fetch passes once 1-4
@@ -109,11 +119,17 @@ type GatePlan struct {
 	Body []byte
 	// Model is the model id the body asked for.
 	Model string
-	// Template names the prompt chunk that was injected: "title" or "build".
+	// Template names the prompt chunk that was injected: "title" or "build",
+	// prefixed with the surface when it was not chat.
 	Template string
 	// Stream reports whether the *client* asked for a stream. When it did not,
 	// the upstream stream has to be folded back into a single JSON response.
 	Stream bool
+	// Surface is which request shape was enveloped. It is carried out of here
+	// because the fold that undoes a forced stream is surface-specific: the two
+	// surfaces stream entirely different events, and folding Responses events
+	// with the chat folder would hand the client a valid-looking empty answer.
+	Surface surface
 }
 
 // Prepare returns the envelope for a request, or nil when it should travel
@@ -125,12 +141,47 @@ func (f *FreeTier) Prepare(path string, body []byte, forced bool) *GatePlan {
 	if !f.Enabled() || len(body) == 0 {
 		return nil
 	}
-	if !isChatCompletions(path) {
+	switch surfaceFor(path) {
+	case surfaceChat:
+		return f.prepareChat(body, forced)
+	case surfaceResponses:
+		return f.prepareResponses(body, forced)
+	default:
 		// The Anthropic /messages shape carries a different prompt template and
 		// has not been characterised, so it is left alone rather than half
 		// enveloped. A refusal there is reported as a tier gate and nothing more.
 		return nil
 	}
+}
+
+// surface is which request shape an envelope knows how to build.
+//
+// The two surfaces are not interchangeable, and that is not a detail: a model
+// can answer on one and refuse the other with ModelProtocolUnsupported. Both
+// muse-spark variants are exactly that case — /chat/completions refuses them
+// while /responses serves them — so a proxy that envelops only chat makes two
+// working models look unobtainable.
+type surface int
+
+const (
+	surfaceNone surface = iota
+	surfaceChat
+	surfaceResponses
+)
+
+func surfaceFor(path string) surface {
+	p := strings.TrimSuffix(path, "/")
+	switch {
+	case strings.HasSuffix(p, "/chat/completions"):
+		return surfaceChat
+	case strings.HasSuffix(p, "/responses"):
+		return surfaceResponses
+	default:
+		return surfaceNone
+	}
+}
+
+func (f *FreeTier) prepareChat(body []byte, forced bool) *GatePlan {
 	var req chatEnvelope
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil
@@ -167,7 +218,7 @@ func (f *FreeTier) Prepare(path string, body []byte, forced bool) *GatePlan {
 	}
 	obj["messages"] = rawMsgs
 	if len(tools) > 0 {
-		rawTools, err := topUpToolNames(tools)
+		rawTools, err := topUpToolNames(tools, detectToolShape(tools))
 		if err != nil {
 			return nil
 		}
@@ -183,6 +234,119 @@ func (f *FreeTier) Prepare(path string, body []byte, forced bool) *GatePlan {
 		Model:    req.Model,
 		Template: template,
 		Stream:   req.streams(),
+		Surface:  surfaceChat,
+	}
+}
+
+// responsesEnvelope is the part of a Responses body the envelope cares about.
+//
+// The field names differ from chat in a way that matters: there is no system
+// message, `instructions` carries what chat carries as one, and `input`
+// replaces `messages`. Everything is raw JSON for the same reason as chat — the
+// rewrite must not drop fields it does not model.
+type responsesEnvelope struct {
+	Model        string          `json:"model"`
+	Instructions json.RawMessage `json:"instructions"`
+	Input        json.RawMessage `json:"input"`
+	Tools        json.RawMessage `json:"tools"`
+	Stream       json.RawMessage `json:"stream"`
+}
+
+func (r responsesEnvelope) toolList() []json.RawMessage {
+	raw := bytes.TrimSpace(r.Tools)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte("[]")) {
+		return nil
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		return nil
+	}
+	return tools
+}
+
+func (r responsesEnvelope) streams() bool {
+	return string(bytes.TrimSpace(r.Stream)) == "true"
+}
+
+// instructionsText returns the caller's own instructions when they are a plain
+// string. A non-string value contributes nothing, because the gate reads text
+// and prepending to a shape we cannot read would cost the envelope.
+func (r responsesEnvelope) instructionsText() string {
+	raw := bytes.TrimSpace(r.Instructions)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// prepareResponses is the envelope for the native Responses surface.
+//
+// Measured, not assumed: the gate guards this surface too, and with tools
+// present it wants the agent prompt in `instructions`; without tools it wants
+// the title prompt. Headers alone are not enough here — a request carrying a
+// perfect identity and no chunk is still refused with FreeTierError.
+func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
+	var req responsesEnvelope
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil
+	}
+	if !forced && !f.wants(req.Model) {
+		return nil
+	}
+	// Without input there is no request to carry, and `input` is where this
+	// surface keeps the caller's content.
+	if len(bytes.TrimSpace(req.Input)) == 0 || bytes.Equal(bytes.TrimSpace(req.Input), []byte("null")) {
+		return nil
+	}
+	if alreadyEnveloped(body) {
+		return nil
+	}
+
+	tools := req.toolList()
+	chunk, template := gateTitleChunk, "title"
+	if len(tools) > 0 {
+		chunk, template = gateBuildChunk, "build"
+	}
+
+	// The chunk goes in front of whatever instructions the caller sent. Prefix
+	// rather than replace: the caller's instructions still reach the model, and
+	// the gate sees the verbatim chunk first, which is the part it matches.
+	instructions := chunk + gateOverride
+	if own := req.instructionsText(); own != "" {
+		instructions += "\n\n" + own
+	}
+	rawInstr, err := json.Marshal(instructions)
+	if err != nil {
+		return nil
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil
+	}
+	obj["instructions"] = rawInstr
+	if len(tools) > 0 {
+		rawTools, err := topUpToolNames(tools, detectToolShape(tools))
+		if err != nil {
+			return nil
+		}
+		obj["tools"] = rawTools
+	}
+	obj["stream"] = json.RawMessage("true")
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return &GatePlan{
+		Body:     out,
+		Model:    req.Model,
+		Template: "responses-" + template,
+		Stream:   req.streams(),
+		Surface:  surfaceResponses,
 	}
 }
 
@@ -268,20 +432,73 @@ func (c chatEnvelope) streams() bool {
 	return string(bytes.TrimSpace(c.Stream)) == "true"
 }
 
-// topUpToolNames guarantees the request advertises enough of the names the
-// upstream looks for. The caller's own tools stay in front, so its tool calling
-// keeps working; the extra entries exist only to satisfy the count, and their
-// descriptions say so.
-func topUpToolNames(tools []json.RawMessage) ([]byte, error) {
-	present := make(map[string]bool, len(tools))
+// toolNameOf reads a tool's function name, whichever shape names it.
+//
+// The two surfaces disagree here and neither is wrong: chat nests the name
+// under `function`, Responses puts it at the top level. The gate only counts
+// names, so counting has to read both — otherwise a Responses request would
+// look tool-less and be handed the title prompt, which is the wrong one for a
+// request that does carry tools.
+func toolNameOf(raw json.RawMessage) string {
+	var t struct {
+		Name     string `json:"name"`
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return ""
+	}
+	if t.Function.Name != "" {
+		return t.Function.Name
+	}
+	return t.Name
+}
+
+// toolShape is how a tools array names its functions, so that a top-up entry
+// matches the entries already there. The upstream ignores the schemas, but it
+// does parse the array, and a mixed-shape array is not something a real client
+// would ever send.
+type toolShape int
+
+const (
+	toolShapeNested toolShape = iota // chat:      {"type":"function","function":{"name":…}}
+	toolShapeFlat                    // responses: {"type":"function","name":…}
+)
+
+func detectToolShape(tools []json.RawMessage) toolShape {
 	for _, raw := range tools {
-		var t struct {
+		var nested struct {
 			Function struct {
 				Name string `json:"name"`
 			} `json:"function"`
 		}
-		if err := json.Unmarshal(raw, &t); err == nil && t.Function.Name != "" {
-			present[t.Function.Name] = true
+		if json.Unmarshal(raw, &nested) == nil && nested.Function.Name != "" {
+			return toolShapeNested
+		}
+		var flat struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(raw, &flat) == nil && flat.Name != "" {
+			return toolShapeFlat
+		}
+	}
+	return toolShapeNested
+}
+
+// ToolTopUpStub is the wording of the tools this proxy adds purely to satisfy
+// the count. It says so, because the model reads these descriptions.
+const toolTopUpStub = "Reserved by the proxied runtime. Do not call this tool."
+
+// topUpToolNames guarantees the request advertises enough of the names the
+// upstream looks for. The caller's own tools stay in front, so its tool calling
+// keeps working; the extra entries exist only to satisfy the count, and their
+// descriptions say so.
+func topUpToolNames(tools []json.RawMessage, shape toolShape) ([]byte, error) {
+	present := make(map[string]bool, len(tools))
+	for _, raw := range tools {
+		if name := toolNameOf(raw); name != "" {
+			present[name] = true
 		}
 	}
 	hits := 0
@@ -290,35 +507,36 @@ func topUpToolNames(tools []json.RawMessage) ([]byte, error) {
 			hits++
 		}
 	}
-	if hits < gateMinToolNames {
-		for _, name := range gateToolNames {
-			if hits >= gateMinToolNames {
-				break
-			}
-			if present[name] {
-				continue
-			}
-			stub, err := json.Marshal(map[string]any{
+	if hits >= gateMinToolNames {
+		return json.Marshal(tools)
+	}
+	for _, name := range gateToolNames {
+		if hits >= gateMinToolNames {
+			break
+		}
+		if present[name] {
+			continue
+		}
+		params := map[string]any{"type": "object", "properties": map[string]any{}}
+		entry := map[string]any{"type": "function", "description": toolTopUpStub, "parameters": params, "name": name}
+		if shape == toolShapeNested {
+			entry = map[string]any{
 				"type": "function",
 				"function": map[string]any{
 					"name":        name,
-					"description": "Reserved by the proxied runtime. Do not call this tool.",
-					"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+					"description": toolTopUpStub,
+					"parameters":  params,
 				},
-			})
-			if err != nil {
-				return nil, err
 			}
-			tools = append(tools, stub)
-			hits++
 		}
+		stub, err := json.Marshal(entry)
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, stub)
+		hits++
 	}
 	return json.Marshal(tools)
-}
-
-func isChatCompletions(path string) bool {
-	p := strings.TrimSuffix(path, "/")
-	return strings.HasSuffix(p, "/chat/completions")
 }
 
 func alreadyEnveloped(body []byte) bool {

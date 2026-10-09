@@ -44,6 +44,40 @@
 
 ### 修复
 
+- **`/responses` 端点现在也套免费额度信封——此前两个本来能用的模型被误判成废品。**
+  免费额度门禁对请求形状是**逐端点**的，而此前只对 `/chat/completions` 套壳。
+  后果不只是"少一个端点"：`muse-spark-1.3-contributor-free` 与
+  `muse-spark-1.2-contributor-free` **只在 `/responses` 上接单**，在
+  `/chat/completions` 上恒回 400 `ModelProtocolUnsupported`。于是走 chat 的自适应客户端
+  先撞 400，回退去试 `/responses`，又因为没被套壳而拿到 **403 `FreeTierError`** ——
+  一个读起来像"鉴权有问题"的响应，实际含义是"你没被套壳"。两个可用模型就这样变成了
+  `learned` 里的两条永久废品记录。修复后实测（同一出口，`slot-07` NL）：
+  `/responses` 从 403 `FreeTierError` 变成 **429 `FreeUsageLimitError`** ——
+  过了门禁也过了协议检查，撞到的只是免费额度用尽，`retry-after` 指向约 2.3 小时后的重置。
+  - `/responses` 的字段名和 chat 不同，所以是两个 builder：提示词进 `instructions`
+    （**前缀**在调用方自己的 instructions 前面，不是替换），用户内容在 `input`。
+  - **工具名补齐跟着调用方的形状走**：chat 用嵌套的
+    `{"type":"function","function":{"name":…}}`，`/responses` 用扁平的
+    `{"type":"function","name":…}`。读名字时两种都认——只认一种的话，
+    `/responses` 的请求会被看成"没有工具"，从而拿到 title 模板，那是错的模板。
+  - **只补头是不够的**：实测在 `/responses` 上，标识头完美但没有 prompt 的请求仍然 403。
+- **SSE 折叠按端点分流，且 chat 折叠器不再把外来流读成空答案。**
+  两个端点的流事件完全不同：chat 是 `choices[].delta`，`/responses` 是
+  `response.output_text.delta` 和 `response.completed`。用错折叠器**不会报错**——
+  它返回一个合法但为空的答案，客户端会以为成功了。这比报错更糟，所以：
+  - `/responses` 的折叠优先**原字节透传** `response.completed` 里的 `response` 字段
+    （那个字段本身就是非流式对象），流提前断掉时才从 delta 兜底重建；
+  - 两条路都走不通时回错误信封，**绝不返回空答案**；
+  - chat 折叠器也只把"带 `choices` 的事件"算作读到了东西——任何别的形状的流都能被
+    JSON 解析，但匹配不到 `choices`，此前会被折叠成一个空答案。
+- **免费模型验活脚本只看 `/chat/completions`，会漏掉只在别的端点上接单的模型。**
+  新增 `scripts/probe-slots-by-protocol.sh`（逐出口 × 逐协议矩阵，一次把
+  「地区被限 / 门禁没过 / 端点不对 / 额度用尽」四件事分开）与
+  `scripts/probe-responses-slots.sh`（只看单一端点，带 `retry-after` 读数）、
+  `scripts/gen-gate-bodies.mjs`（生成套壳后的请求体）、
+  `scripts/gen-prodlike-responses-body.mjs`（生成**和线上产出一致**的
+  `/responses` 请求体，用来验证上游是否真的认这个形状）。
+
 - **`deploy/install.sh` 的就绪闸门三处误报**，全部会让「一条命令装完」装不动：
   - 占位符检查扫了整个 `.env`，连注释一起算——顶部那句说明文字和注释掉的 LiteLLM 变量里
     都有 `REPLACE_WITH`，于是**四个真实变量全填好也永远报「还有占位值没替换」**。现在只看真正的赋值行。
