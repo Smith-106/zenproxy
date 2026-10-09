@@ -77,6 +77,27 @@ proxies:
   #   - "socks5h://user:pass@1.2.3.4:1080"
   #   - "http://user:pass@5.6.7.8:8080"
 
+# 免费额度（free tier）：opencode 的 *-free 模型只认官方客户端，别的调用方一律
+# 403 FreeTierError。开启后 zenproxy 会把这些模型的请求补齐成官方客户端的样子
+# （UA、x-opencode-* 身份头、stream、系统提示与工具名配对），免费额度于是能直接用。
+#
+# ★ 这一段在本部署路线里尤其重要：new-api 的渠道请求不是官方客户端发的，
+#   不开这个，那些 *-free 模型一律 403；判据与代价见 docs/FREE-TIER.md。
+#
+# 只影响下面列出的模型（以及第一次被拒后就地学会的模型）：付费模型一个字节都不改。
+free_tier:
+  enabled: true                # 关掉 = 完全不改写任何请求
+  models:                      # 预期在免费额度里的模型。列表外的模型第一次被上游拒绝后
+    - big-pickle               # 会由 zenproxy 自动学会（控制台 status 的 free_tier.learned），
+    - deepseek-v4-flash-free   # 之后直接套壳，不再浪费一次 403。
+    - laguna-s-2.1-free
+    - ling-3.0-flash-free
+    - mimo-v2.5-free
+    - nemotron-3-ultra-free
+    - north-mini-code-free
+  user_agent: ""               # 留空 = 镜像抓包得到的官方客户端 UA；
+                               # 上游开始拒绝这个版本时才需要覆盖
+
 health:
   interval: 60s
   timeout: 8s

@@ -1,0 +1,31 @@
+# 构建上下文只该有源码。多传进去的每一个字节都要被 docker 打包、发到 builder，
+# 而 build/ 里的二进制（约 10 MB/个）和 .git 历史对镜像毫无贡献。
+#
+# 注意 deploy/Dockerfile 需要 go.mod / go.sum / cmd / internal，别把源码排除掉。
+
+# 构建产物
+build/
+*.exe
+*.exe~
+
+# 版本控制与 CI
+.git/
+.github/
+
+# 本机配置与运行期状态：含密钥与绑定关系
+data/
+*.state.json
+config.local.yaml
+config.yaml
+.env
+.env.*
+
+# 编辑器与临时文件
+.idea/
+.vscode/
+*.swp
+*~
+nul
+
+# 文档与部署产物不参与编译，但保留 deploy/Dockerfile 本身的可用性
+docs/

@@ -204,20 +204,31 @@ func TestDefaultEnablesTheFreeTierEnvelope(t *testing.T) {
 }
 
 func TestExampleConfigStaysLoadable(t *testing.T) {
-	// The example file is documentation that is easy to break while editing.
+	// The example files are documentation that is easy to break while editing,
+	// and deploy/config.example.yaml is the one that actually becomes a running
+	// config on a server — a key that only exists in the README is not a key.
 	t.Setenv("ZEN_ADMIN_TOKEN", "example-token")
 	t.Setenv("ZEN_KEY_01", "sk-example-not-a-real-key")
+	t.Setenv("ZEN_KEY_02", "sk-example-not-a-real-key-2")
 	t.Setenv("RESIN_PROXY_TOKEN", "example-proxy-token")
 
-	cfg, err := Load(filepath.Join("..", "..", "config.example.yaml"))
-	if err != nil {
-		t.Fatalf("config.example.yaml no longer loads: %v", err)
-	}
-	if !cfg.FreeTier.Enabled || len(cfg.FreeTier.Models) == 0 {
-		t.Error("the example must document a working free_tier block")
-	}
-	if cfg.Health.Timeout <= 0 {
-		t.Error("health.timeout lost its example value")
+	for _, path := range []string{
+		filepath.Join("..", "..", "config.example.yaml"),
+		filepath.Join("..", "..", "deploy", "config.example.yaml"),
+	} {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("%s no longer loads: %v", path, err)
+		}
+		if !cfg.FreeTier.Enabled || len(cfg.FreeTier.Models) == 0 {
+			t.Errorf("%s must document a working free_tier block", path)
+		}
+		if cfg.Health.Timeout <= 0 {
+			t.Errorf("%s lost its health.timeout example value", path)
+		}
+		if cfg.StateFile == "" || cfg.Server.Listen == "" {
+			t.Errorf("%s lost state_file or server.listen", path)
+		}
 	}
 }
 
