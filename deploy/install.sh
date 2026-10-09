@@ -179,22 +179,28 @@ done
 # ---------------------------------------------------------------------------
 READY=1
 
-if grep -q 'REPLACE_WITH' "${DST_ENV}"; then
+# 只看「真正的赋值行」：注释里出现 REPLACE_WITH 是很正常的（本文件顶部就在
+# 讲这个占位约定，LiteLLM 那几行也是注释掉的），拿整文件 grep 会让默认路线
+# 永远卡在「还有占位值没替换」，即使四个真实变量都填好了。
+assignments() { grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$1" || true; }
+
+if assignments "${DST_ENV}" | grep -q 'REPLACE_WITH'; then
     READY=0
     warn "${DST_ENV} 里还有 REPLACE_WITH_* 占位值没替换："
-    grep -n 'REPLACE_WITH' "${DST_ENV}" | sed 's/^/    /' >&2
+    assignments "${DST_ENV}" | grep -n 'REPLACE_WITH' | sed 's/^/    /' >&2
 fi
 
-if grep -q 'REPLACE_WITH' "${DST_CFG}"; then
+if assignments "${DST_CFG}" | grep -q 'REPLACE_WITH'; then
     READY=0
-    warn "${DST_CFG} 里还有 REPLACE_WITH 占位值没替换"
+    warn "${DST_CFG} 里有 REPLACE_WITH 占位值没替换"
 fi
 
 # 从 config.yaml 里抽出所有 ${VAR}，逐个确认 .env 里有非空值。
 # 这一步与 zenproxy 自己的启动校验同源：配置里引用了没定义的变量，它一定起不来。
+# ★ 必须排除注释行：本文件顶部就用 ${VAR} 讲通用规则，那是文档不是配置。
 env_value() {
     local key="$1" line
-    line="$(grep -E "^[[:space:]]*${key}=" "${DST_ENV}" | tail -n 1 || true)"
+    line="$(assignments "${DST_ENV}" | grep -E "^[[:space:]]*${key}=" | tail -n 1 || true)"
     [[ -n "${line}" ]] || return 0
     printf '%s' "${line#*=}"
 }
@@ -207,11 +213,13 @@ while read -r var; do
         MISSING="${MISSING} ${var}"
     fi
     # 变量还必须被 compose 的 environment 段注入，否则它进不了容器。
-    pat="$(printf '${%s}' "${var}")"
-    if ! grep -qF -- "${pat}" "${DST_COMPOSE}"; then
+    # ★ needle 只取 "${VAR" 前缀：compose 写的是 "${VAR:?未设置…}"，
+    #   找完整的 "${VAR}" 永远匹配不上，会让每个变量都被误报成「没注入」。
+    if ! grep -qF -- "\${${var}" "${DST_COMPOSE}"; then
         NOT_INJECTED="${NOT_INJECTED} ${var}"
     fi
-done < <(grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' "${DST_CFG}" | tr -d '${}' | sort -u || true)
+done < <(grep -vE '^[[:space:]]*#' "${DST_CFG}" \
+         | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*\}' | tr -d '${}' | sort -u || true)
 
 if [[ -n "${MISSING}" ]]; then
     READY=0

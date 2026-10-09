@@ -168,7 +168,57 @@ Do not call this tool."，实测模型会去调用调用方自己的那个工具
 
 ---
 
-## 五、代价与边界
+## 五、清单会漂移（比判据漂移更常见）
+
+`free_tier.models` 是**上游的模型名**，而上游会直接把它们换掉。实测（2026-10-10，`oracle-ubuntu`）：
+
+| 配置里写的（旧） | 上游当时的状态 |
+| :--- | :--- |
+| `ling-3.0-flash-free` | 已不存在，改叫 `ling-3.1-flash-free` |
+| `mimo-v2.5-free` | 已不存在，改叫 `mimo-v2.6-flash-free` |
+| `deepseek-v4-flash-free`、`laguna-s-2.1-free`、`nemotron-3-ultra-free`、`north-mini-code-free` | 全部不存在 |
+
+失效的表现**不是** 403，而是：
+
+```
+400 server_error: Upstream request failed: Model is unavailable.
+```
+
+这一点很关键：**门禁学习机制救不了它**。`free_tier.learned` 只在收到 403 `FreeTierError`
+时才记录（`forward.go` 里按响应体里的 `FreeTierError` 字样判定），模型名不存在得到的是 400，
+学不到任何东西，于是会一直失败。**清单过期必须人工换。**
+
+### 换清单的三步
+
+```bash
+# 1) 拿上游当前公布的免费模型（经 zenproxy 自己查，走的是同一条出口）
+curl -s http://127.0.0.1:9000/<账号ID>/v1/models | grep -o '"[^"]*-free"'
+
+# 2) 逐个验活 —— 只看 HTTP 200 的（403 = 套壳没生效；400 = 名字过期）
+sudo scripts/probe-free-models.sh <模型名…>
+
+# 3) 写回部署配置并重启
+sudo scripts/refresh-free-models.py <确认可用的模型名…>
+sudo docker restart zenproxy
+```
+
+`scripts/probe-free-models.sh` 认 `MT=` 环境变量给 token 预算（默认 64）。推理模型在小预算下
+会给出 `content: ""` + `finish_reason: "length"`——那是模型把预算烧在 `reasoning_content` 上了，
+**不是不通**，加 `MT=1500` 再测一次即可确认。
+
+2026-10-10 实测可用的 7 个：`big-pickle`、`ling-3.1-flash-free`、`mimo-v2.6-flash-free`、
+`space-bunny-free`、`step-5-preview-free`、`longcat-2.5-preview-free`、`nemotron-3.5-lightning-free`。
+
+另外两种"看起来像门禁、其实是别的问题"的失败，别误判成清单过期：
+
+| 响应 | 含义 |
+| :--- | :--- |
+| 403 `RegionError: This model is not available in your country` | **按出口所在国家**限制。换出口有机会成功，换账号没用（实测 `muse-spark-*-contributor-free`） |
+| 400 `ModelProtocolUnsupported: Model does not support this protocol` | 该模型不接 `chat/completions` 这个协议，得换别的调用形状（实测 `jev-1.13-free`） |
+
+---
+
+## 六、代价与边界
 
 - **每个套壳请求多花约 1600 字符的 prompt**（≈500–800 token，视模型分词而定），
   外加补齐工具名时的几百字节。这是过门禁的固定成本，无法省掉——少一个字就可能 403。
@@ -183,7 +233,7 @@ Do not call this tool."，实测模型会去调用调用方自己的那个工具
 
 ---
 
-## 六、运维看哪里
+## 七、运维看哪里
 
 - `GET /admin/api/status` 里的 `free_tier`：
 

@@ -54,14 +54,22 @@ free_tier:
   enabled: true                # 关掉 = 完全不改写任何请求
   models:                      # 预期在免费额度里的模型。列表外的模型第一次被上游拒绝后
     - big-pickle               # 会由 zenproxy 自动学会（控制台 status 的 free_tier.learned），
-    - deepseek-v4-flash-free   # 之后直接套壳，不再浪费一次 403。
-    - laguna-s-2.1-free
-    - ling-3.0-flash-free
-    - mimo-v2.5-free
-    - nemotron-3-ultra-free
-    - north-mini-code-free
+    - ling-3.1-flash-free      # 之后直接套壳，不再浪费一次 403。
+    - mimo-v2.6-flash-free
+    - space-bunny-free
+    - step-5-preview-free
+    - longcat-2.5-preview-free
+    - nemotron-3.5-lightning-free
   user_agent: ""               # 留空 = 镜像抓包得到的官方客户端 UA；
                                # 上游开始拒绝这个版本时才需要覆盖
+#
+# ★ 这个清单会过期。上游会直接换掉模型名（实测 ling-3.0-flash-free → ling-3.1-flash-free、
+#   mimo-v2.5-free → mimo-v2.6-flash-free），旧名字不再返回 403 FreeTierError，而是
+#   400 "Model is unavailable" —— 那种失败学不到东西，只会一直失败。
+#   拿当前清单：
+#     curl -s http://<zenproxy>:<port>/<账号ID>/v1/models | grep -o '"[^"]*-free"'
+#   再逐个验活： scripts/probe-free-models.sh <模型名…>
+#   换清单：    scripts/refresh-free-models.py <模型名…>   （部署机上 sudo 跑）
 
 health:
   interval: 60s

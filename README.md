@@ -237,10 +237,26 @@ internal/forward/   转发核心：反代模式、正向代理模式、失败分
 internal/admin/     管理 API + 内嵌控制台
 deploy/             容器部署产物
 docs/               接入与运维文档
-scripts/            本机冒烟用的假上游 / 假出口
+scripts/            本机冒烟用的假上游 / 假出口 + 部署与运维自检脚本
 .github/workflows/  CI：gofmt / vet / test -race / 静态构建
 CHANGELOG.md        版本变更记录
 ```
 
 发布版本与二进制见 [Releases](https://github.com/Smith-106/zenproxy/releases)，
 版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+
+### 部署后自检与运维脚本
+
+`scripts/` 里这几个是给**已经跑起来的部署**用的，都在部署机上 `sudo` 执行：
+
+| 脚本 | 干什么 |
+| :--- | :--- |
+| `zenproxy-status.sh` | 一次性打印容器状态、概览、出口池、账号绑定（不回显任何密钥） |
+| `probe-free-models.sh` | 逐个实测免费模型是否真的可用；`MT=` 给 token 预算（推理模型要给大） |
+| `refresh-free-models.py` | 把 `free_tier.models` 换成实测可用的清单（逐行改写，不动注释排版） |
+| `probe-resin-slots.sh` | 实测 Resin 粘性身份的真实可用率，用来决定池子该开多大 |
+| `set-resin-slots.py` | 把 `proxies.resin.accounts` 扩到 N 个 slot |
+| `e2e-free-tier.sh` | 端到端：经代理调一次免费模型，验证套壳与 SSE 折叠 |
+
+免费模型名会随上游漂移，**清单过期必须人工换**（表现是 400 `Model is unavailable`，
+不是 403），换法见 [`docs/FREE-TIER.md` 第五节](docs/FREE-TIER.md)。
