@@ -18,18 +18,32 @@ new-api 和 LiteLLM 都能给一个渠道配一个代理，但都是一次性静
 
 ---
 
-## 两个入口，一个端口
+## 三个入口，一个端口
 
-zenproxy 在同一个监听端口上同时干两件事，靠请求形态自动区分：
+zenproxy 在同一个监听端口上同时干三件事，靠请求形态自动区分：
 
 | 模式 | 怎么用 | 谁在用 |
 | :--- | :--- | :--- |
+| **统一入口** | `http://zenproxy:9000/v1/chat/completions` + `Authorization: Bearer <key>` | 任何 OpenAI 兼容客户端；new-api / CLIProxyAPI / sub2api / LiteLLM 直接当上游导入 |
 | **反代** | `http://zenproxy:9000/<账号ID>/<上游路径>` | new-api 的渠道 Base URL、LiteLLM 的 `api_base` |
 | **正向代理** | `http://<账号ID>:x@zenproxy:9000` | new-api 的渠道「代理」字段、任何只支持代理设置的工具 |
 
+**统一入口是唯一不需要调用方知道账号名的形状。** 它对外只有一个 URL 和一个 key，
+账号与出口都由 zenproxy 在内部决定——所以「上游按 IP 限额就自动换」这件事不用调用方配合：
+
+```
+POST /v1/chat/completions  (Bearer <key>)
+      │  key → 池
+      ▼
+   账号 A ─ 出口 X → 429   ← 上游说这个 IP 花完了
+   账号 A ─ 出口 Y → 429   ← 还是它，那问题更像在账号上
+   账号 B ─ 出口 Z → 200  ✓ 调用方只看到这个
+```
+
 反代模式下 zenproxy 终止 TLS，能看到上游的明文响应，因此能**按状态码**决定换出口；
 正向代理模式下 https 目标是一条 `CONNECT` 隧道，它只能按"连不上"换出口。
-**要"报错自动换 IP"就用反代模式。** 详见 [`docs/NEW-API.md`](docs/NEW-API.md)。
+**要"报错自动换 IP"就用统一入口或反代模式。** 详见 [`docs/GATEWAY.md`](docs/GATEWAY.md)
+与 [`docs/NEW-API.md`](docs/NEW-API.md)。
 
 ---
 
@@ -233,7 +247,8 @@ internal/config/    配置加载、${VAR} 展开、启动期校验
 internal/model/     共享类型：账号、上游、错误分类、统计
 internal/proxypool/ 出口池：HTTP/SOCKS5 拨号、探活、隔离与退避
 internal/registry/  账号注册表：绑定、轮换、统计、状态持久化
-internal/forward/   转发核心：反代模式、正向代理模式、失败分类与轮换重试；免费额度套壳（freegate.go）与 SSE 折叠（ssefold.go）
+internal/gateway/   统一入口的凭据与模型映射解析（key→池、model_name→上游名）
+internal/forward/   转发核心：统一入口、反代模式、正向代理模式、失败分类与轮换重试；免费额度套壳（freegate.go）与 SSE 折叠（ssefold.go）
 internal/admin/     管理 API + 内嵌控制台
 deploy/             容器部署产物
 docs/               接入与运维文档

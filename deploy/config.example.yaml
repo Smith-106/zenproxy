@@ -172,3 +172,54 @@ accounts:
 #   ★ 默认路线（容器）→ "/data/state.json"，对应 docker-compose.yml 里 ./data:/data
 #     这个约定是死的：只改了 config.yaml 而不改挂载，状态会写进容器可写层，重启即丢。
 state_file: "/data/state.json"
+
+# =============================================================================
+# 统一入口：一个 URL，一个 Key（可选，默认关闭）
+# =============================================================================
+#
+#   POST http://zenproxy:9000/v1/chat/completions
+#   Authorization: Bearer <gateway key>
+#
+# 和上面的 /<账号ID>/ 并存，**不是替换**：已存在的渠道一行都不用改。
+# 完整设计说明见 docs/GATEWAY.md。三块都不写 = 行为与以前完全一致。
+#
+# 什么时候该开：
+#   · 你有多条 LiteLLM deployment / 多个 new-api 渠道，只是为了「换账号」而存在的
+#     → 这里一条就够（下方 litellm 段落有对照）
+#   · 你想让「上游按 IP 限额就自动换」这件事由 zenproxy 统一负责
+# 什么时候不该开：只有一个账号、且调用方本来就只连一个地址 —— 那它就是层多余的跳。
+#
+# ⚠ compose 需要多注入一个环境变量 ZENPROXY_KEY，否则启动会报
+#   "gateway.keys[0] key still contains an unexpanded ${ZENPROXY_KEY}"。
+#   这是刻意的：字面量 ${...} 会被当成真凭据发出去，那种错要几小时后才以 401 暴露。
+gateway:
+  enabled: false                 # ← 配好 key、注入好环境变量之后再改成 true
+  keys:
+    # 一个 key 绑一个池。★ 绑的是池不是账号，所以调用方永远不需要知道账号叫什么，
+    # 池子自己决定用哪个账号、哪个出口。
+    - id: main
+      key: "${ZENPROXY_KEY}"
+      pool: zen                  # 池名。下面的账号没写 pool:，于是回落到 upstream 名 "zen"
+      name: "统一入口"            # 面板上显示的名字，可省
+
+pools:
+  # ★ 池成员是从 accounts 推导的，这里不声明成员，只叠加策略。
+  #   池名对不上任何账号时启动即报错，并列出所有已知池名。
+  - id: zen
+    strategy: round-robin        # round-robin（默认）| weighted（按 account.weight 概率抽）
+    # 上游拒绝一个请求时切什么。这是「按 IP 限额就自动换」的开关：
+    #   rotate-exit     换出口 IP，不换账号 —— 上游按 IP 限额时用这个
+    #   rotate-account  换账号，不换 IP   —— 上游按 key 限额时用这个
+    #   rotate-both     先换 IP，同一账号烧掉 2 个出口后再换账号（默认；分不清是哪个时用）
+    # 三者都是**被动触发**（收到 429/5xx/传输错误之后才切），不是预算式提前切换。
+    on_rate_limit: rotate-both
+
+model_list:
+  # LiteLLM 同名概念，连 "*" 通配都一样。
+  # ★ 整段不写 = 所有模型名原样透传（最省事的用法，通常就用这个）。
+  #   写了但不写 "*"，未列出的模型才会 404。
+  # 这里留空表示透传；要限制可服务的模型名时再打开下面两行。
+  # - model_name: "big-pickle"
+  #   pool: zen
+  # - model_name: "*"                  # 通配放最后；精确匹配永远优先
+  #   pool: zen

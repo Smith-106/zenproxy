@@ -8,10 +8,12 @@
 package registry
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,6 +43,7 @@ type View struct {
 	ID          string            `json:"id"`
 	Name        string            `json:"name,omitempty"`
 	Upstream    string            `json:"upstream"`
+	Pool        string            `json:"pool"`
 	Enabled     bool              `json:"enabled"`
 	Proxy       string            `json:"proxy"`
 	Weight      int               `json:"weight"`
@@ -59,6 +62,11 @@ type Registry struct {
 	bindings map[string]string
 	order    []string
 
+	// rrCursor is the round-robin position per pool. It lives here rather than
+	// in the caller so that two concurrent requests cannot both be told "you
+	// are next", which is what a caller-side cursor would do.
+	rrCursor map[string]int
+
 	path string
 	pool *proxypool.Pool
 	log  *slog.Logger
@@ -69,6 +77,7 @@ func New(path string, pool *proxypool.Pool, log *slog.Logger) *Registry {
 	return &Registry{
 		accounts: make(map[string]*Entry),
 		bindings: make(map[string]string),
+		rrCursor: make(map[string]int),
 		path:     path,
 		pool:     pool,
 		log:      log,
@@ -219,6 +228,7 @@ func (r *Registry) viewLocked(e *Entry) View {
 		ID:        e.ID,
 		Name:      e.Name,
 		Upstream:  e.Upstream,
+		Pool:      e.EffectivePool(),
 		Enabled:   e.Enabled,
 		Proxy:     e.Proxy,
 		Weight:    e.Weight,
@@ -294,6 +304,104 @@ func (r *Registry) Delete(id string) bool {
 		}
 	}
 	return true
+}
+
+// PoolMembers lists the enabled accounts of one pool, sorted by id. This is the
+// candidate set a gateway request chooses from, and it is deliberately a
+// snapshot: the caller then asks for one member per attempt.
+func (r *Registry) PoolMembers(poolID string) []*Entry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*Entry
+	for _, id := range r.order {
+		e, ok := r.accounts[id]
+		if !ok || !e.Enabled {
+			continue
+		}
+		if e.EffectivePool() == poolID {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Pools lists every pool the accounts produce, sorted.
+func (r *Registry) Pools() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range r.accounts {
+		id := e.EffectivePool()
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PickInPool chooses the next account to try.
+//
+// exclude names the accounts already attempted for this request, so a retry
+// never lands back on the account that just failed. strategy is either
+// "weighted" (probability proportional to weight, and therefore the right
+// choice when one account is bigger than another) or anything else, which
+// means round-robin over the remaining members.
+//
+// A nil result means the pool has nothing left worth trying.
+func (r *Registry) PickInPool(poolID, strategy string, exclude map[string]bool) *Entry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var members []*Entry
+	for _, id := range r.order {
+		e, ok := r.accounts[id]
+		if !ok || !e.Enabled || e.EffectivePool() != poolID || exclude[id] {
+			continue
+		}
+		members = append(members, e)
+	}
+	if len(members) == 0 {
+		return nil
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ID < members[j].ID })
+
+	if strategy == "weighted" {
+		return pickWeighted(members)
+	}
+	cur := r.rrCursor[poolID]
+	pick := members[cur%len(members)]
+	r.rrCursor[poolID] = (cur + 1) % len(members)
+	return pick
+}
+
+// pickWeighted draws one member with probability proportional to its weight.
+// An account with no weight counts as 1, so a config that never sets weights
+// degrades to a uniform draw rather than to "only the first account".
+func pickWeighted(members []*Entry) *Entry {
+	total := 0
+	for _, e := range members {
+		total += e.Weight
+	}
+	if total <= 0 {
+		return members[0]
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(total)))
+	if err != nil {
+		return members[0]
+	}
+	at := int(n.Int64())
+	for _, e := range members {
+		at -= e.Weight
+		if at < 0 {
+			return e
+		}
+	}
+	return members[len(members)-1]
 }
 
 // ExitFor resolves the exit an account should use right now.

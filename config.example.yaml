@@ -106,6 +106,9 @@ policy:
 
 # 种子账号：只在状态文件里没有该 ID 时写入，之后以控制台/接口的改动为准。
 # 密钥一律走环境变量。
+#
+# pool 可省略：省了就等于用 upstream 名当池名（下面 zen-01/zen-02 都在 "zen" 池里）。
+# 要跨 upstream 组池（比如 free 系和 go 系互为备份）才需要显式写同一个 pool 名。
 accounts:
   - id: zen-01
     name: "示例账号"
@@ -113,5 +116,54 @@ accounts:
     api_key: "${ZEN_KEY_01}"
     proxy: auto                # auto（从池子挑并保持亲和）| direct | 具体出口 ID
     enabled: true
+  # - id: zen-02
+  #   upstream: zen
+  #   api_key: "${ZEN_KEY_02}"
+  #   proxy: auto
+  #   enabled: true
+
+# ---------------------------------------------------------------------------
+# 统一入口：一个 URL，一个 Key。详见 docs/GATEWAY.md
+#
+#   POST http://<host>:<port>/v1/chat/completions
+#   Authorization: Bearer <gateway key>
+#
+# 和上面的 /<账号ID>/ 反向模式**并存**，不是替换：老渠道一行都不用改。
+# 不写这一段，行为与以前完全一致。
+# ---------------------------------------------------------------------------
+gateway:
+  enabled: false               # 打开前先设好 keys，否则等于开了一个开放中继
+  # require_key 默认就是 true（只要配了 key）。要匿名访问得显式写 false。
+  keys:
+    - id: main
+      key: "${ZENPROXY_KEY}"   # ★ 必须走环境变量：写成常量会被校验拦下
+      pool: zen
+      name: "控制台"            # 面板上显示的名字，可省
+
+pools:
+  # 池成员是从账号推导的，这里不声明成员，只叠加策略。
+  # 池不存在于 accounts 里时校验会报错并列出所有已知池名。
+  - id: zen
+    strategy: round-robin      # round-robin（默认）| weighted（按账号 weight 概率抽）
+    # 上游拒绝一个请求时切什么。★ 这是「按 IP 限额就自动换」的开关：
+    #   rotate-exit     换出口 IP，不换账号 —— 上游按 IP 限额时用这个
+    #   rotate-account  换账号，不换 IP   —— 上游按 key 限额时用这个
+    #   rotate-both     先换 IP，烧掉 2 个出口后再换账号（默认，分不清时用）
+    # 都是被动触发（收到 429/5xx/传输错误之后），不是预算式提前切换。
+    on_rate_limit: rotate-both
+
+model_list:
+  # LiteLLM 同名概念，连 "*" 通配都一样。
+  # ★ 整段不写 = 所有模型名原样透传（最省事的用法）。
+  #   写了但不写 "*"，未列出的模型才会 404。
+  # upstream_model 省略 = 与 model_name 相同（名字不需要翻译时就这么写）。
+  - model_name: "big-pickle"
+    pool: zen
+  # 名字需要翻译时：
+  # - model_name: "gpt-oss-20b"        # 调用方用这个
+  #   upstream_model: "openai/gpt-oss-20b"   # 上游认这个
+  #   pool: zen
+  # - model_name: "*"                  # 通配放最后；精确匹配永远优先
+  #   pool: zen
 
 state_file: "./data/state.json"

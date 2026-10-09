@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"zenproxy/internal/config"
+	"zenproxy/internal/gateway"
 	"zenproxy/internal/model"
 	"zenproxy/internal/proxypool"
 	"zenproxy/internal/registry"
@@ -45,6 +46,12 @@ type Engine struct {
 	log    *slog.Logger
 	direct *http.Transport
 	free   *FreeTier
+
+	// gw resolves the unified /v1 ingress. poolPolicy looks up a pool's
+	// rotation policy; it is a func rather than the config slice so that the
+	// engine does not hold the whole config (and its credentials) alive.
+	gw         *gateway.Gateway
+	poolPolicy func(string) config.PoolPolicy
 }
 
 // Options carries the engine's static configuration.
@@ -54,10 +61,19 @@ type Options struct {
 	AllowedHosts []string
 	FreeTier     config.FreeTier
 	Log          *slog.Logger
+	// Gateway, Pools and ModelList configure the unified /v1 ingress. Leaving
+	// them zero keeps the daemon exactly as it was: address one account by path.
+	Gateway   config.Gateway
+	Pools     []config.PoolPolicy
+	ModelList []config.ModelRoute
 }
 
 // New builds the engine.
 func New(reg *registry.Registry, pool *proxypool.Pool, opts Options) *Engine {
+	policies := make(map[string]config.PoolPolicy, len(opts.Pools))
+	for _, p := range opts.Pools {
+		policies[p.ID] = p
+	}
 	e := &Engine{
 		reg:  reg,
 		pool: pool,
@@ -65,6 +81,19 @@ func New(reg *registry.Registry, pool *proxypool.Pool, opts Options) *Engine {
 		pol:  opts.Policy,
 		log:  opts.Log,
 		free: NewFreeTier(opts.FreeTier),
+		gw:   gateway.New(opts.Gateway, opts.ModelList),
+		poolPolicy: func(id string) config.PoolPolicy {
+			if p, ok := policies[id]; ok {
+				if p.Strategy == "" {
+					p.Strategy = config.StrategyRR
+				}
+				if p.OnRateLimit == "" {
+					p.OnRateLimit = config.RotateBoth
+				}
+				return p
+			}
+			return config.PoolPolicy{ID: id, Strategy: config.StrategyRR, OnRateLimit: config.RotateBoth}
+		},
 		direct: &http.Transport{
 			MaxIdleConns:          64,
 			MaxIdleConnsPerHost:   16,
@@ -142,13 +171,87 @@ func joinUpstreamPath(base, rest string) (*url.URL, error) {
 	return u, nil
 }
 
+// candidate is one thing worth attempting: an account, the upstream it talks
+// to, and where that request goes.
+type candidate struct {
+	ent    *registry.Entry
+	up     model.Upstream
+	target *url.URL
+}
+
+// chooser decides which account each attempt uses.
+//
+// The two ingresses want opposite things from it, and that is exactly why it is
+// an interface. Reverse mode encodes the account in the URL, so every attempt
+// must use that one account and only its egress IP may move. The gateway mode
+// has no account in the URL, so "switch" can mean "try a different account" —
+// which is the only way to survive an upstream that has spent the credential
+// rather than the IP.
+//
+// budget is the attempt ceiling for this request. It is the chooser's because
+// only the chooser knows how many distinct things there are to try.
+type chooser interface {
+	first() (candidate, bool)
+	next(failed *registry.Entry, class model.ErrorClass, exitID string) (candidate, bool)
+	budget() int
+}
+
+// fixedChooser always answers with the same account: the reverse ingress.
+type fixedChooser struct {
+	eng     *Engine
+	ent     *registry.Entry
+	up      model.Upstream
+	target  *url.URL
+	limit   int
+	started bool
+}
+
+func (f *fixedChooser) budget() int { return f.limit }
+
+func (f *fixedChooser) first() (candidate, bool) {
+	f.started = true
+	return candidate{f.ent, f.up, f.target}, true
+}
+
+// next keeps the account and moves only its exit, which is precisely what the
+// reverse ingress could always do. Retrying the same account on a fresh IP is
+// the whole remedy available when the caller named the account.
+func (f *fixedChooser) next(_ *registry.Entry, _ model.ErrorClass, exitID string) (candidate, bool) {
+	f.eng.rotateExit(f.ent.ID, exitID)
+	return candidate{f.ent, f.up, f.target}, true
+}
+
+// rotateExit moves an account onto a different egress IP and says so in the
+// log. Split out so both choosers describe the same event identically.
+func (e *Engine) rotateExit(accountID, exitID string) {
+	if exitID != "" {
+		// The exit worked — it carried the request and brought back an answer.
+		// Only the binding moves, so an account-level quota cannot drain the IP
+		// pool.
+		e.pool.MarkSoftFailure(exitID, "upstream refused after a successful exchange")
+	}
+	e.reg.Rotate(accountID, exitID)
+}
+
 func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *registry.Entry, up model.Upstream, target *url.URL) {
 	body, truncated, err := readBody(r, e.pol.MaxBodyBytes)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
 		return
 	}
-	e.reg.BeginRequest(ent.ID)
+	e.proxyLoop(w, r, &fixedChooser{eng: e, ent: ent, up: up, target: target, limit: e.pol.MaxAttempts}, body, truncated)
+}
+
+// proxyLoop is the shared retry loop. The body arrives already read because the
+// gateway ingress has to inspect it to resolve the model, and reading it twice
+// is not possible on a streaming request.
+func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, body []byte, truncated bool) {
+	cur, ok := ch.first()
+	if !ok {
+		writeJSONError(w, http.StatusServiceUnavailable,
+			"no account is available to serve this request")
+		return
+	}
 
 	// The free tier is decided by the request envelope, not by the exit, so the
 	// rewrite happens once, before the first attempt, and every retry reuses it.
@@ -156,10 +259,10 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 	// rewritten at all, because it never lands in memory as a whole.
 	var plan *GatePlan
 	if !truncated {
-		plan = e.free.Prepare(target.Path, body, false)
+		plan = e.free.Prepare(cur.target.Path, body, false)
 	}
 
-	maxAttempts := e.pol.MaxAttempts
+	maxAttempts := ch.budget()
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -172,7 +275,16 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 
 	var lastMsg string
 	gateRetried := false
+	// Requests are counted per account actually used, so a pool that had to
+	// switch accounts does not credit the one that failed.
+	counted := ""
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		ent := cur.ent
+		if counted != ent.ID {
+			e.reg.BeginRequest(ent.ID)
+			counted = ent.ID
+		}
+		up, target := cur.up, cur.target
 		exitID := ""
 		proxy := e.reg.ExitFor(ent.ID)
 		if proxy != nil {
@@ -271,15 +383,17 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 				"enveloped", plan != nil, "hint", "see docs/FREE-TIER.md")
 		}
 		if attempt < maxAttempts && e.shouldRotate(resp.StatusCode, class) {
-			if exitID != "" {
-				// The exit worked — it carried the request and brought back an
-				// answer. Only the binding moves, so an account-level quota
-				// cannot drain the IP pool.
-				e.pool.MarkSoftFailure(exitID, fmt.Sprintf("HTTP %d", resp.StatusCode))
-			}
 			e.log.Info("rotating egress after upstream error",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class)
-			e.reg.Rotate(ent.ID, exitID)
+			// The chooser owns what "switch" means here: another IP for the same
+			// account, or another account entirely.
+			nextCand, ok := ch.next(ent, class, exitID)
+			if !ok {
+				writeUpstreamResponse(w, resp, errBody)
+				cancel()
+				return
+			}
+			cur = nextCand
 			cancel()
 			continue
 		}
@@ -288,9 +402,9 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 		return
 	}
 
-	e.reg.Record(ent.ID, model.ClassTransport, errors.New(lastMsg))
+	e.reg.Record(cur.ent.ID, model.ClassTransport, errors.New(lastMsg))
 	writeJSONError(w, http.StatusBadGateway,
-		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", maxAttempts, ent.ID, lastMsg))
+		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", maxAttempts, cur.ent.ID, lastMsg))
 }
 
 // FreeTier exposes the envelope writer for the dashboard, which reports which

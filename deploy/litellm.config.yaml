@@ -1,5 +1,46 @@
 # LiteLLM 配置模板 —— 与 deploy/docker-compose.yml 配套
 #
+# ★ 先看这个选择：zenproxy 现在有统一入口（docs/GATEWAY.md），
+#   「一个账号一条 deployment」不再是必需的。两种路线选一种，别混着写。
+#
+#   路线 A（推荐，zenproxy 统一入口）：1 条 deployment，账号与出口切换都在 zenproxy 内
+#   路线 B（本文档下半部分，保留）：N 条 deployment，切换由 LiteLLM 的 cooldown 做
+#
+# =============================================================================
+# 路线 A：统一入口 —— 一条 deployment 就够
+# =============================================================================
+#
+#   zenproxy config.yaml 里打开 gateway.enabled，把 key 绑到池上：
+#
+#     gateway:
+#       enabled: true
+#       keys: [{id: main, key: "${ZENPROXY_KEY}", pool: zen}]
+#
+#   然后 LiteLLM 只写一条。★ 注意 api_base 不带 /v1，也不带账号名：
+#
+#   model_list:
+#     - model_name: "<模型名>"
+#       litellm_params:
+#         model: "openai/<模型名>"
+#         api_base: "http://zenproxy:9000"
+#         api_key: "os.environ/ZENPROXY_KEY"
+#         timeout: 600
+#
+#   router_settings:
+#     # 换账号/换出口都发生在 zenproxy 内部了，这一层只剩「整路都不行」的兜底。
+#     # 设大没有意义：两层的重试次数是相乘的。
+#     num_retries: 1
+#     routing_strategy: simple-shuffle
+#     fallbacks: []
+#
+#   为什么更好：LiteLLM 的 cooldown 是**按 deployment 记账**的，所以「某个账号被限流」
+#   只能靠「把这个 deployment 整体冷却掉」来表达 —— 冷却期间这个账号连试都不试，
+#   哪怕换一个出口 IP 本来就能用。zenproxy 能做后者，LiteLLM 不能。
+#
+# =============================================================================
+# 路线 B：一个账号一条 deployment（不使用统一入口时）
+# =============================================================================
+#
 # 设计要点
 # ========
 # 1. 一个账号 = 一个 deployment（刻意的，别合并）

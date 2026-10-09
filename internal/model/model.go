@@ -63,6 +63,12 @@ type Account struct {
 	Name     string `yaml:"name,omitempty" json:"name,omitempty"`
 	Upstream string `yaml:"upstream" json:"upstream"`
 	APIKey   string `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	// Pool is the group of interchangeable accounts this one belongs to. The
+	// gateway entry picks an account from a pool, so a pool is what makes
+	// "switch to another account" possible when an exit cannot be rotated any
+	// further. Empty means "the same as Upstream", which keeps the older
+	// one-upstream-per-account configs working unchanged.
+	Pool string `yaml:"pool,omitempty" json:"pool,omitempty"`
 	// Proxy is either "auto" (let the pool pick and stick), "direct" (no proxy)
 	// or the id of a specific pool member.
 	Proxy   string            `yaml:"proxy,omitempty" json:"proxy,omitempty"`
@@ -72,6 +78,16 @@ type Account struct {
 
 	// Runtime-only, never taken from config.
 	CreatedAt time.Time `yaml:"-" json:"created_at,omitempty"`
+}
+
+// EffectivePool is the pool an account belongs to, defaulting to its upstream
+// name so that a config written before pools existed groups exactly the way it
+// used to: one pool per upstream.
+func (a Account) EffectivePool() string {
+	if a.Pool != "" {
+		return a.Pool
+	}
+	return a.Upstream
 }
 
 // ErrorClass buckets upstream failures so that rotation decisions and the

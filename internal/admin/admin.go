@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"zenproxy/internal/config"
+	"zenproxy/internal/gateway"
 	"zenproxy/internal/model"
 	"zenproxy/internal/proxypool"
 	"zenproxy/internal/registry"
@@ -180,7 +181,42 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			// config to save the wasted first attempt.
 			"learned": learned,
 		},
+		// The unified ingress: one URL, one key. The view lists which keys exist
+		// and which pool each may draw from, never the keys themselves.
+		"gateway": gateway.New(s.cfg.Gateway, s.cfg.ModelList).View(),
+		"pools":   s.poolView(),
 	})
+}
+
+// poolView reports each pool with its members, its rotation policy and the
+// model names routed to it. This is the answer to "which accounts can serve
+// this model, and what happens when one of them is rate limited".
+func (s *Server) poolView() []map[string]any {
+	gw := gateway.New(s.cfg.Gateway, s.cfg.ModelList)
+	var out []map[string]any
+	for _, id := range s.cfg.PoolIDs() {
+		pol := s.cfg.PolicyFor(id)
+		var members []string
+		for _, a := range s.reg.List() {
+			if a.Pool == id {
+				members = append(members, a.ID)
+			}
+		}
+		sort.Strings(members)
+		models := []string{}
+		for _, rt := range gw.Routes(id) {
+			models = append(models, rt.ModelName)
+		}
+		out = append(out, map[string]any{
+			"id":            id,
+			"strategy":      pol.Strategy,
+			"on_rate_limit": pol.OnRateLimit,
+			"accounts":      members,
+			"models":        models,
+			"wildcard":      gw.HasWildcard(id),
+		})
+	}
+	return out
 }
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +227,7 @@ type accountRequest struct {
 	ID       string            `json:"id"`
 	Name     string            `json:"name"`
 	Upstream string            `json:"upstream"`
+	Pool     string            `json:"pool"`
 	APIKey   string            `json:"api_key"`
 	Proxy    string            `json:"proxy"`
 	Weight   *int              `json:"weight"`
@@ -227,6 +264,13 @@ func (s *Server) handleUpsertAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown upstream: " + upstream})
 		return
 	}
+	// An empty pool keeps the stored value, exactly like upstream and proxy.
+	// Clearing it would silently move the account into the upstream-named pool
+	// and change which gateway keys can reach it.
+	poolID := req.Pool
+	if poolID == "" && hasPrev {
+		poolID = prev.Pool
+	}
 	proxy := req.Proxy
 	if proxy == "" {
 		if hasPrev {
@@ -260,6 +304,7 @@ func (s *Server) handleUpsertAccount(w http.ResponseWriter, r *http.Request) {
 		ID:       req.ID,
 		Name:     name,
 		Upstream: upstream,
+		Pool:     poolID,
 		APIKey:   req.APIKey,
 		Proxy:    proxy,
 		Weight:   weight,

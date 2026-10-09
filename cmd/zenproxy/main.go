@@ -75,28 +75,12 @@ func run() error {
 		AllowedHosts: cfg.Policy.AllowedHosts,
 		FreeTier:     cfg.FreeTier,
 		Log:          logger,
+		Gateway:      cfg.Gateway,
+		Pools:        cfg.Pools,
+		ModelList:    cfg.ModelList,
 	})
 	adm := admin.New(reg, pool, cfg, engine.FreeTier(), logger)
-
-	mux := http.NewServeMux()
-	mux.Handle("/admin/", adm.Handler())
-	mux.HandleFunc("/healthz", adm.Health)
-	mux.HandleFunc("/metrics", adm.Metrics)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// A forward-proxy request either asks for a tunnel or carries an
-		// absolute URI. Everything else is reverse-mode traffic.
-		if r.Method == http.MethodConnect || r.URL.IsAbs() {
-			engine.ServeForward(w, r)
-			return
-		}
-		account, rest := splitAccount(r.URL.Path)
-		if account == "" {
-			forward.WriteError(w, http.StatusNotFound,
-				"usage: http://<host>:<port>/<account-id>/<upstream-path>, or use this listener as an HTTP proxy with http://<account-id>:x@<host>:<port>")
-			return
-		}
-		engine.ServeReverse(w, r, account, rest)
-	})
+	mux := newMux(engine, adm)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
@@ -147,6 +131,42 @@ func run() error {
 	close(shutdown)
 	<-stateSaved
 	return nil
+}
+
+// newMux builds the request router.
+//
+// It is separate from run() because the precedence it encodes is the part most
+// likely to break silently: three ingress shapes share one listener, and
+// getting the order wrong turns a working path into a puzzling 404 rather than
+// an error anyone would notice at startup.
+func newMux(engine *forward.Engine, adm *admin.Server) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle("/admin/", adm.Handler())
+	mux.HandleFunc("/healthz", adm.Health)
+	mux.HandleFunc("/metrics", adm.Metrics)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// A forward-proxy request either asks for a tunnel or carries an
+		// absolute URI. Everything else is reverse-mode traffic.
+		if r.Method == http.MethodConnect || r.URL.IsAbs() {
+			engine.ServeForward(w, r)
+			return
+		}
+		// The unified ingress claims /v1/* before the account split. Order
+		// matters: splitAccount runs first and every gateway client would be
+		// told "unknown or disabled account: v1".
+		if p := r.URL.Path; p == "/v1" || strings.HasPrefix(p, "/v1/") {
+			engine.ServeGateway(w, r, p)
+			return
+		}
+		account, rest := splitAccount(r.URL.Path)
+		if account == "" {
+			forward.WriteError(w, http.StatusNotFound,
+				"usage: POST /v1/chat/completions with an API key, http://<host>:<port>/<account-id>/<upstream-path>, or use this listener as an HTTP proxy with http://<account-id>:x@<host>:<port>")
+			return
+		}
+		engine.ServeReverse(w, r, account, rest)
+	})
+	return mux
 }
 
 // splitAccount pulls the account id off the front of a reverse-mode path.

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +212,11 @@ func TestExampleConfigStaysLoadable(t *testing.T) {
 	t.Setenv("ZEN_KEY_01", "sk-example-not-a-real-key")
 	t.Setenv("ZEN_KEY_02", "sk-example-not-a-real-key-2")
 	t.Setenv("RESIN_PROXY_TOKEN", "example-proxy-token")
+	// The gateway block ships disabled, but its key is still an unexpanded
+	// ${VAR} until this is set — and an unexpanded credential is an error
+	// whether or not the feature that uses it is switched on, exactly as
+	// accounts[].api_key has always behaved.
+	t.Setenv("ZENPROXY_KEY", "sk-example-gateway-key")
 
 	for _, path := range []string{
 		filepath.Join("..", "..", "config.example.yaml"),
@@ -228,6 +234,19 @@ func TestExampleConfigStaysLoadable(t *testing.T) {
 		}
 		if cfg.StateFile == "" || cfg.Server.Listen == "" {
 			t.Errorf("%s lost state_file or server.listen", path)
+		}
+		// A gateway block that no longer parses would be invisible until an
+		// operator flipped enabled: true on a live box.
+		if len(cfg.Gateway.Keys) == 0 {
+			t.Errorf("%s must document a gateway.keys block", path)
+		}
+		if got := cfg.PoolIDs(); len(got) == 0 {
+			t.Errorf("%s produces no pools, so no gateway key could ever resolve", path)
+		}
+		for _, k := range cfg.Gateway.Keys {
+			if !slices.Contains(cfg.PoolIDs(), k.Pool) {
+				t.Errorf("%s: gateway key %q points at pool %q, which no account belongs to", path, k.ID, k.Pool)
+			}
 		}
 	}
 }

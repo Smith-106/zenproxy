@@ -5,6 +5,43 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **统一入口：一个 URL，一个 Key**（`gateway` / `pools` / `model_list` 三段配置，默认关闭）。
+  新增第三种入口形状 `POST /v1/chat/completions`、`POST /v1/messages`、`GET /v1/models`，
+  用 `Authorization: Bearer <key>`（或 Anthropic 系的 `x-api-key`）鉴权。**key 绑的是池，不是账号**，
+  所以调用方永远不需要知道账号叫什么。原有的 `/<账号ID>/` 反代与正向代理模式一行未改，三者并存。
+  设计说明见 `docs/GATEWAY.md`。
+  - **失败时自动换账号**：`pools[].on_rate_limit` 决定上游拒绝一个请求后切什么——
+    `rotate-exit`（换出口 IP，应对按 IP 限额）、`rotate-account`（换账号，应对按 key 限额）、
+    `rotate-both`（默认：先换 IP，同一账号烧掉 2 个出口后再换账号）。
+    全部为**被动触发**（收到 429/5xx/传输错误之后），不做预算式提前切换。
+    一次请求最多 8 次上游尝试，避免大池子 + 慢上游把单次请求拖到几分钟。
+  - `model_list`：LiteLLM 同名概念，`model_name` → `pool` + 可选 `upstream_model` 名字翻译，
+    支持 `"*"` 通配（精确匹配永远优先）。**整段不写 = 所有模型名原样透传**，
+    因为「一个 URL + 一个 Key，池子自己挑账号」才是最省事的用法。
+  - `GET /v1/models` 报这个 key 的池能服务什么；池有通配时再去上游拉一次真实清单合并进去
+    （best-effort，上游不通也照样返回配置里的名字），方便下游网关自动导入模型列表。
+  - 启动期全量校验这几种「只会表现为请求时 401/404、原因完全看不见」的错：
+    空 key（会匹配所有匿名请求 → 开放中继）、重复 key id、池不存在（报错里列出所有已知池名）、
+    key 里还有未展开的 `${VAR}`、`gateway.enabled` 但没有任何 key、拼错的策略名。
+  - **池是从账号推导的**：`Account` 新增 `pool` 字段，省略即回落到 upstream 名。
+    因此写 `pool` 之前，每个 upstream 天然就是一个池——老配置一行都不用改。
+  - 管理面板 `/admin/api/status` 新增 `gateway` 与 `pools` 两块视图（**不含 key**，只有 id/pool/name），
+    账号视图新增 `pool` 字段。
+  - 鉴权用常量时间比较：逐字节提前返回会让能测时间的攻击者一个字符一个字符地把 key 试出来。
+- `.dockerignore`：此前每次构建都会把 `build/` 与 `.git/` 一起打包送给 builder。
+- 运维脚本（都在仓库 `scripts/` 下，部署机上 `sudo` 跑）：
+  `zenproxy-status.sh`（一次性自检）、`probe-free-models.sh`（实测哪些免费模型真的可用）、
+  `refresh-free-models.py`（换 `free_tier.models` 清单）、`probe-resin-slots.sh`（实测 Resin 可用率）、
+  `set-resin-slots.py`（扩池子）、`e2e-free-tier.sh`（端到端验证套壳与 SSE 折叠）、
+  `soak-rotation.sh`（连打多次看轮换）、以及 new-api 侧的接入与排障脚本
+  `create-newapi-channel.sh` / `e2e-through-newapi.sh` / `verify-all-free-models-via-newapi.sh`。
+- `create-newapi-channel.sh` 泛化为**任意 OpenAI 兼容上游**都能接（`CH_NAME` / `CH_BASE_URL` /
+  `CH_KEY` 或 `CH_KEY_CMD` / `CH_MODELS` 或 `CH_MODELS_URL`），并新增
+  `connect-newapi-to-llm-internal.sh`（打通 new-api 与其它容器的网络，且写进 compose）、
+  `extract-cpa-inbound-key.py`、`verify-cliproxy-via-newapi.sh`。
+
 ### 修复
 
 - **`deploy/install.sh` 的就绪闸门三处误报**，全部会让「一条命令装完」装不动：
@@ -20,22 +57,20 @@
   `*-free` 模型全部 403 `FreeTierError`——而这份模板正是服务器上实际生效的那份配置。
   已补上，并让 `TestExampleConfigStaysLoadable` 同时加载根模板与部署模板，防止再次漂移。
 
-### 新增
-
-- `.dockerignore`：此前每次构建都会把 `build/` 与 `.git/` 一起打包送给 builder。
-- 运维脚本（都在仓库 `scripts/` 下，部署机上 `sudo` 跑）：
-  `zenproxy-status.sh`（一次性自检）、`probe-free-models.sh`（实测哪些免费模型真的可用）、
-  `refresh-free-models.py`（换 `free_tier.models` 清单）、`probe-resin-slots.sh`（实测 Resin 可用率）、
-  `set-resin-slots.py`（扩池子）、`e2e-free-tier.sh`（端到端验证套壳与 SSE 折叠）、
-  `soak-rotation.sh`（连打多次看轮换）、以及 new-api 侧的接入与排障脚本
-  `create-newapi-channel.sh` / `e2e-through-newapi.sh` / `verify-all-free-models-via-newapi.sh`。
-- `create-newapi-channel.sh` 泛化为**任意 OpenAI 兼容上游**都能接（`CH_NAME` / `CH_BASE_URL` /
-  `CH_KEY` 或 `CH_KEY_CMD` / `CH_MODELS` 或 `CH_MODELS_URL`），并新增
-  `connect-newapi-to-llm-internal.sh`（打通 new-api 与其它容器的网络，且写进 compose）、
-  `extract-cpa-inbound-key.py`、`verify-cliproxy-via-newapi.sh`。
-
 ### 文档
 
+- 新增 **`docs/GATEWAY.md`**：统一入口的完整设计说明——为什么「key 绑池而不是绑账号」，
+  `on_rate_limit` 三种策略分别对应上游按 IP 限额还是按 key 限额（含默认 2 个出口的账怎么算、
+  为什么不是 1 也不是更多），`/v1/models` 报什么，四类下游（new-api / CLIProxyAPI / sub2api / LiteLLM）
+  的填法，以及 **Base URL 不能带 `/v1`** 这个踩过的坑。
+- `deploy/litellm.config.yaml` 拆成两条路线并说明怎么选：**路线 A（推荐）**一条 deployment，
+  账号与出口切换都在 zenproxy 内；**路线 B**保留原来的一账号一 deployment。
+  并写明为什么 A 更好：LiteLLM 的 cooldown 是**按 deployment 记账**的，
+  「某个账号被限流」只能表达成「把这个 deployment 整体冷却掉」——冷却期间这个账号连试都不试，
+  哪怕换一个出口 IP 本来就能用。
+- `config.example.yaml` 与 `deploy/config.example.yaml` 都补上 `gateway` / `pools` / `model_list`
+  三段（默认 `enabled: false`），并让 `TestExampleConfigStaysLoadable` 一并校验：
+  gateway key 指向的池必须真的有账号，否则启动就该报错。
 - `docs/FREE-TIER.md` 新增「失败类型速查」：把「列表里有名字」和「真能用」区分开——
   410 `ModelDeprecated`（已下线）、400 `ModelProtocolUnsupported`（名字在售但不接公开端点，
   `chat/completions` 与 `messages` 都不支持）、403 `RegionError`（出口 IP 国家被限）、
@@ -99,3 +134,18 @@
 
 [Unreleased]: https://github.com/Smith-106/zenproxy/compare/v0.1.0...HEAD
 [v0.1.0]: https://github.com/Smith-106/zenproxy/releases/tag/v0.1.0
+
+### 修复
+
+- **`deploy/install.sh` 的就绪闸门三处误报**，全部会让「一条命令装完」装不动：
+  - 占位符检查扫了整个 `.env`，连注释一起算——顶部那句说明文字和注释掉的 LiteLLM 变量里
+    都有 `REPLACE_WITH`，于是**四个真实变量全填好也永远报「还有占位值没替换」**。现在只看真正的赋值行。
+  - 变量抽取扫了 `config.yaml` 的注释行，把文档里举例的 `${VAR}` 当成必填变量，报「缺少 VAR」。
+    现在先去掉注释行再抽。
+  - 「变量有没有被 compose 注入」的 needle 找的是 `${VAR}`，而 compose 写的是 `${VAR:?未设置…}`，
+    **永远匹配不上**，于是每个变量都被误报成「没注入」。现在按 `${VAR` 前缀匹配。
+- **`deploy/install.sh` 在 git 里是 100644（无执行位）**，而文档写的是 `sudo ./install.sh`——
+  任何人克隆后都会撞上 `command not found`。已改为 100755。
+- **`deploy/config.example.yaml` 缺整个 `free_tier` 块**：照这个模板部署出来的实例，
+  `*-free` 模型全部 403 `FreeTierError`——而这份模板正是服务器上实际生效的那份配置。
+  已补上，并让 `TestExampleConfigStaysLoadable` 同时加载根模板与部署模板，防止再次漂移。

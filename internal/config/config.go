@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,7 +24,72 @@ type Config struct {
 	Accounts  []model.Account           `yaml:"accounts"`
 	FreeTier  FreeTier                  `yaml:"free_tier"`
 	StateFile string                    `yaml:"state_file"`
+	// Gateway, Pools and ModelList turn the daemon from "address one account
+	// by its path" into a single OpenAI-shaped endpoint with one key. They are
+	// additive: a config without them behaves exactly as before.
+	Gateway   Gateway      `yaml:"gateway"`
+	Pools     []PoolPolicy `yaml:"pools"`
+	ModelList []ModelRoute `yaml:"model_list"`
 }
+
+// Gateway is the unified ingress: one URL and one key, with the account and
+// the exit chosen automatically. It is the shape every downstream gateway
+// (new-api, CLIProxyAPI, sub2api, LiteLLM) can consume as an upstream.
+type Gateway struct {
+	Enabled bool `yaml:"enabled"`
+	// Keys are the credentials clients present as `Authorization: Bearer …`.
+	// Each key is bound to one pool, which is what makes "this key can use
+	// these accounts" expressible without naming an account in the URL.
+	Keys []GatewayKey `yaml:"keys"`
+	// RequireKey refuses unauthenticated /v1/* traffic. It defaults to true
+	// whenever at least one key is configured, because an open gateway on a
+	// routable listener is an open relay.
+	RequireKey *bool `yaml:"require_key"`
+}
+
+// GatewayKey is one client credential and the pool it may draw from.
+type GatewayKey struct {
+	ID   string `yaml:"id"`
+	Key  string `yaml:"key"`
+	Pool string `yaml:"pool"`
+	// Name is shown in the admin panel instead of the key itself.
+	Name string `yaml:"name,omitempty"`
+}
+
+// PoolPolicy overlays behaviour on a pool. Pools themselves are derived from
+// the accounts (see model.Account.EffectivePool), so a config that never
+// mentions pools still groups accounts exactly one-per-upstream, as before.
+type PoolPolicy struct {
+	ID string `yaml:"id"`
+	// Strategy picks the next account: "round-robin" or "weighted".
+	Strategy string `yaml:"strategy"`
+	// OnRateLimit decides what a 429 (or another IP-attributable failure)
+	// switches. This is the reactive half of "quota is limited per IP, switch
+	// automatically": the upstream tells us the IP is spent and we move.
+	//
+	//	rotate-exit     move this account to a different exit IP
+	//	rotate-account  move to a different account in the same pool
+	//	rotate-both     try a new IP first, then another account
+	OnRateLimit string `yaml:"on_rate_limit"`
+}
+
+// ModelRoute maps the name a client asks for onto a pool and, optionally, the
+// upstream's own name for it. It mirrors LiteLLM's model_list, including the
+// "*" wildcard entry, so a LiteLLM config translates without rethinking it.
+type ModelRoute struct {
+	ModelName     string `yaml:"model_name"`
+	Pool          string `yaml:"pool"`
+	UpstreamModel string `yaml:"upstream_model,omitempty"`
+}
+
+// Rotation policies accepted by PoolPolicy.OnRateLimit.
+const (
+	RotateExit     = "rotate-exit"
+	RotateAccount  = "rotate-account"
+	RotateBoth     = "rotate-both"
+	StrategyRR     = "round-robin"
+	StrategyWeight = "weighted"
+)
 
 // Server holds the HTTP listener settings.
 type Server struct {
@@ -275,6 +341,98 @@ func (c *Config) normalize() {
 			a.Upstream = "zen"
 		}
 	}
+	for i := range c.Pools {
+		p := &c.Pools[i]
+		if p.Strategy == "" {
+			p.Strategy = StrategyRR
+		}
+		if p.OnRateLimit == "" {
+			p.OnRateLimit = RotateBoth
+		}
+	}
+	for i := range c.ModelList {
+		m := &c.ModelList[i]
+		if m.UpstreamModel == "" {
+			m.UpstreamModel = m.ModelName
+		}
+		if m.Pool == "" {
+			// An unqualified route means "the pool named after the model's own
+			// upstream", which for the historical single-upstream config is
+			// simply that upstream.
+			m.Pool = DefaultPoolID(c.Accounts)
+		}
+	}
+	// The gateway refuses anonymous traffic as soon as it has any key: an open
+	// /v1/* on a routable listener is an open relay to the accounts behind it.
+	if c.Gateway.RequireKey == nil {
+		v := true
+		c.Gateway.RequireKey = &v
+	}
+}
+
+// DefaultPoolID names the pool an unqualified route or key falls back to. It
+// is the pool of the first enabled account, so a single-pool config never has
+// to name its pool at all.
+func DefaultPoolID(accounts []model.Account) string {
+	for _, a := range accounts {
+		if a.Enabled {
+			return a.EffectivePool()
+		}
+	}
+	if len(accounts) > 0 {
+		return accounts[0].EffectivePool()
+	}
+	return ""
+}
+
+// PoolIDs lists every pool the accounts actually produce, sorted, deduped.
+func (c Config) PoolIDs() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range c.Accounts {
+		id := a.EffectivePool()
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// PolicyFor returns the policy of a pool, with defaults filled in when the
+// pool was never declared (its policy is then entirely default).
+func (c Config) PolicyFor(pool string) PoolPolicy {
+	for _, p := range c.Pools {
+		if p.ID == pool {
+			if p.Strategy == "" {
+				p.Strategy = StrategyRR
+			}
+			if p.OnRateLimit == "" {
+				p.OnRateLimit = RotateBoth
+			}
+			return p
+		}
+	}
+	return PoolPolicy{ID: pool, Strategy: StrategyRR, OnRateLimit: RotateBoth}
+}
+
+// RouteFor resolves the model a client asked for. The second result is false
+// when no route matches; the caller then decides whether to pass the name
+// through untouched (which is what a "*" route authorises).
+func (c Config) RouteFor(model string) (ModelRoute, bool) {
+	for _, m := range c.ModelList {
+		if m.ModelName == model {
+			return m, true
+		}
+	}
+	for _, m := range c.ModelList {
+		if m.ModelName == "*" {
+			return ModelRoute{ModelName: model, Pool: m.Pool, UpstreamModel: model}, true
+		}
+	}
+	return ModelRoute{}, false
 }
 
 // Validate fails fast on the mistakes that would otherwise show up as a
@@ -317,10 +475,73 @@ func (c Config) Validate() error {
 	if name, ok := unexpandedVar(c.Server.AdminToken); ok {
 		problems = append(problems, "server.admin_token still contains an unexpanded "+name)
 	}
+	problems = append(problems, c.validateGateway()...)
 	if len(problems) > 0 {
 		return fmt.Errorf("invalid config:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return nil
+}
+
+// validateGateway checks the unified ingress. Every one of these mistakes would
+// otherwise surface as a 401 at request time, where the cause is invisible.
+func (c Config) validateGateway() []string {
+	var problems []string
+	known := map[string]bool{}
+	for _, id := range c.PoolIDs() {
+		known[id] = true
+	}
+	for i, p := range c.Pools {
+		if p.ID == "" {
+			problems = append(problems, fmt.Sprintf("pools[%d]: id is required", i))
+			continue
+		}
+		if !known[p.ID] {
+			problems = append(problems, fmt.Sprintf("pools[%d]: pool %q has no accounts (an account joins a pool via its own `pool:` field, or by sharing an upstream name)", i, p.ID))
+		}
+		switch p.Strategy {
+		case StrategyRR, StrategyWeight:
+		default:
+			problems = append(problems, fmt.Sprintf("pools[%d] (%s): unknown strategy %q; use %s or %s", i, p.ID, p.Strategy, StrategyRR, StrategyWeight))
+		}
+		switch p.OnRateLimit {
+		case RotateExit, RotateAccount, RotateBoth:
+		default:
+			problems = append(problems, fmt.Sprintf("pools[%d] (%s): unknown on_rate_limit %q; use %s, %s or %s", i, p.ID, p.OnRateLimit, RotateExit, RotateAccount, RotateBoth))
+		}
+	}
+	seen := map[string]bool{}
+	for i, k := range c.Gateway.Keys {
+		where := fmt.Sprintf("gateway.keys[%d]", i)
+		if k.ID == "" {
+			problems = append(problems, where+": id is required")
+		} else if seen[k.ID] {
+			problems = append(problems, fmt.Sprintf("%s: duplicate id %q", where, k.ID))
+		}
+		seen[k.ID] = true
+		if k.Key == "" {
+			problems = append(problems, where+": key is empty")
+		} else if name, ok := unexpandedVar(k.Key); ok {
+			problems = append(problems, where+" key still contains an unexpanded "+name+" — set that environment variable")
+		}
+		if k.Pool == "" {
+			problems = append(problems, where+": pool is required")
+		} else if !known[k.Pool] {
+			problems = append(problems, fmt.Sprintf("%s: key %q references unknown pool %q; known pools: %s", where, k.ID, k.Pool, strings.Join(c.PoolIDs(), ", ")))
+		}
+	}
+	if c.Gateway.Enabled && len(c.Gateway.Keys) == 0 {
+		problems = append(problems, "gateway.enabled but gateway.keys is empty — clients would have no way to authenticate")
+	}
+	for i, m := range c.ModelList {
+		if m.ModelName == "" {
+			problems = append(problems, fmt.Sprintf("model_list[%d]: model_name is required", i))
+			continue
+		}
+		if m.Pool != "" && !known[m.Pool] {
+			problems = append(problems, fmt.Sprintf("model_list[%d] (%s): references unknown pool %q; known pools: %s", i, m.ModelName, m.Pool, strings.Join(c.PoolIDs(), ", ")))
+		}
+	}
+	return problems
 }
 
 // withDefaults fills the fields that have a sensible fallback so ProxyURL is
