@@ -209,12 +209,66 @@ sudo docker restart zenproxy
 2026-10-10 实测可用的 7 个：`big-pickle`、`ling-3.1-flash-free`、`mimo-v2.6-flash-free`、
 `space-bunny-free`、`step-5-preview-free`、`longcat-2.5-preview-free`、`nemotron-3.5-lightning-free`。
 
-另外两种"看起来像门禁、其实是别的问题"的失败，别误判成清单过期：
+### 失败类型速查（2026-10-10 实测定稿）
 
-| 响应 | 含义 |
+模型列表里有名字 ≠ 能用。除了 403 `FreeTierError`（套壳没生效），还有四种失败，
+**没有一种是换出口或换账号能解决的**：
+
+| 响应 | 含义 | 能救吗 |
+| :--- | :--- | :--- |
+| 410 `ModelDeprecated` | 上游已下线，名字还留在列表里 | 不能。已在名单里的要删掉（实测 `exo-free`） |
+| 400 `ModelProtocolUnsupported` | 名字在售，但**不接公开端点**。`chat/completions` 和 `messages` 都不支持 | 不能，见下 |
+| 403 `RegionError` | 出口 IP 所在国家被限制 | 见下 |
+| 402 `server_error` | 是**付费模型**，账号没额度 | 充值才行（实测 `jev-1.13`、`muse-spark-1.2/1.3`） |
+
+**「不接公开端点」是实测结论，不是推测。** 判断过程如下（`muse-spark-1.3-contributor-free`）：
+
+- 该模型**已经在 `learned` 里**，说明 403 门禁触发过、套壳也确实生效了，但仍然
+  `ModelProtocolUnsupported` —— 所以门禁不是瓶颈。
+- 给 `/v1/messages` 手动补上完整官方标识（UA + 四个 `x-opencode-*` 头 + 注入那 1608 字节
+  提示词）后，它从 403 `FreeTierError` 变成 400 `ModelProtocolUnsupported` ——
+  **证明官方标识是有效的**（门禁确实被它打开了），瓶颈换成了协议。
+- 于是做了「出口国家 × 协议」矩阵：**16 个住宅出口**（US/NL/FR/RU/GB/HK/JP/NO/RO/IN）、
+  `chat/completions` 与 `messages` 两条路，**全部 400 `ModelProtocolUnsupported`**。
+
+**注意 `RegionError` 会误导人。** 同一个模型：
+
+| 从哪出去 | 结果 |
 | :--- | :--- |
-| 403 `RegionError: This model is not available in your country` | **按出口所在国家**限制。换出口有机会成功，换账号没用（实测 `muse-spark-*-contributor-free`） |
-| 400 `ModelProtocolUnsupported: Model does not support this protocol` | 该模型不接 `chat/completions` 这个协议，得换别的调用形状（实测 `jev-1.13-free`） |
+| 住宅出口（Resin） | 过了地区检查 → 卡在 `ModelProtocolUnsupported` |
+| **服务器自己的机房 IP** | 卡在 `RegionError` |
+
+所以「把账号指向一个没有出口 IP 的 slot」= 流量走服务器直连 = 看到 `RegionError`，
+而换成有住宅 IP 的出口又变成 `ModelProtocolUnsupported` —— 看起来像"换出口有用"，
+其实是**卡点从地区检查挪到了协议检查**，两条路都到不了终点。
+（这就是本项目里 `zen-01` 绑的 `resin-slot-01` 当时没有出口 IP 时的表现。）
+
+### 怎么自己把这几道门分开
+
+上游的检查是按顺序来的，看**响应类型的变化**就能判断自己走到了哪一步。
+办法是手动重放一个带完整官方标识的请求（标识的 5 个条件见 `internal/forward/freegate.go` 顶部注释）：
+
+```bash
+# 那两段提示词不用手抄，从源码导出来（临时加个 test 打印即可，或直接读 gateprompts.go）
+# 然后带上 UA + x-opencode-* 四个头 + stream:true + 提示词，打任意路径：
+curl -sS -X POST http://127.0.0.1:9000/<账号>/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'User-Agent: opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14' \
+  -H 'x-opencode-client: cli' -H 'x-opencode-project: global' \
+  -H 'x-opencode-request: msg_0123456789abABCDEFGHIJKLMN' \
+  -H 'x-opencode-session: ses_0123456789abABCDEFGHIJKLMN' \
+  -H 'x-opencode-session-id: ses_0123456789abABCDEFGHIJKLMN' \
+  -d '{"model":"…","max_tokens":120,"stream":true,"system":"<提示词>","messages":[{"role":"user","content":"Say OK"}]}'
+```
+
+响应类型的含义：
+
+| 你看到 | 说明 |
+| :--- | :--- |
+| `FreeTierError` | 官方标识没生效（缺头、缺提示词、或没 `stream:true`）——**问题在你自己这边** |
+| `RegionError` | 标识生效了，卡在出口 IP 的国家 |
+| `ModelProtocolUnsupported` | 标识和国家都过了，这个模型就是不接这个端点 |
+| `402` | 标识和国家都过了，模型是付费的 |
 
 ---
 
@@ -244,8 +298,16 @@ sudo docker restart zenproxy
   `learned` 是"靠被拒绝才学会"的模型清单——把它加进 `free_tier.models`，
   就能省掉每个模型的第一趟 403。
 
+  > **但 `learned` 不等于"能用"。** 它在**重试之前**就记账，所以重试可能仍然失败；
+  > 一旦上游对某个名字恒回 `ModelProtocolUnsupported` / `RegionError`，
+  > 这个名字就会**永久留在 `learned` 里**，而它其实一次也跑不通。
+  > 往 `free_tier.models` 里搬之前，先按 §五 逐个验活。
+  > （2026-10-10 实测：`learned` 里 3 个条目——`jev-1.13-free`、
+  > `muse-spark-1.2/1.3-contributor-free`——**全部不可用**，一个都没通过验活。）
+
 - 日志：
   - `upstream refused this client for a free model; retrying inside the OpenCode envelope`
-    —— 学到了新模型并已重试成功；
+    —— 该模型已记入 `learned` 并正在套壳**重试**（是"开始重试"，不是"重试成功"，
+    结果要看紧跟其后的那条请求日志）；
   - `upstream refused this request on client identity and no exit change can alter that`
     —— 套壳没救回来（模板过期、或该请求形状没特征化），带 `hint` 指向本文。

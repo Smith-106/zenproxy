@@ -36,6 +36,14 @@
 
 ### 文档
 
+- `docs/FREE-TIER.md` 新增「失败类型速查」：把「列表里有名字」和「真能用」区分开——
+  410 `ModelDeprecated`（已下线）、400 `ModelProtocolUnsupported`（名字在售但不接公开端点，
+  `chat/completions` 与 `messages` 都不支持）、403 `RegionError`（出口 IP 国家被限）、
+  402 `server_error`（付费模型无额度），四种都**换出口换账号都救不了**。
+  更正了上一版把 `RegionError` 写成"换出口有机会成功"的说法：实测同一模型从住宅出口出去
+  是 `ModelProtocolUnsupported`、从服务器机房 IP 出去才是 `RegionError`，看起来像换出口有用，
+  其实只是卡点从地区检查挪到了协议检查。附「怎么把这几道门分开」的重放方法
+  （手动补官方标识打任意路径，按响应类型判断走到了哪一步）。
 - `deploy/README.md` 新增 §7.1/§7.2/§7.3：脚本化建渠道要处理的坑——为什么必须走管理 API
   （`abilities` 表才是路由，只插 `channels` 渠道永远选不中）、两个接口形状不同
   （`POST` 要包在 `channel` 字段里、`PUT` 是裸对象带 `id`**且不能带 `status`**，
