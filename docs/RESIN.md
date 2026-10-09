@@ -118,6 +118,32 @@ sudo sqlite3 "file:$DB?mode=ro" "select count(*) from nodes_dynamic where egress
 显示在控制台里。用它来确认各成员确实处在不同 IP 上。
 坏掉的出口可以在控制台点「清理垃圾出口」一次性永久移出轮换，详见仓库根 README 的「清理垃圾出口」一节。
 
+### 池子该开多大：实测
+
+2026-10-10 在 `oracle-ubuntu` 上连测两批（`scripts/probe-resin-slots.sh`）：
+
+| 批次 | 可用 / 总数 | 备注 |
+| :--- | ---: | :--- |
+| `slot-01` … `slot-12` | **2 / 12** | 失败的基本都是 5 秒 SOCKS5 超时 |
+| `slot-13` … `slot-24` | **7 / 12** | 同一套配置，几分钟后测，成功率差 3 倍 |
+
+两批合计 ≈ 38%，**而且批次之间波动极大**——这正是「节点会猝死」的直接体现。
+
+结论：**`accounts` 只写 2 个是不够的**。默认模板里写 `slot-01`/`slot-02` 只是示意，
+按实测成功率算，2 个成员平均只有不到 1 个活着。把池子开到 24 个之后，
+`/admin/api/proxies` 里能稳定看到 5–7 个成员持有真实出口 IP：
+
+```bash
+sudo scripts/set-resin-slots.py 24      # 扩到 24 个 slot
+sudo docker restart zenproxy            # config.yaml 是 bind mount，改完要重启才生效
+```
+
+扩完之后连打 10 次免费模型请求（`scripts/soak-rotation.sh 10`）的结果是 **10/10 成功**，
+单次 1.3–3.5 秒；池子只有 2 个成员时失败率是肉眼可见的。
+
+代价是探活更重：24 个成员 × 每个最多 5 秒超时，一轮探活要一分钟以上。
+`health.interval` 保持 `60s`，别调更密。
+
 ---
 
 ## 四、验证

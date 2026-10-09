@@ -441,6 +441,55 @@ new-api → 渠道 → 新建（或编辑现有渠道）：
 一个渠道对应一个账号：因为 `Authorization` 被账号自己的 key 覆盖了，一个渠道塞多个
 账号没有意义。多账号就建多个渠道，每个指向 `http://zenproxy:9000/<各自的账号ID>`。
 
+### 7.1 用脚本建（免手点控制台）
+
+`scripts/create-newapi-channel.sh` 会把上面这张表落成一条渠道，并在建完后核对路由：
+
+```bash
+sudo CH_NAME="zenproxy (opencode free)" ZEN_ACCOUNT=zen-01 scripts/create-newapi-channel.sh
+```
+
+它顺带处理了三件手点控制台时不会遇到、但脚本化时一定会踩的事：
+
+| 坑 | 事实 |
+| :--- | :--- |
+| **为什么要走 API 而不是直接 `INSERT`** | new-api 靠 **`abilities` 表**做模型路由（主键 `group+model+channel_id`）。只往 `channels` 插一行，`abilities` 不会有对应记录，渠道建了也永远不会被选中。管理 API 会事务性地一起写。 |
+| **请求体形状** | `POST /api/channel/` 绑定的是 `AddChannelRequest`，渠道必须**包在 `channel` 字段里**（顶层还有 `mode`）。直接发裸的 channel 对象会得到 `{"message":"channel cannot be empty","success":false}`——因为 `channel` 是 nil，校验在 `Key == ""` 那一句就挂了。而 `PUT /api/channel/` 绑的 `PatchChannel` 是**裸对象且要带 `id`**，两个方法形状不同。 |
+| **管理 API 的认证** | 要「系统访问令牌」= `users.access_token`（`character(32)`，**正好 32 字符**）。root 用户没有的话脚本会生成一个写进去；撤销走控制台「设置 → 系统访问令牌 → 清除」。 |
+
+建完自己核对一遍：
+
+```bash
+# 渠道在不在、对不对
+sudo docker exec postgres psql -U root -d new-api -c \
+  "select id,name,status,base_url,\"group\" from channels where name like 'zenproxy%';"
+# 路由同步了没（关键：没有这些行渠道就是死的）
+sudo docker exec postgres psql -U root -d new-api -c \
+  "select a.model,a.channel_id,a.enabled from abilities a join channels c on c.id=a.channel_id where c.name like 'zenproxy%';"
+```
+
+万一 `abilities` 没跟上，new-api 自己有个重建接口：`POST /api/channel/fix`。
+
+### 7.2 端到端验证
+
+```bash
+sudo scripts/e2e-through-newapi.sh big-pickle    # 单个模型，打印内容与用量
+sudo scripts/verify-all-free-models-via-newapi.sh # 7 个免费模型全跑一遍
+```
+
+判断成功的硬证据是 **new-api 的日志里 `channel_id` 是这条新渠道的 id**：
+
+```bash
+sudo docker exec postgres psql -U root -d new-api -c \
+  "select id, model_name, channel_id, use_time from logs where model_name<>'' order by id desc limit 5;"
+```
+
+> **验证脚本挑用户令牌时的坑**：new-api 用 GORM 软删除，被删掉的令牌在 `tokens` 表里**还在**。
+> 拿令牌来测必须带上 `and deleted_at is null`，否则极容易挑到一条已删除的令牌，
+> 然后拿到 `401 Invalid token`，而服务端日志只会说 `failed to get token: record not found`
+> ——看起来像路由或渠道的问题，其实是挑了条死令牌。另外库里存的是**裸键**，
+> 对外发请求要补回 `sk-` 前缀（中间件会 `TrimPrefix(key, "sk-")` 再查库）。
+
 ---
 
 ## 8. 已知限制（务必读）

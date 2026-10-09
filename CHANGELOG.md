@@ -26,10 +26,20 @@
 - 运维脚本（都在仓库 `scripts/` 下，部署机上 `sudo` 跑）：
   `zenproxy-status.sh`（一次性自检）、`probe-free-models.sh`（实测哪些免费模型真的可用）、
   `refresh-free-models.py`（换 `free_tier.models` 清单）、`probe-resin-slots.sh`（实测 Resin 可用率）、
-  `set-resin-slots.py`（扩池子）、`e2e-free-tier.sh`（端到端验证套壳与 SSE 折叠）。
+  `set-resin-slots.py`（扩池子）、`e2e-free-tier.sh`（端到端验证套壳与 SSE 折叠）、
+  `soak-rotation.sh`（连打多次看轮换）、以及 new-api 侧的接入与排障脚本
+  `create-newapi-channel.sh` / `e2e-through-newapi.sh` / `verify-all-free-models-via-newapi.sh`。
 
 ### 文档
 
+- `deploy/README.md` 新增 §7.1/§7.2：脚本化建渠道要处理的三个坑——为什么必须走管理 API
+  （`abilities` 表才是路由，只插 `channels` 渠道永远选不中）、两个接口形状不同
+  （`POST` 要包在 `channel` 字段里、`PUT` 是裸对象带 `id`）、系统访问令牌是 `character(32)`；
+  以及验证脚本挑令牌时**必须带 `deleted_at is null`**（GORM 软删除，挑到死令牌会得到
+  401 `Invalid token`，而服务端只报 `record not found`，极易误判成渠道问题）。
+- `docs/RESIN.md` 新增「池子该开多大：实测」：两批各 12 个 slot 的可用率是 2/12 与 7/12，
+  合计约 38% 且批次间波动极大；默认模板的 2 个成员平均不到 1 个活着，扩到 24 个后
+  能稳定有 5–7 个真实出口，连打 10 次免费模型 10/10 成功。
 - `docs/FREE-TIER.md` 新增第五节「清单会漂移」：模型名过期表现为 **400 `Model is unavailable`
   而不是 403**，所以门禁学习机制救不了它，必须人工换；附三步换法、推理模型需要更大 token 预算的
   判别方法，以及两种容易被误判成清单过期的失败（`RegionError` 按国家限制、`ModelProtocolUnsupported`）。
