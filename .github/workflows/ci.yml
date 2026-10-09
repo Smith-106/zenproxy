@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Formatting is checked rather than fixed: a diff here means someone
+      # forgot to run `make fmt`, and CI is the wrong place to guess intent.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race matters here: the registry, pool and free-tier learner are all
+      # shared mutable state touched from concurrent requests, which is exactly
+      # the class of bug a plain `go test` will happily miss.
+      - name: go test
+        run: go test ./... -race -count=1
+
+      - name: build (linux/amd64, static)
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags="-s -w" -o /tmp/zenproxy ./cmd/zenproxy

@@ -1,5 +1,7 @@
 # zenproxy
 
+[![CI](https://github.com/Smith-106/zenproxy/actions/workflows/ci.yml/badge.svg)](https://github.com/Smith-106/zenproxy/actions/workflows/ci.yml)
+
 **给账号池配一个会自己换 IP 的出口层。**
 
 new-api 和 LiteLLM 都能给一个渠道配一个代理，但都是一次性静态值：填什么就是什么。
@@ -236,4 +238,9 @@ internal/admin/     管理 API + 内嵌控制台
 deploy/             容器部署产物
 docs/               接入与运维文档
 scripts/            本机冒烟用的假上游 / 假出口
+.github/workflows/  CI：gofmt / vet / test -race / 静态构建
+CHANGELOG.md        版本变更记录
 ```
+
+发布版本与二进制见 [Releases](https://github.com/Smith-106/zenproxy/releases)，
+版本变更见 [`CHANGELOG.md`](CHANGELOG.md)。
