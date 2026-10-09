@@ -1,0 +1,112 @@
+# =============================================================================
+# zenproxy —— 挂在「已经跑着的 new-api」旁边的出口层   ★ 默认部署路线
+# =============================================================================
+#
+# 部署位置（固定）：
+#   /opt/zenproxy/docker-compose.yml   本文件
+#   /opt/zenproxy/config.yaml          zenproxy 配置（只读挂进容器）
+#   /opt/zenproxy/.env                密钥（只给 compose 做变量插值，文件本身不进容器）
+#   /opt/zenproxy/data/               持久化状态，挂到容器 /data
+#
+# 只加入两个「已存在的」外部网络，不创建、不修改它们：
+#   new-api_default   new-api 按名字 http://zenproxy:9000 找到本容器
+#   resin_default     本容器按名字 resin:2260 找到 Resin 出口池
+#   => new-api 与 resin 各自的 compose 文件一个字都不用改。
+#
+# 镜像：本文件只引用 zenproxy:latest，不在 /opt/zenproxy 现场构建（那里只有上面几个
+# 文件，没有源码）。先在仓库根目录构建好再弄到宿主机上，二选一：
+#   同机构建： cd <仓库根> && docker build -f deploy/Dockerfile -t zenproxy:latest .
+#   异机构建： docker build -t zenproxy:latest . && docker save zenproxy:latest | gzip \
+#                | ssh <宿主机> 'gunzip | docker load'
+#
+# 起停：
+#   cd /opt/zenproxy
+#   sudo docker compose up -d          # 起 / 更新
+#   sudo docker compose logs -f        # 看日志
+#   sudo docker compose down           # 停（数据留在 ./data）
+#
+# 备选路线（已经用 LiteLLM 当网关、没有 new-api 的人）：docker-compose.litellm.yml
+
+name: zenproxy
+
+services:
+  zenproxy:
+    image: zenproxy:latest
+    container_name: zenproxy
+    # always 而不是 unless-stopped：出口层是 new-api 的强依赖，宿主重启后必须自己
+    # 站起来，不能因为上次是手工 stop 过就一直躺着。
+    restart: always
+
+    ports:
+      # 只发布到宿主回环，供本机 curl 自检与 /admin/ 控制台使用。
+      # 对外入口是 new-api（127.0.0.1:3000），zenproxy 不直接暴露公网。
+      # 远端要看控制台请走 SSH 隧道（见 README 第五节），不要为此开端口。
+      - "127.0.0.1:9000:9000"
+
+    volumes:
+      # 配置只读挂载。容器以 uid/gid 10001 运行（见 Dockerfile），宿主侧必须保证
+      # 它能读：install.sh 会把 config.yaml 设成 root:10001 0640。
+      - ./config.yaml:/app/config.yaml:ro
+      # 唯一可写路径。state.json 落在这里，容器重建后账号↔出口的绑定关系不丢。
+      # bind mount 而不是 named volume：路径是约定死的 ./data，备份就是 cp 一个目录。
+      - ./data:/data
+
+    # ⚠ 故意不写 env_file: .env（上一版 compose 踩过这个坑，这里保持同样的结论）。
+    #   env_file 是把整个文件塞进容器：今后往 /opt/zenproxy/.env 里加任何东西
+    #   （别的服务的 token、临时调试变量……）都会顺带进 zenproxy 的环境变量表。
+    #   zenproxy 只需要下面这 4 个，多给一个都是白送的爆炸半径。
+    #   逐项注入的做法是「compose 先插值、再把这几项传进去」：值仍然来自 .env，
+    #   .env 文件本身不进容器。自检方法（输出里应当只有这 4 个名字）：
+    #     docker compose -f /opt/zenproxy/docker-compose.yml config | grep -A 6 environment:
+    environment:
+      # config.yaml 里写的是 ${VAR}，由 zenproxy 加载配置时展开。
+      # 少给任何一个，zenproxy 会以「still contains an unexpanded ${VAR}」直接退出——
+      # 这是设计如此：宁可起不来，也不要带着空密钥跑几小时后才以 401 暴露。
+      ZEN_ADMIN_TOKEN: "${ZEN_ADMIN_TOKEN:?未设置，请填 /opt/zenproxy/.env}"
+      RESIN_PROXY_TOKEN: "${RESIN_PROXY_TOKEN:?未设置，请填 /opt/zenproxy/.env}"
+      ZEN_KEY_01: "${ZEN_KEY_01:?未设置，请填 /opt/zenproxy/.env}"
+      ZEN_KEY_02: "${ZEN_KEY_02:?未设置，请填 /opt/zenproxy/.env}"
+
+    # /healthz 是免鉴权的存活探测，固定返回 200 {"status":"ok"}。
+    # 注意它只说明进程活着，不说明出口可用；出口健康看 /admin/api/status 的
+    # exits_healthy。健康检查故意不依赖后端，否则出口池临时全挂会让容器反复重启。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "4", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # 日志按请求一条（INFO），必须限大小，否则长跑会把宿主磁盘写满。
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # ---- 加固：进程本身已经是非 root（uid 10001），这几项只收紧不放松 ----
+    security_opt:
+      - "no-new-privileges:true"
+    # 根文件系统只读。唯一的可写路径是上面的 /data 挂载。
+    read_only: true
+    # 兜一个可写临时目录，避免将来某个依赖需要 scratch 空间时莫名其妙失败。
+    tmpfs:
+      - /tmp
+    # 监听 9000（>1024）、发起出站连接都不需要任何 capability。
+    cap_drop:
+      - ALL
+
+    networks:
+      - new-api_default
+      - resin_default
+
+networks:
+  # external: true = 只加入，不创建、不删除、不改属性。这两个网络分别由 new-api 和
+  # resin 的 compose 项目创建，名字由它们的项目名决定，所以这里写死名字，不从本项目
+  # 的项目名推导。
+  new-api_default:
+    external: true
+    name: new-api_default
+  resin_default:
+    external: true
+    name: resin_default

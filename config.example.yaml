@@ -1,0 +1,109 @@
+# zenproxy 配置示例
+#
+# 复制为 config.yaml 后填写。任何 ${VAR} 会在加载时展开为环境变量：
+# 密钥不要写进这个文件，写进 .env（0600）或 systemd/docker 的环境里。
+#
+# 快速开始（接入 new-api）：
+#   1. 服务器上跑起 zenproxy（见 deploy/）
+#   2. new-api → 渠道 → 高级配置 → Base URL 填 http://zenproxy:9000/<账号ID>
+#      （想让"报错自动换 IP"生效就填这里；填"代理"字段只能靠连接失败触发）
+#   3. 加一个账号：控制台 http://127.0.0.1:9000/admin/ 或 POST /admin/api/accounts
+
+server:
+  # 只监听回环；要跨容器访问时绑 0.0.0.0 并用 allowed_hosts + 防火墙兜住
+  listen: "127.0.0.1:9000"
+  admin_token: "${ZEN_ADMIN_TOKEN}"
+  read_timeout: 30s
+  idle_timeout: 120s
+
+# 上游定义。joinUpstreamPath 会把客户端路径里的重复 /v1 折叠掉，所以
+# 无论调用方拼 /v1/chat/completions 还是 /chat/completions 都能命中同一个地址。
+upstreams:
+  zen:
+    base_url: "https://opencode.ai/zen/v1"
+  zen-go:
+    base_url: "https://opencode.ai/zen/go/v1"
+    # 可选：按上游要求覆盖请求头（一般留空）
+    # headers:
+    #   User-Agent: "..."
+
+proxies:
+  # Resin 自建代理池。粘性身份格式 Platform.<Account>:<PROXY_TOKEN>，
+  # 同一个 Account 只要节点还活着就会一直落在同一个出口上。
+  resin:
+    enabled: true
+    scheme: "socks5h"          # Resin 同时提供 http / socks5，socks5h 远端解析更省事
+    host: "127.0.0.1:2260"      # 容器内访问宿主机的 Resin：host.docker.internal:2260
+    platform: "Default"
+    token: "${RESIN_PROXY_TOKEN}"
+    accounts:                  # 池子成员。数量决定并发出口上限，与账号数无关
+      - "slot-01"
+      - "slot-02"
+  # 额外的静态出口，和 Resin 成员进同一个池子
+  static: []
+  #  static:
+  #    - "socks5h://user:pass@1.2.3.4:1080"
+  #    - "http://user:pass@5.6.7.8:8080"
+
+# 免费额度（free tier）：opencode 的 *-free 模型只认官方客户端，别的调用方一律 403
+# FreeTierError。开启后 zenproxy 会把这些模型的请求补齐成官方客户端的样子，
+# 于是免费额度能直接用。判据、阈值与代价见 docs/FREE-TIER.md。
+#
+# 只影响下面列出的模型（以及第一次被拒后就地学会的模型）：付费模型一个字节都不改。
+free_tier:
+  enabled: true                # 关掉 = 完全不改写任何请求
+  models:                      # 预期在免费额度里的模型。列表外的模型第一次被上游拒绝后
+    - big-pickle               # 会由 zenproxy 自动学会（控制台 status 的 free_tier.learned），
+    - deepseek-v4-flash-free   # 之后直接套壳，不再浪费一次 403。
+    - laguna-s-2.1-free
+    - ling-3.0-flash-free
+    - mimo-v2.5-free
+    - nemotron-3-ultra-free
+    - north-mini-code-free
+  user_agent: ""               # 留空 = 镜像抓包得到的官方客户端 UA；
+                               # 上游开始拒绝这个版本时才需要覆盖
+
+health:
+  interval: 60s
+  timeout: 8s
+  # 探活用 IP 回显接口拿到每个出口的真实出口 IP，仅用于展示与排障
+  probe_url: "https://api.ipify.org?format=json"
+  # 可达性探测：经该出口对上游做一次 TCP 隧道，失败即记账
+  reachability: "opencode.ai:443"
+  failure_threshold: 3         # 连续失败几次开始隔离
+  quarantine: 5m               # 首次隔离时长，之后按失败次数指数退避
+  max_backoff: 30m
+  # 上一轮探活耗时超过这个值的出口会被降级为"备用"，仍在轮询之外等待，
+  # 但不会再被优先选中。用公共/免费节点拼的池子强烈建议开这个——
+  # 实测这类池子里"能用"的出口常常要 20 秒才回。
+  # 不测量过的出口（latency 为 0）永远算合格，新加的成员不会被饿死。
+  max_latency: 5s
+  # 永久淘汰：连续失败到这个次数、中间一次都没成功过，就把这个出口彻底移出轮换。
+  # 和上面「隔离」的区别是——隔离到点会自己复活，淘汰不会。这是"垃圾 IP"真正离开池子的方式，
+  # 否则一个死透的出口会因为退避到期而被反复重试，永远占着位置。
+  # 任何一次成功都会把计数清零，所以"时好时坏但还能用"的出口不会被淘汰。
+  # 0 = 关闭这个功能（只隔离，不淘汰）。
+  retire_after: 20
+
+policy:
+  max_attempts: 3
+  rotate_on_status: [407, 429, 500, 502, 503, 504, 520, 522, 524]
+  rotate_on_transport: true
+  max_body_bytes: 33554432
+  stream_idle_timeout: 300s
+  upstream_timeout: 600s
+  # 正向代理模式的目标白名单。上游域名会自动加入，无需手写。
+  # 留空仅当你确定监听地址是回环。
+  allowed_hosts: []
+
+# 种子账号：只在状态文件里没有该 ID 时写入，之后以控制台/接口的改动为准。
+# 密钥一律走环境变量。
+accounts:
+  - id: zen-01
+    name: "示例账号"
+    upstream: zen
+    api_key: "${ZEN_KEY_01}"
+    proxy: auto                # auto（从池子挑并保持亲和）| direct | 具体出口 ID
+    enabled: true
+
+state_file: "./data/state.json"

@@ -1,0 +1,76 @@
+# LiteLLM 配置模板 —— 与 deploy/docker-compose.yml 配套
+#
+# 设计要点
+# ========
+# 1. 一个账号 = 一个 deployment（刻意的，别合并）
+#    LiteLLM 的 cooldown / fallbacks / allowed_fails 都是按 deployment 记账的。
+#    把 2 个账号塞成 1 个 deployment 的多个 api_key，就只剩「随机挑一个 key」，
+#    某个账号被上游限流时不会有任何冷却，会持续把请求打到同一个坏账号上。
+#    拆成 2 个 deployment 之后：zen-01 连续失败 3 次 → 冷却 60s → 流量整体走 zen-02。
+#
+# 2. LiteLLM 没有 per-deployment 出口代理
+#    BerriAI/litellm#25563 至今未提供。所以「每个账号走不同出口 IP」这件事
+#    必须由 zenproxy 承担：api_base 指向 /<account-id>，zenproxy 再按账号挑出口。
+#    LiteLLM 侧只负责账号级冷却与回退，不掺和网络层。
+#
+# 3. 账号 ID 必须与 zenproxy config.yaml 的 accounts[].id 一一对应
+#    写错不会报错，只会 404（zenproxy 找不到该账号）——上线后先跑一次自检再挂流量。
+#
+# 注意路径：反代模式是 /<账号ID>/<上游路径>，**没有 /a/ 前缀**。
+# 老版本文档里写的 http://zenproxy:9000/a/zen-01 是错的，会 404。
+#
+# 占位说明：<模型名> / <账号ID> / <主模型组名> 都需要替换成真实值。
+
+model_list:
+  # ---- 账号 zen-01 ----
+  - model_name: "<模型名>"              # 对外暴露的模型名，客户端用这个名字调用
+    litellm_params:
+      model: "openai/<模型名>"          # openai/ 前缀 = 走 OpenAI 兼容协议
+      api_base: "http://zenproxy:9000/zen-01"
+      api_key: "REPLACED-BY-ZENPROXY"   # zenproxy 会按账号注入真实 key，这里放非空占位即可
+      rpm: 600                          # 每账号限速，防止单账号把配额打满
+      timeout: 600                      # 与 zenproxy 的 upstream_timeout 对齐，别设小了掐断长流
+
+  # ---- 账号 zen-02 ----
+  # 同一 model_name 的第二个 deployment：LiteLLM 会在两者之间做负载与容错。
+  - model_name: "<模型名>"
+    litellm_params:
+      model: "openai/<模型名>"
+      api_base: "http://zenproxy:9000/zen-02"
+      api_key: "REPLACED-BY-ZENPROXY"
+      rpm: 600
+      timeout: 600
+
+router_settings:
+  # simple-shuffle: 不用 Redis，单实例最省事。多副本 + 需要跨副本一致性时再换
+  # usage-based-routing（那需要 Redis）。
+  routing_strategy: simple-shuffle
+
+  # LiteLLM 这一层重试。与 zenproxy 的 policy.max_attempts 是两套独立机制：
+  #   zenproxy  在同一账号内换出口 IP 重试（解决「这个 IP 坏了」）
+  #   litellm   换账号 / 换 deployment 重试（解决「这个账号坏了」）
+  # 两者相乘是理论最大上游请求数，别都设大。2 × 3 = 6 已经够用。
+  num_retries: 3
+  allowed_fails: 3                     # 连续失败 3 次才判定 deployment 不可用（与 health.failure_threshold 对齐）
+  cooldown_time: 60                    # 冷却 60s（与 health.quarantine 同量级）
+
+  # 同一模型组内的 deployment 互为兜底，靠 simple-shuffle + cooldown 自动生效。
+  # 如果后续接了别的 provider（例如官方直连），在这里登记跨模型组回退：
+  #   fallbacks: [{"<主模型组名>": ["<备用模型组名>"]}]
+  # 目前只有同一个模型组，没有第二个组可回退，故留空。★ 注意：写一个不存在的模型组名，
+  # LiteLLM 启动就会报错，别照抄网上的示例。
+  fallbacks: []
+
+  # 重试时换一个 deployment，而不是原地重打同一个账号。
+  retry_after: 5
+
+litellm_settings:
+  drop_params: true                    # 丢掉上游不认的参数，避免 4xx 直接打穿
+  # num_retries 已在 router_settings 里设过，这里不重复。
+  request_timeout: 600                # 全局兜底超时，与 deployment 的 timeout 保持一致
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL
+  # 数据库连接池。单机够用，别设太大把 Postgres 连接数吃满。
+  database_connection_pool_limit: 10

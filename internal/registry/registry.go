@@ -1,0 +1,504 @@
+// Package registry owns the account table and the account -> exit binding.
+//
+// The binding is an *affinity*, not an identity mapping: an account stays on
+// the exit it last succeeded through so that long conversations do not hop
+// networks mid-stream, and that affinity is dropped the moment the exit looks
+// unhealthy. Exits are a shared availability pool, not a per-account identity
+// slot.
+package registry
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"zenproxy/internal/model"
+	"zenproxy/internal/proxypool"
+)
+
+// file is the on-disk state. It contains API keys, so it is written 0600.
+type file struct {
+	Version  int                     `json:"version"`
+	Accounts []model.Account         `json:"accounts"`
+	Bindings map[string]string       `json:"bindings"`
+	Stats    map[string]*model.Stats `json:"stats"`
+}
+
+// Entry is one account plus its runtime state.
+type Entry struct {
+	model.Account
+	Stats model.Stats
+}
+
+// View is the API-safe projection of an account: no credentials.
+type View struct {
+	ID          string            `json:"id"`
+	Name        string            `json:"name,omitempty"`
+	Upstream    string            `json:"upstream"`
+	Enabled     bool              `json:"enabled"`
+	Proxy       string            `json:"proxy"`
+	Weight      int               `json:"weight"`
+	HasKey      bool              `json:"has_key"`
+	KeyHint     string            `json:"key_hint,omitempty"`
+	BoundExit   string            `json:"bound_exit,omitempty"`
+	BoundExitIP string            `json:"bound_exit_ip,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Stats       model.Stats       `json:"stats"`
+}
+
+// Registry is the concurrency-safe account table.
+type Registry struct {
+	mu       sync.RWMutex
+	accounts map[string]*Entry
+	bindings map[string]string
+	order    []string
+
+	path string
+	pool *proxypool.Pool
+	log  *slog.Logger
+}
+
+// New creates an empty registry bound to a state file path.
+func New(path string, pool *proxypool.Pool, log *slog.Logger) *Registry {
+	return &Registry{
+		accounts: make(map[string]*Entry),
+		bindings: make(map[string]string),
+		path:     path,
+		pool:     pool,
+		log:      log,
+	}
+}
+
+// Load reads the state file. A missing file is not an error: the config's
+// seed accounts will be applied instead.
+func (r *Registry) Load() error {
+	if r.path == "" {
+		return nil
+	}
+	raw, err := os.ReadFile(r.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read state %s: %w", r.path, err)
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return fmt.Errorf("parse state %s: %w", r.path, err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, a := range f.Accounts {
+		if a.ID == "" {
+			continue
+		}
+		e := &Entry{Account: a}
+		if st, ok := f.Stats[a.ID]; ok && st != nil {
+			e.Stats = *st
+		}
+		r.accounts[a.ID] = e
+		r.order = append(r.order, a.ID)
+	}
+	for account, exit := range f.Bindings {
+		if exit == "" {
+			continue
+		}
+		r.bindings[account] = exit
+		if r.pool != nil {
+			r.pool.Bind(exit, account)
+		}
+	}
+	return nil
+}
+
+// Seed inserts accounts from the config that are not already known. Existing
+// state always wins, so an operator editing the file by hand cannot clobber
+// keys that were rotated through the admin API.
+func (r *Registry) Seed(accounts []model.Account) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	added := 0
+	for _, a := range accounts {
+		if a.ID == "" {
+			continue
+		}
+		if _, exists := r.accounts[a.ID]; exists {
+			continue
+		}
+		if a.CreatedAt.IsZero() {
+			a.CreatedAt = time.Now().UTC()
+		}
+		r.accounts[a.ID] = &Entry{Account: a}
+		r.order = append(r.order, a.ID)
+		added++
+	}
+	return added
+}
+
+// Save writes the state atomically with 0600 permissions.
+func (r *Registry) Save() error {
+	if r.path == "" {
+		return nil
+	}
+	r.mu.RLock()
+	f := file{
+		Version:  1,
+		Accounts: make([]model.Account, 0, len(r.order)),
+		Bindings: make(map[string]string, len(r.bindings)),
+		Stats:    make(map[string]*model.Stats, len(r.order)),
+	}
+	seen := make(map[string]bool, len(r.order))
+	for _, id := range r.order {
+		e, ok := r.accounts[id]
+		if !ok || seen[id] {
+			continue
+		}
+		seen[id] = true
+		f.Accounts = append(f.Accounts, e.Account)
+		st := e.Stats
+		f.Stats[id] = &st
+	}
+	for a, exit := range r.bindings {
+		f.Bindings[a] = exit
+	}
+	r.mu.RUnlock()
+
+	body, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
+		return err
+	}
+	tmp := r.path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, r.path)
+}
+
+// Get returns one account entry.
+func (r *Registry) Get(id string) (*Entry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.accounts[id]
+	return e, ok
+}
+
+// List snapshots every account for the admin API, sorted by id.
+func (r *Registry) List() []View {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]View, 0, len(r.accounts))
+	for _, e := range r.accounts {
+		out = append(out, r.viewLocked(e))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// View projects a single account without credentials.
+func (r *Registry) View(id string) (View, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.accounts[id]
+	if !ok {
+		return View{}, false
+	}
+	return r.viewLocked(e), true
+}
+
+func (r *Registry) viewLocked(e *Entry) View {
+	v := View{
+		ID:        e.ID,
+		Name:      e.Name,
+		Upstream:  e.Upstream,
+		Enabled:   e.Enabled,
+		Proxy:     e.Proxy,
+		Weight:    e.Weight,
+		HasKey:    e.APIKey != "",
+		KeyHint:   keyHint(e.APIKey),
+		BoundExit: r.bindings[e.ID],
+		Headers:   e.Headers,
+		Stats:     e.Stats,
+	}
+	if v.BoundExit != "" && r.pool != nil {
+		for _, h := range r.pool.Health() {
+			if h.ID == v.BoundExit {
+				v.BoundExitIP = h.ExitIP
+				break
+			}
+		}
+	}
+	return v
+}
+
+// keyHint exposes just enough of a key to tell two accounts apart.
+func keyHint(key string) string {
+	if len(key) <= 8 {
+		return ""
+	}
+	return key[:4] + "…" + key[len(key)-4:]
+}
+
+// Upsert creates or replaces an account. An empty APIKey keeps the stored one,
+// so the admin UI can edit metadata without ever re-typing the key.
+func (r *Registry) Upsert(a model.Account) error {
+	if err := model.ValidateAccountID(a.ID); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, exists := r.accounts[a.ID]
+	if !exists {
+		a.CreatedAt = time.Now().UTC()
+		e = &Entry{Account: a}
+		r.accounts[a.ID] = e
+		r.order = append(r.order, a.ID)
+		return nil
+	}
+	if a.APIKey == "" {
+		a.APIKey = e.APIKey
+	}
+	if a.CreatedAt.IsZero() {
+		a.CreatedAt = e.CreatedAt
+	}
+	e.Account = a
+	return nil
+}
+
+// Delete removes an account and releases its binding.
+func (r *Registry) Delete(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.accounts[id]; !ok {
+		return false
+	}
+	delete(r.accounts, id)
+	if exit, ok := r.bindings[id]; ok {
+		if r.pool != nil {
+			r.pool.Unbind(exit, id)
+		}
+		delete(r.bindings, id)
+	}
+	for i, oid := range r.order {
+		if oid == id {
+			r.order = append(r.order[:i], r.order[i+1:]...)
+			break
+		}
+	}
+	return true
+}
+
+// ExitFor resolves the exit an account should use right now.
+//
+// Precedence:
+//  1. an existing binding, as long as that exit is still usable — this is the
+//     session affinity, so a long conversation does not change IP mid-stream;
+//  2. the account's configured exit, when it names one and that exit is healthy;
+//  3. a fresh pick from the pool.
+//
+// The configured exit is therefore a *preference*, not a life sentence: a
+// sick pinned exit is abandoned rather than used forever, otherwise rotation
+// could never rescue a pinned account.
+//
+// A nil result means "dial directly".
+func (r *Registry) ExitFor(accountID string) *proxypool.Proxy {
+	r.mu.Lock()
+	e, ok := r.accounts[accountID]
+	if !ok {
+		r.mu.Unlock()
+		return nil
+	}
+	mode := e.Proxy
+	bound := r.bindings[accountID]
+	r.mu.Unlock()
+
+	switch mode {
+	case "direct", "none":
+		return nil
+	}
+	if r.pool == nil || r.pool.Len() == 0 {
+		return nil
+	}
+
+	if bound != "" {
+		if px, ok := r.pool.Get(bound); ok {
+			if healthy, _ := r.pool.Healthy(bound); healthy {
+				r.pool.Bind(bound, accountID)
+				return px
+			}
+		}
+	}
+
+	if mode != "auto" && mode != "" {
+		if px, ok := r.pool.Get(mode); ok {
+			if healthy, _ := r.pool.Healthy(mode); healthy {
+				r.setBinding(accountID, mode)
+				return px
+			}
+			r.log.Warn("preferred exit is unhealthy, falling back to the pool",
+				"account", accountID, "exit", mode)
+		} else {
+			r.log.Warn("account references unknown exit, falling back to the pool",
+				"account", accountID, "exit", mode)
+		}
+	}
+
+	px := r.pool.Pick("")
+	if px == nil {
+		return nil
+	}
+	r.setBinding(accountID, px.ID)
+	return px
+}
+
+// Bind pins an account to a specific exit immediately.
+func (r *Registry) Bind(accountID, exitID string) error {
+	if r.pool == nil || r.pool.Len() == 0 {
+		return errors.New("no exits configured")
+	}
+	if _, ok := r.pool.Get(exitID); !ok {
+		return fmt.Errorf("unknown exit %q", exitID)
+	}
+	if _, ok := r.Get(accountID); !ok {
+		return fmt.Errorf("unknown account %q", accountID)
+	}
+	r.setBinding(accountID, exitID)
+	return nil
+}
+
+// Rotate moves an account off excludeExit and returns the replacement.
+func (r *Registry) Rotate(accountID, excludeExit string) *proxypool.Proxy {
+	if r.pool == nil || r.pool.Len() == 0 {
+		return nil
+	}
+	r.mu.Lock()
+	if prev, ok := r.bindings[accountID]; ok && prev != "" {
+		r.pool.Unbind(prev, accountID)
+	}
+	r.mu.Unlock()
+
+	px := r.pool.Pick(excludeExit)
+	if px == nil {
+		return nil
+	}
+	r.setBinding(accountID, px.ID)
+	r.mu.Lock()
+	if e, ok := r.accounts[accountID]; ok {
+		e.Stats.Rotations++
+	}
+	r.mu.Unlock()
+	return px
+}
+
+func (r *Registry) setBinding(accountID, exitID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bindings[accountID] = exitID
+	if r.pool != nil {
+		r.pool.Bind(exitID, accountID)
+	}
+}
+
+// Record folds one attempt's outcome into the account statistics.
+func (r *Registry) Record(accountID string, class model.ErrorClass, err error) {
+	now := time.Now().UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.accounts[accountID]
+	if !ok {
+		return
+	}
+	e.Stats.UpstreamMsgs++
+	e.Stats.LastUsed = &now
+	e.Stats.LastClass = class
+	// The class decides, not the error: a caller that records a refusal
+	// without attaching an error must not be counted as a success, or the
+	// console would show a healthy account that the upstream keeps rejecting.
+	if class == model.ClassOK {
+		e.Stats.Success++
+		e.Stats.LastSuccess = &now
+		e.Stats.LastError = ""
+		return
+	}
+	e.Stats.Failures++
+	if err != nil {
+		e.Stats.LastError = err.Error()
+	} else {
+		e.Stats.LastError = string(class)
+	}
+}
+
+// BeginRequest counts a request against an account before it is sent.
+func (r *Registry) BeginRequest(accountID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.accounts[accountID]; ok {
+		e.Stats.Requests++
+	}
+}
+
+// Stats returns a copy of one account's counters.
+func (r *Registry) Stats(accountID string) (model.Stats, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	e, ok := r.accounts[accountID]
+	if !ok {
+		return model.Stats{}, false
+	}
+	return e.Stats, true
+}
+
+// Snapshot returns the stats block for every account.
+func (r *Registry) Snapshot() map[string]model.Stats {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]model.Stats, len(r.accounts))
+	for id, e := range r.accounts {
+		out[id] = e.Stats
+	}
+	return out
+}
+
+// EnabledIDs lists ids of enabled accounts, for status output.
+func (r *Registry) EnabledIDs() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []string
+	for _, id := range r.order {
+		if e, ok := r.accounts[id]; ok && e.Enabled {
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// RunSaver snapshots state to disk periodically and on shutdown.
+func (r *Registry) RunSaver(ctxDone <-chan struct{}, every time.Duration) {
+	if every <= 0 {
+		every = 30 * time.Second
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctxDone:
+			if err := r.Save(); err != nil {
+				r.log.Error("final state save failed", "err", err)
+			}
+			return
+		case <-t.C:
+			if err := r.Save(); err != nil {
+				r.log.Error("state save failed", "err", err)
+			}
+		}
+	}
+}

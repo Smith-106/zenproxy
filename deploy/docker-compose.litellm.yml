@@ -1,0 +1,170 @@
+# 备选路线：已经用 LiteLLM 当网关、且没有现成 new-api 的人走这条；默认路线是 docker-compose.yml（挂在已有 new-api 旁边）。
+# =============================================================================
+# 【备选】zenproxy + LiteLLM + PostgreSQL 单机编排
+# =============================================================================
+#
+# 与默认路线的关系
+# ================
+# 默认路线（docker-compose.yml）把 zenproxy 挂到「已经跑着的 new-api」旁边，只需要
+# zenproxy 一个服务。本文件是给**没有 new-api、本来就在用 LiteLLM**的人准备的完整栈。
+#
+# ⚠ 两条路线互斥，不要同时起：
+#   * 都占用宿主 127.0.0.1:9000，且容器名都叫 zenproxy；
+#   * 都要一个同目录下的 config.yaml，但内容不同（Resin 地址、state_file 都不一样）。
+#   换路线前先 `docker compose down` 掉另一条。
+#
+# ⚠ 本路线的 config.yaml 与默认路线不通用，差异只有两处：
+#   * proxies.resin.host: "host.docker.internal:2260"   # 默认路线是 "resin:2260"
+#   * 需要本文件里的 extra_hosts: host-gateway
+#   其余字段与 deploy/config.example.yaml 相同。建议本文件、litellm.config.yaml 和
+#   它自己的 config.yaml 单独放一个目录（例如 /opt/zenproxy-litellm/）。
+#
+# ⚠ 本路线的 .env 比默认路线多 4 项（默认路线的 deploy/.env.example 里没有它们，
+#   因为那边不需要 LiteLLM 与 Postgres）。这 4 项要自己补进本目录的 .env：
+#     LITELLM_MASTER_KEY=REPLACE_WITH_LITELLM_MASTER_KEY   # echo "sk-$(openssl rand -hex 32)"
+#     POSTGRES_PASSWORD=REPLACE_WITH_POSTGRES_PASSWORD     # openssl rand -hex 24，用 hex 免得 URL 转义
+#     DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD}@postgres:5432/litellm
+#     POSTGRES_USER=litellm        # 可选，默认 litellm
+#     POSTGRES_DB=litellm          # 可选，默认 litellm
+#   加上与默认路线相同的 4 项：ZEN_ADMIN_TOKEN / RESIN_PROXY_TOKEN / ZEN_KEY_01 / ZEN_KEY_02。
+#
+# 用法（在本目录下执行，.env 与 litellm.config.yaml 需与本文件同级）：
+#   docker compose -f docker-compose.litellm.yml config   # 语法自检，不拉镜像
+#   docker compose -f docker-compose.litellm.yml up -d
+#
+# 三个服务的职责边界：
+#   zenproxy  —— 出口 IP 轮换。每个上游账号绑一个独立出口，出口坏了自动换 IP 重试。
+#   litellm   —— 模型网关。按账号拆 deployment，靠自身的 cooldown/fallbacks 做账号级容错。
+#   postgres  —— LiteLLM 的 DB（虚拟 key、用量、花费）。
+
+name: zenproxy-litellm
+
+services:
+  zenproxy:
+    build:
+      # context 必须是仓库根：需要 go.mod / internal / cmd。
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: zenproxy:latest
+    container_name: zenproxy
+    restart: unless-stopped
+
+    # ★ 本路线特有：容器内 zenproxy 要访问宿主机的 Resin 代理池（宿主只监听
+    #   127.0.0.1:2260），必须挂 host.docker.internal，并在 zenproxy 配置里把
+    #   proxies.resin.host 写成 "host.docker.internal:2260"。缺了这段，Resin 出口
+    #   全部连不上，会静默退化成直连。
+    #   （默认路线不需要这段：那里 zenproxy 直接接 resin_default 网络，写 resin:2260。）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    ports:
+      # 只发布到宿主回环。
+      - "127.0.0.1:9000:9000"
+
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      # state.json 所在目录。用 named volume 而不是 bind mount：
+      # bind mount 会把宿主的属主带进来，非 root（uid 10001）可能写不进去。
+      - zenproxy-data:/data
+
+    # ⚠ 同样故意不写 env_file: .env（litellm 服务才用它）。
+    #   env_file 是把整个文件塞进容器：zenproxy 会连带拿到 DATABASE_URL /
+    #   LITELLM_MASTER_KEY / POSTGRES_PASSWORD —— 而它一个都不需要，纯属扩大爆炸半径。
+    #   最小权限做法：只注入下面这几项；变量值仍来自 .env，由 compose 插值后传入。
+    environment:
+      # config.yaml 里的 ${ZEN_ADMIN_TOKEN} / ${RESIN_PROXY_TOKEN} / ${ZEN_KEY_0x} 在加载时展开。
+      ZEN_ADMIN_TOKEN: "${ZEN_ADMIN_TOKEN:?ZEN_ADMIN_TOKEN 未设置，检查 .env}"
+      RESIN_PROXY_TOKEN: "${RESIN_PROXY_TOKEN:?RESIN_PROXY_TOKEN 未设置，检查 .env}"
+      ZEN_KEY_01: "${ZEN_KEY_01:?ZEN_KEY_01 未设置，检查 .env}"
+      ZEN_KEY_02: "${ZEN_KEY_02:?ZEN_KEY_02 未设置，检查 .env}"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "4", "-O", "/dev/null", "http://127.0.0.1:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - zen
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+
+    # 宿主 4000 只给 nginx 用；litellm 本身不做 TLS。
+    ports:
+      - "127.0.0.1:4000:4000"
+
+    volumes:
+      - ./litellm.config.yaml:/app/config.yaml:ro
+
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+
+    # 这里用 env_file 是有意的，方便以后在 .env 里补 LiteLLM 自己的开关
+    # （例如 REDIS_HOST、LANGFUSE_* 之类），不用每次改 compose。
+    # ⚠ 代价是 zenproxy 的密钥也会进这个容器，属于已知取舍。
+    env_file:
+      - path: .env
+        required: true
+
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY:?LITELLM_MASTER_KEY 未设置，检查 .env}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL 未设置，检查 .env}"
+      # 让 LiteLLM UI 可以增删模型；不需要就把这行注释掉。
+      STORE_MODEL_IN_DB: "True"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      zenproxy:
+        # 只等「起来了」，不等「健康」：zenproxy 健康与否取决于出口探针，
+        # 出口临时不可用时不应该把 LiteLLM 也拖住不启动。
+        condition: service_started
+
+    # 官方镜像有 python3 但没有 curl（BerriAI/litellm#9295），所以用 urllib 探活。
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=5).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    networks:
+      - zen
+
+  postgres:
+    image: postgres:16
+    container_name: zenproxy-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-litellm}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 未设置，检查 .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-litellm}"
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    # 不发布端口。只在 zen 网络内可达，避免数据库直接暴露到宿主。
+    expose:
+      - "5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-litellm} -d ${POSTGRES_DB:-litellm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+    networks:
+      - zen
+
+volumes:
+  zenproxy-data:
+  postgres-data:
+
+networks:
+  zen:
+    driver: bridge

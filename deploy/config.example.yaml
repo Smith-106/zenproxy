@@ -1,0 +1,148 @@
+# =============================================================================
+# zenproxy 配置模板 —— 默认部署路线（挂在已存在的 new-api 旁边）
+# =============================================================================
+#
+# 用法：
+#   cp config.example.yaml config.yaml
+#   chmod 640 config.yaml && chown root:10001 config.yaml   # 容器以 uid/gid 10001 运行
+#   然后按下面注释改，再 docker compose up -d
+#
+# 字段权威定义在 internal/config/config.go —— 本文件里的每个键都与它一一对应，
+# 没有多余键、也没有遗漏。
+# ⚠ 但反过来不成立：yaml 解析器**不校验未知键**（实测：把 state_file 写成
+#   state_file_typo 不会报任何错，只会静默用默认值）。改这个文件时请对着
+#   internal/config/config.go 抄键名。值的错误一定会被抓住，见下一段。
+#
+# 环境变量 ${VAR} 在加载时展开。没定义的变量会「原样保留」，启动随即报错退出，
+# 并指名道姓说是哪个变量 —— 这是刻意的，避免带着空密钥跑几小时才以 401 暴露。
+# 本文件里不写任何字面量凭据，一律走 ${...}。
+#
+# 容器里的环境变量只有 compose 显式注入的那 4 个（docker-compose.yml 的 environment
+# 段）：ZEN_ADMIN_TOKEN / RESIN_PROXY_TOKEN / ZEN_KEY_01 / ZEN_KEY_02。
+
+server:
+  # ★ 必须是 0.0.0.0:9000，不能是 127.0.0.1:9000：
+  #   new-api 从 new-api_default 网络按 http://zenproxy:9000 连进来，只绑容器回环
+  #   就等于没人连得上。对外暴露由 compose 的 ports 收窄在宿主 127.0.0.1:9000。
+  listen: "0.0.0.0:9000"
+  # /admin/ 与 /admin/api/* 的鉴权令牌。也可用 Authorization: Bearer 或 ?token=。
+  # 拿到它就等于拿到全部账号的出口控制权，别外泄。
+  admin_token: "${ZEN_ADMIN_TOKEN}"
+  read_timeout: 30s
+  idle_timeout: 120s
+
+# 上游 API 面。key 名任取，accounts[].upstream 引用的就是这里的 key。
+upstreams:
+  zen:
+    base_url: "https://opencode.ai/zen/v1"
+  zen-go:
+    base_url: "https://opencode.ai/zen/go/v1"
+    # 可选：按上游要求覆盖/追加请求头，一般留空。
+    # headers:
+    #   X-Some-Header: "value"
+
+# 出口池。池成员 = 一个能换 IP 的出口。
+proxies:
+  resin:
+    # Resin 自建代理池（正向代理）。粘性身份格式：<Platform>.<Account>:<token>@<host>
+    # —— 同一个 Account 名在节点存活期间固定落在同一个出口，会话不中途换 IP。
+    enabled: true
+
+    # socks5h 比 socks5 多一层「DNS 也在远端解析」：出口 IP 和解析结果一致，
+    # 某些上游按 DNS 出口做风控时用 h 更干净。
+    scheme: "socks5h"
+
+    # ★ 默认路线的关键取值："resin:2260"。
+    #   zenproxy 容器同时接在 resin_default 网络上，直接按容器别名访问 Resin，
+    #   不需要 host.docker.internal、不需要 host 网络、不需要改 resin 的 compose。
+    #   （上一版 LiteLLM 路线写的是 "host.docker.internal:2260"，那条路线才需要它。）
+    host: "resin:2260"
+
+    # Resin 的默认平台名，包含它全部可用节点。
+    platform: "Default"
+    token: "${RESIN_PROXY_TOKEN}"
+
+    # 每个成员 = 一个粘性出口槽位。它的**出口 ID 是 "resin-" + 槽位名**，即
+    # "resin-slot-01" / "resin-slot-02"（静态出口则是 "static-01"/"static-02"/…）。
+    # accounts[].proxy 引用的就是这些 ID，不是槽位名本身。
+    # 注意这是**池子容量**，不是账号数：两者可以不等，但一一对应时最好相等。
+    accounts:
+      - "slot-01"
+      - "slot-02"
+
+  # 额外静态出口：不走 Resin、直接可用的固定代理。
+  # 格式 <scheme>://[user:pass@]host:port，支持 http / https / socks5 / socks5h。
+  static: []
+  # 例如：
+  #   - "socks5h://user:pass@1.2.3.4:1080"
+  #   - "http://user:pass@5.6.7.8:8080"
+
+health:
+  interval: 60s
+  timeout: 8s
+  probe_url: "https://api.ipify.org?format=json"   # 用它拿出口的真实 IP
+  reachability: "opencode.ai:443"                  # 顺带确认上游可达
+  failure_threshold: 3                            # 连续失败 3 次判为坏出口
+  quarantine: 5m                                  # 首次隔离 5 分钟，之后指数退避
+  max_backoff: 30m                                # 退避上限
+
+  # ★ 永久淘汰：连续失败到这个次数、中间一次都没成功过，就把这个出口彻底移出轮换。
+  #   和「隔离」的区别是——隔离到点会自己复活，淘汰不会。这是"垃圾 IP"真正离开池子的方式，
+  #   否则一个死透的出口会因为退避到期被反复重试，永远占着位置、永远浪费重试预算。
+  #   任何一次成功都会把计数清零，"时好时坏但还能用"的出口不会被淘汰。
+  #   0 = 关闭（只隔离，不淘汰）。
+  #   Resin 这类公共/免费节点池实测 94% 的节点是坏的，这个值建议开，20 是保守值。
+  retire_after: 20
+
+  # 上一轮探活耗时超过这个值的出口会被降为「备用」：仍在池子里、仍算健康，
+  # 但不再被优先选中。实测这类池子里"能用"的出口常常要 20 秒才回，建议开。
+  # 未测量过的出口（latency 为 0）永远算合格，新加的成员不会被饿死。
+  max_latency: 5s
+
+policy:
+  max_attempts: 3
+  # 出现这些状态码就换出口重试。407 是代理自身鉴权失败（这个出口死了）。
+  # 反代模式（渠道填 Base URL）下上游响应是明文，这些码都看得到；
+  # 正向代理模式（渠道填「代理」）下 https 目标只有一条密文隧道，看不到，只能靠连接失败换。
+  rotate_on_status: [407, 429, 500, 502, 503, 504, 520, 522, 524]
+  rotate_on_transport: true                       # 连不上/超时也换出口
+  max_body_bytes: 33554432                        # 32 MiB
+  stream_idle_timeout: 300s                       # 流式响应 5 分钟没有新字节就断
+  upstream_timeout: 600s                          # 单次上游请求硬上限
+
+  # 正向代理模式的目标白名单。留空 = 不设白名单（放行任何目标），
+  # 只有监听到回环时才可以留空 —— 这里监听的正是 0.0.0.0，所以必须写。
+  # 上游 base_url 的域名会自动加入，不必手写；这里写出 opencode.ai 只是把意图写明。
+  allowed_hosts:
+    - "opencode.ai"
+
+# 种子账号：只在状态文件里还没有该 ID 时写入，之后以控制台/接口的改动为准。
+# 密钥一律走环境变量。id 就是反代路径的第一段：http://zenproxy:9000/<id>
+accounts:
+  - id: zen-01                  # new-api 渠道 Base URL 填 http://zenproxy:9000/zen-01
+    name: "主账号"
+    upstream: zen               # 引用上面 upstreams 的 key
+    api_key: "${ZEN_KEY_01}"
+    # auto   = 由池子挑一个出口并粘住（默认）
+    # direct = 不走代理，直连
+    # <出口ID> = 绑到具体出口，想让「一个账号一个出口」确定对应时用这个。
+    #            ⚠ 填的是出口 ID，不是槽位名：proxies.resin.accounts 里的 "slot-01"
+    #              对应的出口 ID 是 "resin-slot-01"；静态出口是 "static-01"。
+    #              写错了不会报错，只在日志里警告 "account references unknown exit"
+    #              然后退回池子里挑。真实 ID 看 GET /admin/api/proxies。
+    proxy: "resin-slot-01"
+    enabled: true
+    # weight: 1                 # 可选，默认 1
+    # headers: {}               # 可选，按账号追加请求头，一般留空
+
+  - id: zen-02                  # 第二个渠道 → http://zenproxy:9000/zen-02
+    name: "备用账号"
+    upstream: zen
+    api_key: "${ZEN_KEY_02}"
+    proxy: "resin-slot-02"
+    enabled: true
+
+# 运行期状态（出口健康度、账号↔出口绑定、轮换计数）的落盘位置。
+#   ★ 默认路线（容器）→ "/data/state.json"，对应 docker-compose.yml 里 ./data:/data
+#     这个约定是死的：只改了 config.yaml 而不改挂载，状态会写进容器可写层，重启即丢。
+state_file: "/data/state.json"

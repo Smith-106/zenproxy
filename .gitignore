@@ -1,0 +1,14 @@
+# 构建产物
+/build/
+*.exe
+
+# 本机配置与状态：含 API 密钥与绑定关系，绝不入库
+/data/
+config.local.yaml
+config.yaml
+.env
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

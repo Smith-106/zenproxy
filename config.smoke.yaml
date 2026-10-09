@@ -1,0 +1,44 @@
+# 本机端到端冒烟配置：假上游 + 假出口，不需要任何外网访问。
+server:
+  listen: "127.0.0.1:29000"
+  admin_token: "smoke-admin-token"
+
+upstreams:
+  mock:
+    base_url: "http://127.0.0.1:28081/zen/v1"
+
+proxies:
+  resin:
+    enabled: false
+  static:
+    - "http://127.0.0.1:9"        # 死出口：没人监听，用来触发轮换
+    - "http://127.0.0.1:28082"    # 活出口：scripts/mock-exit.js
+
+health:
+  interval: 1h            # 冒烟期间不让探活干扰结论
+  timeout: 2s
+  probe_url: "http://127.0.0.1:28081/?probe=1"
+  reachability: "127.0.0.1:28081"
+  failure_threshold: 3    # 调高，保证"被 pin 的死出口"第一次真的会被用上
+
+policy:
+  max_attempts: 3
+  rotate_on_status: [407, 429, 500, 502, 503, 504]
+  rotate_on_transport: true
+  upstream_timeout: 20s
+
+accounts:
+  - id: acc-direct
+    name: "直连账号"
+    upstream: mock
+    api_key: "sk-account-key-direct"
+    proxy: direct
+    enabled: true
+  - id: acc-pinned-dead
+    name: "被钉在死出口上，应当自动换到活出口"
+    upstream: mock
+    api_key: "sk-account-key-pool"
+    proxy: "static-01"
+    enabled: true
+
+state_file: "./data/smoke-state.json"

@@ -1,0 +1,12 @@
+# 仅本地密钥/环境文件，不要提交
+.env
+.env.*
+!.env.example
+
+# 运行期状态
+data/
+*.state.json
+logs/
+
+# 本地实际使用的 compose 覆盖（保留 example 模板）
+docker-compose.override.yml
