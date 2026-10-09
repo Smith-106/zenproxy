@@ -569,6 +569,79 @@ sudo grep -aE '404|chat/completions' /opt/cli-proxy-api/logs/main.log | tail -5
 
 ---
 
+## 7.4 让下游服务的出站也走 Resin 出口池
+
+**结论先说：不要让下游绕经 zenproxy，直接接 Resin。** 下面是两条路的对比和实测数据。
+
+### 为什么不要走 zenproxy 的正向代理
+
+`internal/forward/proxyface.go` 顶部注释已经把结构性限制写明了：下游若是 HTTPS 上游，
+到达 zenproxy 时是**不透明的 CONNECT 隧道**，zenproxy **看不到上游的 403/429**，
+因此 `shouldRotate` 永远不会触发——只有拨号失败才轮换。结果是**出口粘死在一个 IP 上**，
+恰好失去轮换的意义。而且还要把每个上游域名加进 `allowed_hosts`。
+
+（`forwardAbsolute` 那条路也一样：上游状态码原样透传，设计上就"由客户端自己负责重试语义"。）
+
+### 为什么直接接 Resin 是对的
+
+Resin 本身就是正向代理池（`ghcr.io/resinat/resin:latest`，监听 `:2260`），而 zenproxy
+配置里的注释写明了它的**粘性身份格式**：
+
+```
+<Platform>.<Account>:<token>@<host>
+# 同一个 Account 名在节点存活期间固定落在同一个出口
+```
+
+**身份名就是出口选择器。** 而下游服务（CPA、new-api 等）大多原生支持 `proxy-url`
+且接受 `socks5h://`，所以只要给**每个 key 分配不同的 Account 名**，
+就天然把「按 key 轮换」变成「按 IP 轮换」——不需要任何中间层。
+
+```
+proxy-url: socks5h://Default.slot-13:<RESIN_PROXY_TOKEN>@resin:2260
+```
+
+前置条件是网络要通：Resin 在 `resin_default` 上，CPA 在 `cli-proxy-api_default` +
+`llm-internal` 上，**默认互相解析不了**。要么把下游接进 `resin_default`，
+要么把 `resin` 接进共享网络（参考 §7.3 的 `connect-newapi-to-llm-internal.sh`，
+注意同样要写进 compose，否则容器重建即失效）。
+
+### 实测数据（2026-10-10）
+
+**机制**：不同 slot → 不同出口 IP（`slot-13`→`154.37.216.186` HK、
+`slot-15`→`146.70.76.58` JP，与 zenproxy 记录的完全一致）；同一 slot 打两次 → 同一个 IP，
+**粘性成立**。
+
+**24 个 slot 的出口并非 24 个 IP**，实测只有 **15 个不同出口 IP**，多个 slot 共用同一个：
+
+| 出口 IP | 国家 | 占了几个 slot |
+| :--- | :--- | :--- |
+| `160.250.130.168` | VN | 3（04/05/06）|
+| `84.17.47.126` | NL | 3（17/18/19）|
+| `34.132.56.138` | US | 2（02/03）|
+| `87.242.85.187` | RU | 2（10/11）|
+| `146.70.76.58` | JP | 2（15/16）|
+| `193.176.84.26` | RO | 2（20/21）|
+| `139.59.1.14` | IN | 2（22/23）|
+| 其余 8 个 | US/NL/FR/ID/HK | 各 1 |
+
+**延迟波动极大，这是最大的问题。** 对 `api.ipify.org` 的往返：
+
+| 延迟 | slot |
+| :--- | :--- |
+| < 1s | `slot-13`(HK) `slot-11`(RU) `slot-22`(IN) `slot-24`(US) |
+| 1–2s | `slot-07`(NL) `slot-14`(ID) `slot-10`(RU) `slot-09`(FR) `slot-20`(RO) `slot-17`(NL) |
+| 2–6s | `slot-08` `slot-12` `slot-15` `slot-18` `slot-23` `slot-06` `slot-01` |
+| **> 6s，不可用** | `slot-02`(8.8s) `slot-04`(6.9s) `slot-05`(12.9s) `slot-16`(**20s**) `slot-19`(**20s**) `slot-21`(**20s**) `slot-03`(**20s**) |
+
+真实 LLM 调用上更明显：同一个模型，**直连 TTFB 0.70s**，经 `slot-13` 是 **0.46s**（可用），
+经 `slot-15` 是 **12.6s**、经 `slot-21` 是 **30.1s**（不可用）。
+
+> **所以别全量切换。** 只给确实需要换 IP 的上游挂代理，并且先用
+> `scripts/sweep-resin-slots.sh` 扫一遍，只挑延迟 < 2s 的 slot ——
+> 实测只有 **9 个不同出口 IP** 同时满足「活 + 快」，这才是真实可用的池子大小。
+
+---
+
 ## 8. 已知限制（务必读）
 
 ### 8.1 `*-free` 模型是客户端身份门槛，换出口解决不了
