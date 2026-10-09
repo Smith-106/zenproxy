@@ -353,6 +353,54 @@ curl -s -X POST -H "X-Admin-Token: $TOKEN" \
 `clear-region` 清的是**整个出口**而不是单个模型：操作员的证据通常是"这个模型现在能用了"，
 但一个国家重新开放是同时放开所有模型的，要求他逐个模型点名会把常见情况变成麻烦的那种。
 
+#### 部署环境实测
+
+出口 `resin-slot-10`(RU)、`resin-slot-13`(HK)，模型 `muse-spark-1.3-contributor-free`：
+
+**① 直连 SOCKS 绕开 zenproxy，能看到上游确实在拦**（对照组）：
+
+```
+slot-13  muse-spark  /responses       403  RegionError
+slot-13  big-pickle  /chat/completions 200  -
+```
+
+**② 同一个出口经过 zenproxy，调用方拿不到那个 403 了：**
+
+```
+客户端收到: HTTP 502（池子里其余出口已死或额度耗尽）
+```
+
+这正是修复的核心——403 被换出口消化掉了，而不是转给调用方。
+
+**③ 记账是「出口 × 模型」：** 账本里只有
+`resin-slot-10 ← muse-spark-1.3-contributor-free`、`resin-slot-13 ← muse-spark-…`，
+`big-pickle` 一条都没有。
+
+**④ 发包前就规避：**
+
+```
+msg="moving off an exit whose country is refused for this model, before sending"
+account=zen-avoid-probe from=resin-slot-13 to=resin-slot-24 model=muse-spark-1.3-contributor-free
+```
+
+**⑤ 主动轮换途中撞上另一个被限出口，会当场记下来：**
+
+```
+msg="exit's country is refused for this model; remembering the pair"
+exit=resin-slot-10 model=muse-spark-1.3-contributor-free status=403 class=region recheck_after=6h0m0s
+```
+
+注意这一条里的 `resin-slot-10` 是**上一步刚被 `clear-region` 清掉**的：清掉之后下一个请求
+撞上它，立刻重新记上。**"清掉"是让代理重新去试一次，不是让上游改主意**——这条日志就是
+这句话的证据。
+
+复现：`scripts/probe-region-matrix.sh`（直连对照）、`scripts/verify-region-axis.sh`
+（走 zenproxy，自建自删临时账号）。
+
+> 顺带一个测试自身的教训：`verify-region-axis.sh` 第一版把成功条件写成"客户端应当收到
+> 403"，结果**修复生效时它反而报失败**，还差点让我以为上游放开了。识别被限出口不能看
+> 响应码——修复的全部意义就是那个码不再出现——只能看账本。
+
 ---
 
 ## 五、接口
