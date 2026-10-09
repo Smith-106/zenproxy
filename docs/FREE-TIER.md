@@ -78,6 +78,27 @@ below and answer the user's request normally, using only the tools the client ad
 
 对照：加覆写后 `2 + 2 = 4`、`Paris`；不加则输出 `What is 2+2?` 这类标题。见 §3.1 的常量。
 
+> **★ 但这只在带 `tools` 时可靠。** 无工具请求必须挂 title 模板（§1.1 的配对规则），
+> 而那段提示词的态度强硬得多（`you output ONLY a thread title`、
+> `NEVER respond to questions`），覆写句压不稳它。**而且是不稳定的**——
+> 同一个请求、同一个出口连发 4 次，实测得到 4 个不同结果：
+>
+> | 结果 | 判定 |
+> | :--- | :--- |
+> | `Simple math question: 2+2` | 起了标题 |
+> | `2+2 arithmetic question` | 起了标题 |
+> | `2 + 2 = 4` | 正常回答 |
+> | `4` | 正常回答 |
+>
+> 八次样本里约三分之一是标题。**所以这里的对照实验一次一个样本说明不了任何事**——
+> 复现脚本见 `scripts/gen-override-experiment.mjs`（它的注释里记了这段实测，
+> 以及一个**未被证实**的猜测：覆写句结尾那句 "using only the tools the client
+> advertises" 在无工具时自相矛盾。改写后只测了一次、看起来更差，但那是不稳定的噪声，
+> 不能当结论）。
+>
+> 带 `tools` 时则是稳定的：`4`、`Paris`、`PONG` 每次都对。
+> 实际影响面：正常 agent 客户端都发工具名，只有"简单问答"类客户端会踩到。
+
 ---
 
 ## 二、怎么自己复现

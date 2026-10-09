@@ -37,3 +37,33 @@ fi
 echo
 echo "--- headers of interest ---"
 grep -iE 'retry-after|ratelimit|^HTTP|x-request' "$WORK/hdr.txt" | head -20
+
+# A streamed body is too long to read deltas out of by eye, and the delta lines
+# are exactly what a question like "did the model answer or just title it" turns
+# on. Concatenate them so the answer can be compared directly.
+cp "$WORK/body.txt" /tmp/raw-last.txt
+echo
+echo "--- 拼接后的答复（原文另存 /tmp/raw-last.txt）---"
+python3 - /tmp/raw-last.txt <<'PY'
+import json, re, sys
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+chat, resp = [], []
+for m in re.finditer(r'^data: (.*)$', raw, re.M):
+    try:
+        j = json.loads(m.group(1))
+    except Exception:
+        continue
+    t = j.get("type") or ""
+    if t == "response.output_text.delta":
+        resp.append(j.get("delta") or "")
+    for ch in j.get("choices") or []:
+        c = (ch.get("delta") or {}).get("content")
+        if isinstance(c, str):
+            chat.append(c)
+if chat:
+    print("  chat  :", repr("".join(chat)[:300]))
+if resp:
+    print("  resp  :", repr("".join(resp)[:300]))
+if not chat and not resp:
+    print("  （没有可拼接的文本增量）")
+PY
