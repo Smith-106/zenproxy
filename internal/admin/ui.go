@@ -109,7 +109,7 @@ const dashboardHTML = `<!doctype html>
     <h2>出口池（IP 池）</h2>
     <table id="exits"><thead><tr>
       <th>出口 ID</th><th>类型</th><th>地址</th><th>出口 IP</th><th>延迟</th>
-      <th>状态</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
+      <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" style="margin-top:8px">
       <b>清理垃圾出口</b>会把「隔离中 / 降级 / 延迟超过 max_latency / 连续失败达 retire_after」的出口
@@ -274,7 +274,7 @@ function fillUpstreams(list) {
 
 function renderExits(list) {
   const tb = document.querySelector('#exits tbody');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="12" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'; return; }
+  if (!list.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'; return; }
   tb.innerHTML = list.map(e => {
     const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
     let state;
@@ -288,9 +288,18 @@ function renderExits(list) {
       state = '<span class="pill warn">降级</span>';
     }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
-    const act = e.retired
-      ? '<button onclick="reviveExit(\'' + esc(e.id) + '\')">恢复</button>'
-      : '<button onclick="retireExit(\'' + esc(e.id) + '\')">退休</button>';
+    const act = [];
+    if (e.retired) {
+      act.push('<button onclick="reviveExit(\'' + esc(e.id) + '\')">恢复</button>');
+    } else {
+      act.push('<button onclick="retireExit(\'' + esc(e.id) + '\')">退休</button>');
+    }
+    if (quotaLeft(e)) {
+      act.push('<button onclick="uncoolExit(\'' + esc(e.id) + '\')" title="上游说过它会回来；只有你确信那个时刻是错的才用">提前解除额度</button>');
+    }
+    if ((e.region_blocked_for || []).length) {
+      act.push('<button onclick="clearRegion(\'' + esc(e.id) + '\')" title="地区限制没有到期时刻，只能靠这个或 6 小时信任窗口">解除地区限制</button>');
+    }
     return '<tr>' +
       '<td><code>' + esc(e.id) + '</code></td>' +
       '<td>' + esc(e.scheme) + '</td>' +
@@ -298,14 +307,44 @@ function renderExits(list) {
       '<td><code>' + esc(e.exit_ip || '—') + '</code></td>' +
       '<td>' + (e.latency_ms ? e.latency_ms + ' ms' : '—') + '</td>' +
       '<td>' + state + '</td>' +
+      '<td>' + quotaCell(e) + '</td>' +
+      '<td>' + regionCell(e) + '</td>' +
       '<td>' + e.consecutive_failures + '</td>' +
       '<td class="muted" title="上游返回了响应（429/5xx）：出口本身没坏，只换了绑定">' + (e.soft_failures || 0) + '</td>' +
       '<td class="muted">' + (e.retired ? '—' : ((q && q > new Date()) ? q.toLocaleTimeString() : '—')) + '</td>' +
       '<td class="muted">' + esc((e.bound_accounts || []).join(', ') || '—') + '</td>' +
       '<td class="muted">' + esc(e.last_error || '—') + '</td>' +
-      '<td>' + act + '</td>' +
+      '<td>' + act.join(' ') + '</td>' +
     '</tr>';
   }).join('');
+}
+
+// quotaLeft returns the remaining quota cooldown, or null.
+//
+// Kept separate from health on purpose: an exit the upstream has spent is
+// working perfectly, it just will not be served. Showing it as unwell would send
+// an operator to debug a healthy proxy.
+function quotaLeft(e) {
+  if (!e.quota_until) return null;
+  const t = new Date(e.quota_until);
+  return t > new Date() ? t : null;
+}
+
+function quotaCell(e) {
+  const t = quotaLeft(e);
+  if (!t) return '<span class="muted">—</span>';
+  const mins = Math.round((t - new Date()) / 60000);
+  const left = mins >= 90 ? Math.round(mins / 60) + ' 小时' : mins + ' 分钟';
+  return '<span class="pill warn" title="上游说的重置时刻 ' + esc(t.toLocaleString()) + '">还剩 ' + left + '</span>';
+}
+
+function regionCell(e) {
+  const models = e.region_blocked_for || [];
+  if (!models.length) return '<span class="muted">—</span>';
+  // The model names are the point: the exit is fine for everything else, and
+  // reporting it as down would be the wrong conclusion to invite.
+  return '<span class="pill warn" title="这些模型在该出口所在国家不可用；其他模型不受影响">' +
+    models.length + ' 个模型受限</span>';
 }
 
 // 一次上游失败会被归进哪一类，直接决定了代理的动作：换出口只对
@@ -481,6 +520,28 @@ async function retireExit(id) {
 async function reviveExit(id) {
   try { await api('/proxies/' + encodeURIComponent(id) + '/revive', { method: 'POST' }); toast('已恢复 ' + id); await load(); }
   catch (e) { toast(e.message, true); }
+}
+
+// Both of these exist because the proxy cannot observe what they report. A quota
+// cooldown ends on a clock the upstream named, and a region block ends when a
+// country reopens — nothing announces either, so an operator who knows better
+// needs a way to say so.
+
+async function uncoolExit(id) {
+  // Deliberately not a plain-action button: the upstream stated the deadline, so
+  // second-guessing it puts traffic straight back into a refusal.
+  if (!confirm('提前解除 ' + id + ' 的额度冷却？\n\n上游明确说过它什么时候回来。只有你刚充值、或确信那个时刻是错的才这么做。')) return;
+  try { await api('/proxies/' + encodeURIComponent(id) + '/uncool', { method: 'POST' }); toast('已解除额度冷却 ' + id); await load(); }
+  catch (e) { toast(e.message, true); }
+}
+
+async function clearRegion(id) {
+  if (!confirm('解除 ' + id + ' 的所有地区限制记录？\n\n这不会改变上游的行为，只是让代理不再跳过它。下次再被拒就会重新记上。')) return;
+  try {
+    const r = await api('/proxies/' + encodeURIComponent(id) + '/clear-region', { method: 'POST' });
+    toast('已清除 ' + (r.cleared || 0) + ' 条地区限制');
+    await load();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function boot() {

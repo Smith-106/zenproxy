@@ -291,23 +291,67 @@ until=2026-10-10T00:00:00Z reason=rate_limit
 
 复现脚本：`scripts/verify-quota-ledger.sh`（自建自删临时账号，密钥从 `.env` 读且不打印）。
 
-### 4.8 已知盲区：地区限制不在这本账里
+### 4.8 地区轴：第二条按出口的轴，但它不能按出口记账
 
-验证时暴露出来的：账本把一个账号从一个冷却出口挪到了 `resin-slot-12`，紧接着那次请求
-拿到 **403 `RegionError`** ——因为 `slot-12` 当时所在的国家被限了。
+验证额度账本时暴露出来的：账本把一个账号从冷却出口挪到了 `resin-slot-12`，紧接着那次
+请求拿到 **403 `RegionError`**——`slot-12` 当时所在的国家被限了。
 
-**这个盲区是真实存在的，而且不只属于账本：**
+当时的判断是"地区应该和额度并列"，这个判断**对了一半**。做实测之后发现另一半是错的：
 
-- 地区限制**和额度一样是按出口的**，实测 `slot-10`(RU)、`slot-13`(HK) 恒回 `RegionError`，
-  而同一模型换出口就好；
-- 但 `403 RegionError` 目前在 `classifyStatus` 里落到 `ClassAuth`，而 `ClassAuth`
-  **不是** `IPAttributable()`——于是**既不轮换、也不记账**，客户端直接拿到那句
-  "This model is not available in your country"，而实际上换个出口就能用；
-- 健康探测也帮不上忙：它探的是"这个出口通不通"，地区限制的出口**完全通畅**。
+| 出口 | `muse-spark` / `/responses` | `big-pickle` / `/chat` |
+| :--- | :--- | :--- |
+| slot-09 (FR) | 400 invalid_request_error | **200** |
+| slot-10 (RU) | **403 RegionError** | **200** |
+| slot-13 (HK) | **403 RegionError** | **200** |
 
-所以这个盲区不是"账本少记了一项"，而是**地区应该成为和额度并列的第三条轴**
-（同样是按出口、同样与健康无关、同样需要主动规避）。本轮没有实现，因为它需要先把
-`RegionError` 从 `ClassAuth` 里分出来单独判型，那是独立的一块改动。
+**同一个出口、同一秒钟，一个模型被拒、另一个模型 200。**
+
+所以地区限制不是"按出口"的，而是**按「出口 × 模型」**的。这一条决定了整个实现形状：
+
+> 如果按出口记账，就会因为一个模型在该国不可用，把一个**对其他模型完全正常**的出口
+> 整个踢出轮换——这是错得**更贵**的那个方向。
+
+**三处必须同时改，少任何一处这个修复都是空转：**
+
+1. `403 RegionError` 必须从 `ClassAuth` 里分出来单独判型为 `ClassRegion`。
+   `ClassAuth` 不是 `IPAttributable()`，所以原来**根本不轮换**——客户端被告知
+   "你所在国家不可用"，而换个出口就能用。
+2. `ClassRegion` 必须是 `IPAttributable()` 的，且**轮换时必须带上模型名**
+   （`RotateFor(account, excludeExit, model)`）。不带模型地盲轮，很可能又落到
+   另一个同样被限的出口上，白花一次尝试还被同样拒绝一遍。
+3. `403` 必须在 `rotate_on_status` 里。`shouldRotate` 要求
+   `IPAttributable()` **且**状态码在列表中——**只改前两处，默认配置下依然不轮换**。
+   ⚠️ **升级注意**：默认值已加 403，但如果你自己的 `config.yaml` 里显式写了
+   `rotate_on_status`，**必须手动加上 403**，否则这条修复不生效。
+
+**记账的寿命是猜的，这一点必须说清楚。** 额度有上游给的回归时刻，地区没有——**没有任何
+东西会通知你某个国家重新开放了**。所以地区记账带一个 **6 小时信任窗口**
+（`regionBlockTTL`）。两个方向的错不对称：信太久，一个本来能用的出口继续被跳过；
+信太短，每个请求都要白花一次尝试去重新发现已知的事实。实测这些限制跨小时稳定
+（同样两个出口、同样一个模型，每次试都被拒），所以取长的那端，代价是**每次过期一次
+尝试**，而不是**每个请求一次**。
+
+**和额度账本的关系：完全分开。** 两本账互不冒充——清掉一个不会清掉另一个，有测试专门
+钉住这件事。地区既不入 `QuotaCooled`（那会凭空造出一个时刻），也不因为 403 就设冷却。
+
+**在哪看、怎么清：**
+
+```bash
+curl -s -H "X-Admin-Token: $TOKEN" http://127.0.0.1:9000/admin/api/status
+# "region": { "blocked": [ {"exit_id":"resin-slot-10","model":"muse-spark-…",
+#                           "blocked_at":"…","recheck_after":"5h58m"} ], "count": 1 }
+
+curl -s -X POST -H "X-Admin-Token: $TOKEN" \
+  http://127.0.0.1:9000/admin/api/proxies/resin-slot-10/clear-region
+# {"exit":"resin-slot-10","cleared":1,"changed":true}
+```
+
+`GET /admin/api/proxies` 里每个出口多了 `region_blocked_for: ["模型名"]`，而
+**`healthy` 仍然是 `true`**——这是故意的：被地区限制的出口是好的，报成"down"会让人
+去排查一个完全正常的代理。
+
+`clear-region` 清的是**整个出口**而不是单个模型：操作员的证据通常是"这个模型现在能用了"，
+但一个国家重新开放是同时放开所有模型的，要求他逐个模型点名会把常见情况变成麻烦的那种。
 
 ---
 

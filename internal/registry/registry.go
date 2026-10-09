@@ -417,7 +417,19 @@ func pickWeighted(members []*Entry) *Entry {
 // could never rescue a pinned account.
 //
 // A nil result means "dial directly".
+// ExitFor resolves the exit an account should egress through, without regard to
+// the model. Callers that know the model should use ExitForModel.
 func (r *Registry) ExitFor(accountID string) *proxypool.Proxy {
+	return r.ExitForModel(accountID, "")
+}
+
+// ExitForModel resolves the exit an account should egress through for one model.
+//
+// The model matters because a region block belongs to the exit-and-model pair,
+// not to the exit: measured, one exit answered 403 RegionError for one free
+// model and 200 for another in the same second. Resolving without the model
+// would keep handing back an exit the upstream is going to refuse.
+func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 	r.mu.Lock()
 	e, ok := r.accounts[accountID]
 	if !ok {
@@ -459,12 +471,26 @@ func (r *Registry) ExitFor(accountID string) *proxypool.Proxy {
 		}
 	}
 
-	px := r.pool.Pick("")
+	px := r.pool.PickFor(model, "")
 	if px == nil {
 		return nil
 	}
 	r.setBinding(accountID, px.ID)
 	return px
+}
+
+// BoundExit reports which exit an account is currently bound to, without
+// resolving anything or moving the binding.
+//
+// It exists so that callers asking "is this account parked somewhere bad?" can
+// ask it as a plain question. Resolving instead would answer a different
+// question — "where would this account go next" — and would bind as a side
+// effect, which is the wrong thing for a predicate that runs once per account
+// in a pool while deciding which ones to skip.
+func (r *Registry) BoundExit(accountID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.bindings[accountID]
 }
 
 // Bind pins an account to a specific exit immediately.
@@ -484,6 +510,17 @@ func (r *Registry) Bind(accountID, exitID string) error {
 
 // Rotate moves an account off excludeExit and returns the replacement.
 func (r *Registry) Rotate(accountID, excludeExit string) *proxypool.Proxy {
+	return r.RotateFor(accountID, excludeExit, "")
+}
+
+// RotateFor moves an account off excludeExit, avoiding exits the upstream
+// refuses for this model, and returns the replacement.
+//
+// Without the model the replacement is chosen on health and quota alone, which
+// means a rotation triggered by a region refusal can land on another exit that
+// is refused for the same model — turning one wasted attempt into two, and the
+// caller would see the same 403 with no sign that anything moved.
+func (r *Registry) RotateFor(accountID, excludeExit, model string) *proxypool.Proxy {
 	if r.pool == nil || r.pool.Len() == 0 {
 		return nil
 	}
@@ -493,7 +530,7 @@ func (r *Registry) Rotate(accountID, excludeExit string) *proxypool.Proxy {
 	}
 	r.mu.Unlock()
 
-	px := r.pool.Pick(excludeExit)
+	px := r.pool.PickFor(model, excludeExit)
 	if px == nil {
 		return nil
 	}

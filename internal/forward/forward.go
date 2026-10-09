@@ -191,9 +191,14 @@ type candidate struct {
 //
 // budget is the attempt ceiling for this request. It is the chooser's because
 // only the chooser knows how many distinct things there are to try.
+//
+// next takes the model because a region refusal belongs to the exit-and-model
+// pair rather than to the exit. Without it a rotation triggered by one would
+// pick blind and just as likely land on another exit refused for the same model,
+// spending an attempt to be told the same thing.
 type chooser interface {
 	first() (candidate, bool)
-	next(failed *registry.Entry, class model.ErrorClass, exitID string) (candidate, bool)
+	next(failed *registry.Entry, class model.ErrorClass, exitID, mdl string) (candidate, bool)
 	budget() int
 }
 
@@ -217,21 +222,27 @@ func (f *fixedChooser) first() (candidate, bool) {
 // next keeps the account and moves only its exit, which is precisely what the
 // reverse ingress could always do. Retrying the same account on a fresh IP is
 // the whole remedy available when the caller named the account.
-func (f *fixedChooser) next(_ *registry.Entry, _ model.ErrorClass, exitID string) (candidate, bool) {
-	f.eng.rotateExit(f.ent.ID, exitID)
+func (f *fixedChooser) next(_ *registry.Entry, _ model.ErrorClass, exitID, mdl string) (candidate, bool) {
+	f.eng.rotateExitFor(f.ent.ID, exitID, mdl)
 	return candidate{f.ent, f.up, f.target}, true
 }
 
 // rotateExit moves an account onto a different egress IP and says so in the
 // log. Split out so both choosers describe the same event identically.
 func (e *Engine) rotateExit(accountID, exitID string) {
+	e.rotateExitFor(accountID, exitID, "")
+}
+
+// rotateExitFor is rotateExit with the model, so the replacement can avoid exits
+// this model is refused from.
+func (e *Engine) rotateExitFor(accountID, exitID, mdl string) {
 	if exitID != "" {
 		// The exit worked — it carried the request and brought back an answer.
 		// Only the binding moves, so an account-level quota cannot drain the IP
 		// pool.
 		e.pool.MarkSoftFailure(exitID, "upstream refused after a successful exchange")
 	}
-	e.reg.Rotate(accountID, exitID)
+	e.reg.RotateFor(accountID, exitID, mdl)
 }
 
 func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *registry.Entry, up model.Upstream, target *url.URL) {
@@ -241,9 +252,15 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 		return
 	}
 	// The reverse ingress has no account to choose between, so its ledger
-	// applies to the exit: if this account is parked on one whose quota is
-	// spent, move it now instead of paying for the refusal and moving after.
-	e.avoidCooledExit(ent.ID)
+	// applies to the exit: if this account is parked on one that cannot serve
+	// this request, move it now instead of paying for the refusal and moving
+	// after. The model comes out of the body, which is already in hand here and
+	// goes upstream unchanged in this mode.
+	askedModel := ""
+	if !truncated {
+		askedModel = modelField(body)
+	}
+	e.avoidSpentExit(ent.ID, askedModel)
 	e.proxyLoop(w, r, &fixedChooser{eng: e, ent: ent, up: up, target: target, limit: e.pol.MaxAttempts}, body, truncated)
 }
 
@@ -265,6 +282,19 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	var plan *GatePlan
 	if !truncated {
 		plan = e.free.Prepare(cur.target.Path, body, false)
+	}
+
+	// Which model this request is for decides which exits the upstream will
+	// serve it from, so it is read once here and threaded through every
+	// resolution and rotation below. Empty means "could not tell": an oversized
+	// body that was never buffered, or a shape with no model field. Everything
+	// downstream treats that as "cannot judge" rather than as a wildcard.
+	askedModel := ""
+	if !truncated {
+		askedModel = modelField(body)
+	}
+	if plan != nil && plan.Model != "" {
+		askedModel = plan.Model
 	}
 
 	maxAttempts := ch.budget()
@@ -291,7 +321,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		}
 		up, target := cur.up, cur.target
 		exitID := ""
-		proxy := e.reg.ExitFor(ent.ID)
+		proxy := e.reg.ExitForModel(ent.ID, askedModel)
 		if proxy != nil {
 			exitID = proxy.ID
 		}
@@ -371,11 +401,24 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		// here — before the rotation decision, and against the exit that
 		// actually carried the request — is what turns "rotate and find out" into
 		// "do not send that one next time".
-		if until, cooled := e.coolExit(ent.ID, resp.Header, class); cooled {
+		if until, cooled := e.coolExit(exitID, resp.Header, class); cooled {
 			e.log.Info("exit is out of quota until the upstream's stated time",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class,
 				"until", until.Format(time.RFC3339),
 				"after", time.Until(until).Round(time.Second).String())
+		}
+		// A region refusal is recorded against the exit AND the model, because
+		// that pair is what the upstream actually refuses. Measured: the same
+		// exit answered 200 for another model in the same second, so recording
+		// it against the exit alone would take a working IP out of rotation for
+		// every model because one of them is unavailable there.
+		if class == model.ClassRegion && exitID != "" && askedModel != "" {
+			if e.pool.BlockRegion(exitID, askedModel) {
+				e.log.Info("exit's country is refused for this model; remembering the pair",
+					"account", ent.ID, "exit", exitID, "model", askedModel,
+					"status", resp.StatusCode, "class", class,
+					"recheck_after", e.pool.RegionBlockTTL().String())
+			}
 		}
 
 		if class == model.ClassTierGate {
@@ -404,7 +447,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class)
 			// The chooser owns what "switch" means here: another IP for the same
 			// account, or another account entirely.
-			nextCand, ok := ch.next(ent, class, exitID)
+			nextCand, ok := ch.next(ent, class, exitID, askedModel)
 			if !ok {
 				writeUpstreamResponse(w, resp, errBody)
 				cancel()
@@ -648,6 +691,13 @@ func classifyStatus(status int, header http.Header, body []byte) model.ErrorClas
 		if bytes.Contains(body, []byte("FreeTierError")) || bytes.Contains(body, []byte("only be used from within OpenCode")) {
 			return model.ClassTierGate
 		}
+		// A region refusal must be recognised before the generic 403 branch for
+		// the same reason the tier gate is: the operator would otherwise see
+		// "auth", go looking for a bad key, and never learn that another exit
+		// would have served the request.
+		if bytes.Contains(body, []byte("RegionError")) || bytes.Contains(body, []byte("not available in your country")) {
+			return model.ClassRegion
+		}
 		if marker := header.Get("Cf-Mitigated"); marker != "" {
 			return model.ClassServer
 		}
@@ -720,40 +770,51 @@ func quotaDeadline(h http.Header, now time.Time) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// onCooledExit reports whether an account is currently parked on an exit that
-// is inside a quota cooldown.
-func (e *Engine) onCooledExit(accountID string) bool {
+// onSpentExit reports whether an account is currently parked on an exit that
+// cannot serve a request for this model, for either reason.
+//
+// Both reasons are checked because both are invisible to health: a quota-spent
+// exit answers promptly, and a region-refused exit answers promptly from a
+// country that is merely the wrong one. Choosing by strategy alone therefore
+// lands on either with the same disregard.
+//
+// It reads the binding rather than resolving one, so it is a question and not a
+// decision. It runs once per account in the pool while picking one, and
+// resolving there would bind as a side effect and answer about the wrong exit.
+func (e *Engine) onSpentExit(accountID, mdl string) bool {
 	if e.pool == nil {
 		return false
 	}
-	px := e.reg.ExitFor(accountID)
-	if px == nil {
+	exitID := e.reg.BoundExit(accountID)
+	if exitID == "" {
 		return false
 	}
-	_, _, cool := e.pool.QuotaCooled(px.ID)
-	return cool
+	if _, _, cool := e.pool.QuotaCooled(exitID); cool {
+		return true
+	}
+	return e.pool.RegionBlocked(exitID, mdl)
 }
 
 // coolExit records an upstream's refusal against the exit that carried it.
 //
-// The exit is identified by the binding at the time of the request rather than
-// by anything the caller passes, because the header describes the connection
-// that was just refused and nothing else. A 429 is not evidence that the
-// account, the key or the model is at fault — measured, the same account on the
-// same key succeeds from a different exit within the same second.
-func (e *Engine) coolExit(accountID string, h http.Header, class model.ErrorClass) (time.Time, bool) {
-	if class != model.ClassRateLimit || e.pool == nil {
+// The exit is passed in rather than resolved here, and that is deliberate. This
+// runs after a response, by which point re-resolving could return a different
+// exit than the one that was actually used — model-aware resolution in
+// particular will skip an exit refused for this model, so resolving here would
+// cool a bystander instead of the culprit.
+//
+// A 429 is not evidence that the account, the key or the model is at fault —
+// measured, the same account on the same key succeeds from a different exit
+// within the same second.
+func (e *Engine) coolExit(exitID string, h http.Header, class model.ErrorClass) (time.Time, bool) {
+	if class != model.ClassRateLimit || e.pool == nil || exitID == "" {
 		return time.Time{}, false
 	}
 	until, ok := quotaDeadline(h, time.Now())
 	if !ok {
 		return time.Time{}, false
 	}
-	px := e.reg.ExitFor(accountID)
-	if px == nil {
-		return time.Time{}, false
-	}
-	if !e.pool.CoolForQuota(px.ID, until, string(class)) {
+	if !e.pool.CoolForQuota(exitID, until, string(class)) {
 		return time.Time{}, false
 	}
 	return until, true
@@ -770,34 +831,48 @@ func (e *Engine) coolExit(accountID string, h http.Header, class model.ErrorClas
 // It declines to move when there is nothing warmer to move to. Rotating into
 // another cooled exit would churn the binding, spend a rotation, and change
 // nothing about the outcome.
-func (e *Engine) avoidCooledExit(accountID string) {
+func (e *Engine) avoidSpentExit(accountID, mdl string) {
 	if e.pool == nil {
 		return
 	}
-	px := e.reg.ExitFor(accountID)
+	px := e.reg.ExitForModel(accountID, mdl)
 	if px == nil {
 		return
 	}
-	until, reason, cool := e.pool.QuotaCooled(px.ID)
-	if !cool {
+	until, quotaReason, cooled := e.pool.QuotaCooled(px.ID)
+	if !cooled && !e.pool.RegionBlocked(px.ID, mdl) {
 		return
 	}
-	next := e.pool.Pick(px.ID)
+	next := e.pool.PickFor(mdl, px.ID)
 	if next == nil {
 		return
 	}
-	if _, _, nextCooled := e.pool.QuotaCooled(next.ID); nextCooled {
-		// Everything available is out of quota too. Staying put is the honest
-		// move: the request is going to be refused wherever it goes, and the
-		// exit we are on at least knows when its allowance returns.
-		e.log.Warn("every candidate exit is out of quota; the request will most likely be refused",
-			"account", accountID, "exit", px.ID, "until", until.Format(time.RFC3339), "reason", reason)
-		return
+	if cooled {
+		if _, _, nextCooled := e.pool.QuotaCooled(next.ID); nextCooled {
+			// Everything available is out of quota too. Staying put is the
+			// honest move: the request is going to be refused wherever it goes,
+			// and the exit we are on at least knows when its allowance returns.
+			e.log.Warn("every candidate exit is out of quota; the request will most likely be refused",
+				"account", accountID, "exit", px.ID,
+				"until", until.Format(time.RFC3339), "reason", quotaReason)
+			return
+		}
+		e.log.Info("moving off an exit whose quota is spent, before sending",
+			"account", accountID, "from", px.ID, "to", next.ID,
+			"until", until.Format(time.RFC3339), "reason", quotaReason)
+	} else {
+		if e.pool.RegionBlocked(next.ID, mdl) {
+			// Nothing warmer exists. Unlike the quota case there is no stated
+			// end to wait for, so the honest report is that the model is
+			// unavailable from everywhere this pool currently reaches.
+			e.log.Warn("every candidate exit is refused for this model; the request will most likely be refused",
+				"account", accountID, "exit", px.ID, "model", mdl)
+			return
+		}
+		e.log.Info("moving off an exit whose country is refused for this model, before sending",
+			"account", accountID, "from", px.ID, "to", next.ID, "model", mdl)
 	}
-	e.log.Info("moving off an exit whose quota is spent, before sending",
-		"account", accountID, "from", px.ID, "to", next.ID,
-		"until", until.Format(time.RFC3339), "reason", reason)
-	e.reg.Rotate(accountID, px.ID)
+	e.reg.RotateFor(accountID, px.ID, mdl)
 }
 
 // pickAccount chooses an account for a gateway request, preferring one that is
@@ -813,9 +888,9 @@ func (e *Engine) avoidCooledExit(accountID string) {
 // choice rather than nothing. The request is going to be refused wherever it
 // goes; failing it outright would be strictly worse, and the refusal is what
 // tells the caller when the pool comes back.
-func (e *Engine) pickAccount(pool, strategy string, exclude map[string]bool) *registry.Entry {
+func (e *Engine) pickAccount(pool, strategy string, exclude map[string]bool, mdl string) *registry.Entry {
 	ent := e.reg.PickInPool(pool, strategy, exclude)
-	if ent == nil || e.pool == nil || !e.onCooledExit(ent.ID) {
+	if ent == nil || e.pool == nil || !e.onSpentExit(ent.ID, mdl) {
 		return ent
 	}
 	skip := make(map[string]bool, len(exclude))
@@ -827,7 +902,7 @@ func (e *Engine) pickAccount(pool, strategy string, exclude map[string]bool) *re
 		if skip[m.ID] {
 			continue
 		}
-		if e.onCooledExit(m.ID) {
+		if e.onSpentExit(m.ID, mdl) {
 			skip[m.ID] = true
 			continue
 		}

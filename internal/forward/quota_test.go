@@ -165,7 +165,7 @@ func TestAvoidCooledExitMovesTheAccountOffIt(t *testing.T) {
 	bindLive(t, h)
 	h.pool.CoolForQuota("live", time.Now().Add(time.Hour), "429")
 
-	h.engine.avoidCooledExit("zen-01")
+	h.engine.avoidSpentExit("zen-01", "muse-spark")
 
 	got := h.reg.ExitFor("zen-01")
 	if got == nil {
@@ -182,7 +182,7 @@ func TestAvoidCooledExitLeavesTheAccountAloneWhenEveryExitIsSpent(t *testing.T) 
 	h.pool.CoolForQuota("live", time.Now().Add(time.Hour), "429")
 	h.pool.CoolForQuota("dead", time.Now().Add(time.Hour), "429")
 
-	h.engine.avoidCooledExit("zen-01")
+	h.engine.avoidSpentExit("zen-01", "muse-spark")
 
 	// Rotating into another spent exit would churn the binding, spend a
 	// rotation and change nothing. Staying put is the honest move: the request
@@ -198,7 +198,7 @@ func TestAvoidCooledExitDoesNothingWhenTheExitIsFine(t *testing.T) {
 	bindLive(t, h)
 	before, _, _ := h.pool.QuotaCooled("live")
 
-	h.engine.avoidCooledExit("zen-01")
+	h.engine.avoidSpentExit("zen-01", "muse-spark")
 
 	if got := h.reg.ExitFor("zen-01"); got == nil || got.ID != "live" {
 		t.Fatalf("a healthy exit was rotated away from for no reason: %v", got)
@@ -228,7 +228,7 @@ func TestPickAccountPrefersAnExitThatCanActuallyServe(t *testing.T) {
 	h.pool.CoolForQuota("live", time.Now().Add(time.Hour), "429")
 
 	for i := 0; i < 20; i++ {
-		ent := h.engine.pickAccount("zen", "round-robin", nil)
+		ent := h.engine.pickAccount("zen", "round-robin", nil, "muse-spark")
 		if ent == nil {
 			t.Fatal("pickAccount returned nothing while a warm account existed")
 		}
@@ -248,7 +248,7 @@ func TestPickAccountStillAnswersWhenEveryAccountIsSpent(t *testing.T) {
 
 	// Failing the request outright would be strictly worse than trying: the
 	// refusal is what tells the caller when the pool comes back.
-	ent := h.engine.pickAccount("zen", "round-robin", nil)
+	ent := h.engine.pickAccount("zen", "round-robin", nil, "muse-spark")
 	if ent == nil {
 		t.Fatal("pickAccount gave up instead of returning the least-bad account")
 	}

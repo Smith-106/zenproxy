@@ -217,7 +217,7 @@ func Default() Config {
 		},
 		Policy: Policy{
 			MaxAttempts:       3,
-			RotateOnStatus:    []int{407, 429, 500, 502, 503, 504, 520, 522, 524},
+			RotateOnStatus:    []int{403, 407, 429, 500, 502, 503, 504, 520, 522, 524},
 			RotateOnTransport: true,
 			MaxBodyBytes:      32 << 20,
 			StreamIdleTimeout: 5 * time.Minute,

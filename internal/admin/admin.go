@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /admin/api/proxies/{id}/retire", s.auth(s.handleRetireExit))
 	mux.HandleFunc("POST /admin/api/proxies/{id}/revive", s.auth(s.handleReviveExit))
 	mux.HandleFunc("POST /admin/api/proxies/{id}/uncool", s.auth(s.handleUncoolExit))
+	mux.HandleFunc("POST /admin/api/proxies/{id}/clear-region", s.auth(s.handleClearRegion))
 	mux.HandleFunc("GET /admin/", s.auth(s.handleUI))
 	return mux
 }
@@ -142,6 +143,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(learned)
 	}
 	cooled := s.pool.QuotaCooledIDs()
+	// Computed once: asking twice would allocate twice and could report a count
+	// that does not match the list under a concurrent write.
+	blocks := s.pool.RegionBlocks()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uptime_seconds":   time.Since(s.started).Seconds(),
 		"listen":           s.cfg.Server.Listen,
@@ -195,6 +199,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"cooled": cooled,
 			"count":  len(cooled),
 			"total":  s.pool.Len(),
+		},
+		// Which exit-and-model pairs the upstream refuses on geography. Scoped to
+		// the pair rather than the exit because that is what was measured: an
+		// exit can serve one model and be refused another in the same second.
+		// Without this the only way to answer "is this model unavailable
+		// everywhere, or just from some exits" is to probe by hand.
+		"region": map[string]any{
+			"blocked": blocks,
+			"count":   len(blocks),
 		},
 	})
 }
@@ -429,6 +442,28 @@ func (s *Server) handleUncoolExit(w http.ResponseWriter, r *http.Request) {
 	s.pool.ClearQuotaCool(id)
 	s.log.Info("quota cooldown cleared by hand", "exit", id)
 	writeJSON(w, http.StatusOK, map[string]any{"uncooled": id, "changed": true})
+}
+
+// handleClearRegion forgets every region block on one exit.
+//
+// A region block has no deadline to wait out, so unlike a cooldown it can only
+// end two ways: its six-hour trust window running out, or an operator saying a
+// country has reopened. Nothing in the request path can observe that, so without
+// this endpoint the only remedy would be restarting the process.
+//
+// It clears the exit rather than one model because the operator's evidence —
+// "this model works from here now" — is almost always about one pair, but a
+// country reopening lifts every model at once, and asking them to name each
+// model would make the common case the tedious one.
+func (s *Server) handleClearRegion(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, known := s.pool.Get(id); !known {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown exit " + id})
+		return
+	}
+	n := s.pool.ClearRegionBlocks(id)
+	s.log.Info("region blocks cleared by hand", "exit", id, "cleared", n)
+	writeJSON(w, http.StatusOK, map[string]any{"exit": id, "cleared": n, "changed": n > 0})
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {

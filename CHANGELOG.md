@@ -7,6 +7,27 @@
 
 ### 新增
 
+- **地区限制：按「出口 × 模型」记账的第二条轴**。上游用 `403 RegionError` 说
+  "这个模型在你这个出口所在的国家不可用"。以前它落到 `ClassAuth`，不是 IP 可归因的，
+  于是**根本不轮换**——调用方直接收到那句 "not available in your country"，
+  而实际上换个出口就能用。
+  - **为什么不能按出口记账**（实测）：同一个出口、同一秒钟，`muse-spark` 回
+    `403 RegionError` 而 `big-pickle` 回 `200`。所以地区属于**出口和模型这一对**。
+    按出口记账会因为一个模型在该国不可用，把一个**对其他模型完全正常**的出口整个
+    踢出轮换——错得更贵的那个方向。
+  - 新增 `ClassRegion` 判型（`IPAttributable()` 为真），轮换时**带上模型名**
+    （`RotateFor`），避免盲轮又落到另一个同样被限的出口。
+  - 记账带 **6 小时信任窗口**：额度有上游给的回归时刻，地区**没有**——没有任何东西
+    会通知你某个国家重新开放了。信太久会继续跳过本来能用的出口；信太短则每个请求
+    白花一次尝试去重新发现已知事实。实测这些限制跨小时稳定，所以取长的那端。
+  - 与额度账本**完全分开**：清一个不会清另一个。既不入 `QuotaCooled`（那会凭空造出
+    一个时刻），也不因为 403 就设冷却。
+  - 面板：`GET /admin/api/status` 新增 `region` 段；`GET /admin/api/proxies` 每个出口
+    新增 `region_blocked_for`，而 **`healthy` 仍是 `true`**——被地区限制的出口是好的，
+    报成 down 会让操作员去排查一个完全正常的代理。
+  - 新增 `POST /admin/api/proxies/{id}/clear-region`（幂等，返回清掉几条）。
+    地区没有截止时刻可等，所以只能靠窗口到期或操作员发话；没有这个端点的话，
+    唯一的补救是重启进程。
 - **统一入口：一个 URL，一个 Key**（`gateway` / `pools` / `model_list` 三段配置，默认关闭）。
   新增第三种入口形状 `POST /v1/chat/completions`、`POST /v1/messages`、`GET /v1/models`，
   用 `Authorization: Bearer <key>`（或 Anthropic 系的 `x-api-key`）鉴权。**key 绑的是池，不是账号**，
@@ -64,6 +85,21 @@
   `connect-newapi-to-llm-internal.sh`（打通 new-api 与其它容器的网络，且写进 compose）、
   `extract-cpa-inbound-key.py`、`verify-cliproxy-via-newapi.sh`。
 
+### ⚠️ 升级注意
+
+- **`rotate_on_status` 的默认值新增了 `403`。** 地区限制的轮换依赖它：
+  `shouldRotate` 要求 `IPAttributable()` **且**状态码在列表里，所以只加判型不改列表的话，
+  默认配置下**依然不会轮换**。
+  **如果你自己的 `config.yaml` 里显式写了 `rotate_on_status`，请手动补上 `403`**，
+  否则上面那条地区修复对你的部署不生效：
+  ```yaml
+  rotate_on_status: [403, 407, 429, 500, 502, 503, 504, 520, 522, 524]
+  ```
+  这个改动只影响两类响应，因为 `IPAttributable()` 先做了闸门：
+  `403 RegionError`（本次想要的）和带 `Cf-Mitigated` 的 403（Cloudflare 挑战，
+  换个 IP 本来就该试试）。**`FreeTierError` 依旧不轮换**——它由请求的客户端身份决定，
+  烧出口只会浪费池子。
+
 ### 修复
 
 - **`/responses` 端点现在也套免费额度信封——此前两个本来能用的模型被误判成废品。**
@@ -119,6 +155,8 @@
   额度冷却与健康隔离为什么是**两条不能混的轴**（两个方向各自会错成什么样）、
   两个入口各自的主动规避方式、`Pick` 的分层顺序，以及**账本刻意不做的事**
   （不猜、不设上限、不因为 403 记账、不新增配置项）和各自的原因。
+  另含实测小节与 4.8「地区轴」——地区为什么属于「出口 × 模型」而不是出口、
+  三处必须同时改（判型 / 带模型的轮换 / `rotate_on_status`）、以及信任窗口为什么是猜的。
 - 新增 **`docs/GATEWAY.md`**：统一入口的完整设计说明——为什么「key 绑池而不是绑账号」，
   `on_rate_limit` 三种策略分别对应上游按 IP 限额还是按 key 限额（含默认 2 个出口的账怎么算、
   为什么不是 1 也不是更多），`/v1/models` 报什么，四类下游（new-api / CLIProxyAPI / sub2api / LiteLLM）

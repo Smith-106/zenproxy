@@ -103,7 +103,16 @@ const (
 	ClassServer    ErrorClass = "server"     // 5xx / 520-524: retry elsewhere
 	ClassAuth      ErrorClass = "auth"       // 401/403 with a credential-shaped body
 	ClassTierGate  ErrorClass = "tier_gate"  // FreeTierError: client-identity gate, NOT an IP problem
-	ClassClient    ErrorClass = "client"     // 400/404/422: the request itself is wrong
+	// ClassRegion is a 403 saying the model is unavailable in the exit's
+	// country. It is its own class because it is attributable to the exit but
+	// NOT the way the others are: it belongs to the exit-and-model pair, so the
+	// remedy is to change exit for this model rather than to distrust the exit.
+	// Measured, one exit answered RegionError for one free model and 200 for
+	// another in the same second. Folded into ClassAuth, as it was, it produced
+	// no rotation at all and told the client the model was unavailable when
+	// another exit would have served it.
+	ClassRegion    ErrorClass = "region"
+	ClassClient    ErrorClass = "client" // 400/404/422: the request itself is wrong
 	ClassCancelled ErrorClass = "cancelled"
 	ClassUnknown   ErrorClass = "unknown"
 )
@@ -112,7 +121,7 @@ const (
 // any chance of turning this failure into a success.
 func (c ErrorClass) Retryable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassUnknown:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassUnknown:
 		return true
 	default:
 		return false
@@ -122,9 +131,14 @@ func (c ErrorClass) Retryable() bool {
 // IPAttributable reports whether rotating the exit IP is a sensible response.
 // A FreeTierError is deliberately excluded: it is decided from the request's
 // client identity, so burning a fresh IP on it only wastes exits.
+//
+// ClassRegion is included, and is the one class where the exit is only half the
+// story: rotating is right, but it has to be a rotation *for this model*, which
+// is why the rotation carries the model name. Rotating blind would just as
+// likely land on another exit refused for the same model.
 func (c ErrorClass) IPAttributable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion:
 		return true
 	default:
 		return false
@@ -162,12 +176,20 @@ type ProxyHealth struct {
 	// and the upstream is refusing it anyway. An exit can be both, and an
 	// operator reading the panel needs to tell them apart — one is repaired by
 	// fixing the exit, the other has no fix at all but waiting.
-	QuotaUntil    *time.Time `json:"quota_until,omitempty"`
-	QuotaReason   string     `json:"quota_reason,omitempty"`
-	QuotaHits     int        `json:"quota_hits,omitempty"`
-	LastError     string     `json:"last_error,omitempty"`
-	LastCheck     *time.Time `json:"last_check,omitempty"`
-	BoundAccounts []string   `json:"bound_accounts,omitempty"`
+	QuotaUntil  *time.Time `json:"quota_until,omitempty"`
+	QuotaReason string     `json:"quota_reason,omitempty"`
+	QuotaHits   int        `json:"quota_hits,omitempty"`
+	// RegionBlockedFor names the models this exit's country is refused for.
+	//
+	// Scoped to the model because that is what was measured: one exit served one
+	// free model and was refused another in the same second. So an exit can be
+	// listed here and remain perfectly healthy for everything else, which is why
+	// this is deliberately not a health field — a panel that showed it as down
+	// would send an operator to debug a working proxy.
+	RegionBlockedFor []string   `json:"region_blocked_for,omitempty"`
+	LastError        string     `json:"last_error,omitempty"`
+	LastCheck        *time.Time `json:"last_check,omitempty"`
+	BoundAccounts    []string   `json:"bound_accounts,omitempty"`
 	// Retired exits are out of rotation for good. Quarantine expires on its
 	// own; retirement does not, which is the whole point: a dead IP that keeps
 	// coming back every 30 minutes is not a pool member, it is noise.

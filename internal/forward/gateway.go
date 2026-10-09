@@ -113,7 +113,12 @@ func (e *Engine) ServeGateway(w http.ResponseWriter, r *http.Request, rest strin
 	}
 
 	pol := e.policyFor(pool)
-	ch := e.newPoolChooser(pool, pol, rest)
+	// Keyed on the upstream model, not the name the caller asked for: the
+	// upstream decides geography from the model it receives, and if a route
+	// renamed it, only the rewritten name appears in the refusal. proxyLoop
+	// reads the same value back out of the rewritten body, so the pairing the
+	// chooser picks with and the pairing the refusal records are the same key.
+	ch := e.newPoolChooser(pool, pol, rest, route.UpstreamModel)
 	e.log.Info("gateway routing",
 		"key", key.ID, "pool", pool, "model", asked, "upstream_model", route.UpstreamModel,
 		"strategy", pol.Strategy, "on_rate_limit", pol.OnRateLimit)
@@ -157,22 +162,29 @@ func setModelField(body []byte, name string) ([]byte, error) {
 
 // poolChooser walks a pool for one gateway request.
 type poolChooser struct {
-	eng      *Engine
-	pool     string
-	pol      config.PoolPolicy
-	rest     string
-	members  []*registry.Entry
-	current  *registry.Entry
+	eng     *Engine
+	pool    string
+	pol     config.PoolPolicy
+	rest    string
+	members []*registry.Entry
+	current *registry.Entry
+	// mdl is the model the caller asked for. The gateway resolves it from the
+	// route before any attempt is made, so unlike the reverse ingress there is
+	// no window where it is unknown. It is kept on the chooser rather than
+	// threaded through first() because the first pick happens before the loop
+	// that would otherwise be able to supply it.
+	mdl      string
 	exitsFor map[string]int
 	tried    map[string]bool
 }
 
-func (e *Engine) newPoolChooser(pool string, pol config.PoolPolicy, rest string) *poolChooser {
+func (e *Engine) newPoolChooser(pool string, pol config.PoolPolicy, rest, mdl string) *poolChooser {
 	return &poolChooser{
 		eng:      e,
 		pool:     pool,
 		pol:      pol,
 		rest:     rest,
+		mdl:      mdl,
 		members:  e.reg.PoolMembers(pool),
 		exitsFor: map[string]int{},
 		tried:    map[string]bool{},
@@ -194,7 +206,7 @@ func (c *poolChooser) budget() int {
 }
 
 func (c *poolChooser) first() (candidate, bool) {
-	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, nil)
+	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, nil, c.mdl)
 	if ent == nil {
 		return candidate{}, false
 	}
@@ -211,35 +223,35 @@ func (c *poolChooser) first() (candidate, bool) {
 //     every good IP for this account has been tried).
 //   - rotate-both does the first, then the second, which is why it needs the
 //     per-account exit counter.
-func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID string) (candidate, bool) {
+func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID, mdl string) (candidate, bool) {
 	if failed == nil {
 		return candidate{}, false
 	}
 	switch c.pol.OnRateLimit {
 	case config.RotateAccount:
 		c.tried[failed.ID] = true
-		return c.switchAccount()
+		return c.switchAccount(mdl)
 	default:
 		c.exitsFor[failed.ID]++
 		if c.pol.OnRateLimit == config.RotateBoth && c.exitsFor[failed.ID] >= gatewayExitsPerAccount {
 			// This account has spent its share of exits; the failure now looks
 			// more like the account than like the IP.
 			c.tried[failed.ID] = true
-			if cand, ok := c.switchAccount(); ok {
+			if cand, ok := c.switchAccount(mdl); ok {
 				return cand, true
 			}
 			// Nothing else in the pool: fall back to moving this one again
 			// rather than giving up while exits remain.
-			c.eng.rotateExit(failed.ID, exitID)
+			c.eng.rotateExitFor(failed.ID, exitID, mdl)
 			return c.build(failed)
 		}
-		c.eng.rotateExit(failed.ID, exitID)
+		c.eng.rotateExitFor(failed.ID, exitID, mdl)
 		return c.build(failed)
 	}
 }
 
-func (c *poolChooser) switchAccount() (candidate, bool) {
-	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, c.tried)
+func (c *poolChooser) switchAccount(mdl string) (candidate, bool) {
+	ent := c.eng.pickAccount(c.pool, c.pol.Strategy, c.tried, mdl)
 	if ent == nil {
 		return candidate{}, false
 	}

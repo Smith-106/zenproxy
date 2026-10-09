@@ -350,7 +350,29 @@ type member struct {
 	quotaUntil  time.Time
 	quotaReason string
 	quotaHits   int
+
+	// regionBlocked records, per model name, that this exit's country is refused
+	// for that model — and it is keyed by model because that is what the
+	// upstream actually does. Measured on one pool: an exit in RU answered 403
+	// RegionError for one free model and 200 for another in the same second. So
+	// a region block is NOT a property of the exit, and cooling the whole exit
+	// for it would take a perfectly working IP out of rotation for every other
+	// model because one of them is unavailable there.
+	regionBlocked map[string]time.Time
 }
+
+// regionBlockTTL is how long a region refusal is trusted.
+//
+// Unlike a quota cooldown there is no clock to read: the upstream never says
+// when a country reopens, so something has to decide when to stop believing it.
+// The two mistakes are not symmetric in cost. Believe it too long and an exit
+// that could serve the model again stays out of rotation; believe it too short
+// and every request for that model pays one wasted attempt to rediscover a fact
+// already known. Measured, these blocks are stable across hours — the same two
+// exits refused the same model every time they were tried — so the longer end is
+// the cheaper error, and the retry cost is one attempt per expiry rather than
+// one per request.
+const regionBlockTTL = 6 * time.Hour
 
 // Pool owns every configured exit.
 type Pool struct {
@@ -432,26 +454,43 @@ func (p *Pool) Get(id string) (*Proxy, bool) {
 	return m.Proxy, true
 }
 
-// Pick chooses an exit for an account, skipping exclude (the exit that just
-// failed). Healthy exits win; quarantined ones are tried only as a last
-// resort, so a fully broken pool still limps instead of failing outright.
+// Pick chooses an exit without regard to the model being asked for. Callers
+// that know the model should use PickFor; this is the wrapper for the ones that
+// cannot, such as the forward ingress and the health panel.
+func (p *Pool) Pick(exclude string) *Proxy { return p.PickFor("", exclude) }
+
+// PickFor chooses an exit for a request for one model, skipping exclude (the
+// exit that just failed). Healthy exits win; quarantined ones are tried only as
+// a last resort, so a fully broken pool still limps instead of failing outright.
 //
-// Quota-cooled exits sit between those two tiers. They are usually in perfect
-// health — an upstream that has spent an IP's allowance answers promptly and
-// politely — so health alone would rank them first and hand out the one exit
-// that is guaranteed to be refused. They are demoted, and among themselves the
-// one whose allowance returns soonest goes first, because that is the order in
-// which the pool actually regains capacity.
-func (p *Pool) Pick(exclude string) *Proxy {
+// Two kinds of "known bad right now" are demoted below healthy exits, and they
+// are separate tiers because they are separate facts:
+//
+//   - quota-cooled means the upstream named a time at which it will serve this
+//     exit again. There is a clock, so it is the closest of the three to usable.
+//   - region-blocked means the upstream refuses this exit's country for this
+//     model. There is no clock, only a policy that changes on its own schedule.
+//   - quarantined means the exit is suspected broken, which is the weakest
+//     claim of the three: the others are stated by the upstream, this one is
+//     inferred from failures.
+//
+// The ordering among those last tiers only matters when nothing healthy is left,
+// at which point the request is likely to fail wherever it goes. Ranking them by
+// how strong the evidence is at least makes the choice explainable.
+//
+// A model of "" means the caller cannot judge geography, and no region tier is
+// applied — guessing there would take exits out of rotation on no evidence.
+func (p *Pool) PickFor(model, exclude string) *Proxy {
 	if len(p.members) == 0 {
 		return nil
 	}
 	now := time.Now()
+	model = strings.TrimSpace(model)
 
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	var healthy, degraded, cooled, quarantined []*member
+	var healthy, degraded, cooled, region, quarantined []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -463,6 +502,7 @@ func (p *Pool) Pick(exclude string) *Proxy {
 		m.mu.Lock()
 		q := now.Before(m.quarantineUntil)
 		_, _, cool := p.quotaCooledLocked(m, now)
+		reg := p.regionBlockedLocked(m, model, now)
 		h := m.healthy
 		ret := m.retired
 		fails := m.failures
@@ -481,12 +521,14 @@ func (p *Pool) Pick(exclude string) *Proxy {
 		}
 		switch {
 		case q:
-			// Broken outranks out-of-quota: a cooled exit that is also
-			// quarantined is the worse of the two, and quarantine is the
-			// signal that lasts until proven otherwise.
+			// Broken outranks the rest: a cooled exit that is also quarantined
+			// is the worse of the two, and quarantine is the signal that lasts
+			// until proven otherwise.
 			quarantined = append(quarantined, m)
 		case cool:
 			cooled = append(cooled, m)
+		case reg:
+			region = append(region, m)
 		case h && !slow:
 			healthy = append(healthy, m)
 		default:
@@ -527,6 +569,9 @@ func (p *Pool) Pick(exclude string) *Proxy {
 			}
 		}
 		return soonest.Proxy
+	}
+	if m := pick(region); m != nil {
+		return m.Proxy
 	}
 	if m := pick(quarantined); m != nil {
 		return m.Proxy
@@ -752,6 +797,154 @@ type QuotaCool struct {
 	After string `json:"after,omitempty"`
 }
 
+// BlockRegion records that an exit's country is refused for one model.
+//
+// Scoped to the model on purpose. Measured: slot-10 answered 403 RegionError for
+// one free model and 200 for another, in the same second, through the same exit.
+// A per-exit region flag would therefore be wrong in the expensive direction —
+// it would retire a working IP for models it serves fine.
+//
+// An empty model name is refused rather than stored as a wildcard. There is no
+// such thing as "blocked for all models" in the evidence, and inventing one
+// would silently become a per-exit block through a different door.
+func (p *Pool) BlockRegion(exitID, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	p.mu.RLock()
+	m, ok := p.byID[exitID]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.regionBlocked == nil {
+		m.regionBlocked = map[string]time.Time{}
+	}
+	m.regionBlocked[model] = time.Now()
+	return true
+}
+
+// RegionBlocked reports whether an exit is currently refused for a model.
+//
+// An empty model means "cannot judge" and always answers false: the forward
+// ingress never sees the model, and guessing there would take exits out of
+// rotation on no evidence at all.
+func (p *Pool) RegionBlocked(exitID, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	p.mu.RLock()
+	m, ok := p.byID[exitID]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return p.regionBlockedLocked(m, model, time.Now())
+}
+
+// regionBlockedLocked reads one member's region blocks with its lock held.
+func (p *Pool) regionBlockedLocked(m *member, model string, now time.Time) bool {
+	if model == "" || m.regionBlocked == nil {
+		return false
+	}
+	at, ok := m.regionBlocked[model]
+	if !ok {
+		return false
+	}
+	// Expiry is evaluated on read rather than swept, so there is no cleanup pass
+	// to forget to run — the same reason quota cooldowns work this way.
+	if now.Sub(at) >= regionBlockTTL {
+		return false
+	}
+	return true
+}
+
+// regionBlockedModelsLocked lists the models still blocked on one member.
+func (p *Pool) regionBlockedModelsLocked(m *member, now time.Time) []string {
+	if m.regionBlocked == nil {
+		return nil
+	}
+	var out []string
+	for model, at := range m.regionBlocked {
+		if now.Sub(at) < regionBlockTTL {
+			out = append(out, model)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ClearRegionBlocks forgets every region block on one exit and reports how many
+// were live. Nothing in the request path calls it; it exists because a country
+// reopening is not something the proxy can observe, only an operator can.
+func (p *Pool) ClearRegionBlocks(exitID string) int {
+	p.mu.RLock()
+	m, ok := p.byID[exitID]
+	p.mu.RUnlock()
+	if !ok {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(p.regionBlockedModelsLocked(m, time.Now()))
+	m.regionBlocked = nil
+	return n
+}
+
+// RegionBlockTTL exposes how long a region refusal is trusted, so callers can
+// report it without restating the constant and drifting from it.
+func (p *Pool) RegionBlockTTL() time.Duration { return regionBlockTTL }
+
+// RegionBlock is one exit-and-model pair the upstream refuses on geography.
+type RegionBlock struct {
+	ExitID     string    `json:"exit_id"`
+	Model      string    `json:"model"`
+	BlockedAt  time.Time `json:"blocked_at"`
+	RetryAfter string    `json:"recheck_after,omitempty"`
+}
+
+// RegionBlocks lists every live region block, so an operator can answer "is this
+// model unavailable everywhere, or only from some exits" without probing by
+// hand.
+func (p *Pool) RegionBlocks() []RegionBlock {
+	now := time.Now()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	var out []RegionBlock
+	for _, m := range p.members {
+		m.mu.Lock()
+		id := m.ID
+		models := p.regionBlockedModelsLocked(m, now)
+		at := make(map[string]time.Time, len(models))
+		for _, model := range models {
+			at[model] = m.regionBlocked[model]
+		}
+		m.mu.Unlock()
+		for _, model := range models {
+			left := regionBlockTTL - now.Sub(at[model])
+			out = append(out, RegionBlock{
+				ExitID:     id,
+				Model:      model,
+				BlockedAt:  at[model],
+				RetryAfter: left.Round(time.Second).String(),
+			})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Model != out[j].Model {
+			return out[i].Model < out[j].Model
+		}
+		return out[i].ExitID < out[j].ExitID
+	})
+	return out
+}
+
 // Bind records that an account currently egresses through this exit.
 func (p *Pool) Bind(exitID, accountID string) {
 	p.mu.RLock()
@@ -807,6 +1000,10 @@ func (p *Pool) Health() []model.ProxyHealth {
 			h.QuotaReason = reason
 			h.QuotaHits = m.quotaHits
 		}
+		// Listed per exit as model names, because that is the half an operator
+		// cannot guess: the exit is healthy and answering, and only the pairing
+		// explains the 403.
+		h.RegionBlockedFor = p.regionBlockedModelsLocked(m, time.Now())
 		if !m.lastCheck.IsZero() {
 			t := m.lastCheck
 			h.LastCheck = &t
