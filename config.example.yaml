@@ -78,9 +78,11 @@ health:
   timeout: 8s
   # 探活用 IP 回显接口拿到每个出口的真实出口 IP，仅用于展示与排障
   probe_url: "https://api.ipify.org?format=json"
-  # 可达性探测：经该出口对上游做一次 TCP 隧道，失败即记账
+  # 可达性探测：经该出口对上游做 TCP 隧道，再完成 TLS 握手并校验证书。
+  # 只做 TCP 会把 MITM/假证书 resin slot 标成 healthy（CONNECT 成功），
+  # 真请求 HTTPS 再炸 x509 —— 这是 transport 失败循环的主要来源。
   reachability: "opencode.ai:443"
-  failure_threshold: 3         # 连续失败几次开始隔离
+  failure_threshold: 3         # 普通失败连续几次开始隔离；x509/证书毒一枪出局
   quarantine: 5m               # 首次隔离时长，之后按失败次数指数退避
   max_backoff: 30m
   # 上一轮探活耗时超过这个值的出口会被降级为"备用"，仍在轮询之外等待，

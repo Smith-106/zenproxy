@@ -346,6 +346,11 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 	var lastMsg string
 	gateRetried := false
+	// sameExitTransientRetry: one free retry on the bound exit after a
+	// transient transport blip (EOF / reset). Rotating on the first blip
+	// drops upstream prompt-cache affinity for the rest of the conversation;
+	// a second failure still rotates. Certificate poison never uses this path.
+	sameExitTransientRetry := false
 	// Requests are counted per account actually used, so a pool that had to
 	// switch accounts does not credit the one that failed.
 	counted := ""
@@ -400,7 +405,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			e.log.Warn("upstream transport failure",
 				"account", ent.ID, "exit", exitID, "attempt", attempt, "class", class, "err", err)
 			if attempt < maxAttempts {
-				e.reg.Rotate(ent.ID, exitID)
+				// Sticky exit: one transient blip keeps the binding so a long
+				// conversation does not lose upstream cached_tokens on noise.
+				// Poison TLS / hard proxy failures rotate immediately.
+				if exitID != "" && !sameExitTransientRetry && isTransientTransport(err) {
+					sameExitTransientRetry = true
+					e.log.Info("retrying same exit after transient transport blip",
+						"account", ent.ID, "exit", exitID, "attempt", attempt)
+					continue
+				}
+				e.reg.RotateFor(ent.ID, exitID, askedModel)
 				continue
 			}
 			break
@@ -808,6 +822,40 @@ func classifyTransport(err error) model.ErrorClass {
 		return model.ClassProxyAuth
 	}
 	return model.ClassTransport
+}
+
+// isTransientTransport reports a one-shot transport blip that is worth
+// retrying on the same exit. Certificate poison and SOCKS "general failure"
+// are not transient: the exit is the problem and affinity should move now.
+func isTransientTransport(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if proxypool.PoisonTLS(msg) {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "socks5: general failure") {
+		return false
+	}
+	if strings.Contains(lower, "socks5: host unreachable") {
+		return false
+	}
+	switch {
+	case strings.Contains(lower, "unexpected eof"):
+		return true
+	case strings.Contains(lower, "connection reset"):
+		return true
+	case strings.Contains(lower, "broken pipe"):
+		return true
+	case strings.Contains(lower, "use of closed network connection"):
+		return true
+	case strings.Contains(lower, "i/o timeout"):
+		return true
+	default:
+		return false
+	}
 }
 
 // quotaDeadline reads the upstream's own statement of when it will serve this

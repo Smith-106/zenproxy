@@ -9,6 +9,7 @@ package proxypool
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,35 @@ import (
 	"zenproxy/internal/config"
 	"zenproxy/internal/model"
 )
+
+// poisonRetireAfter is how many consecutive TLS/certificate failures it takes
+// to retire an exit for good. Quarantine already happens on the first such
+// failure (see MarkFailure); retirement is the door that stops the probe loop
+// from re-admitting a MITM slot every quarantine window. Ordinary transport
+// noise still uses health.RetireAfter.
+const poisonRetireAfter = 3
+
+// PoisonTLS reports whether a failure reason means the exit cannot present a
+// usable certificate for the upstream. These are not blips: a slot that
+// tunnels TCP but fails x509 verification will keep failing every real
+// request, and a TCP-only reachability probe used to mark it healthy again.
+func PoisonTLS(reason string) bool {
+	lower := strings.ToLower(reason)
+	switch {
+	case strings.Contains(lower, "x509:"):
+		return true
+	case strings.Contains(lower, "certificate is not valid"):
+		return true
+	case strings.Contains(lower, "certificate signed by unknown authority"):
+		return true
+	case strings.Contains(lower, "tls: failed to verify"):
+		return true
+	case strings.Contains(lower, "tls: bad certificate"):
+		return true
+	default:
+		return false
+	}
+}
 
 // Proxy is one configured exit. It is safe to share: the underlying
 // http.Transport pools connections per host.
@@ -621,20 +651,29 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 		}
 		return soonest.Proxy
 	}
-	if m := pick(region); m != nil {
-		return m.Proxy
-	}
+	// Region-blocked exits are never handed out. Measured, a known RegionError
+	// pair burns an attempt for a guaranteed 403; when every remaining exit is
+	// refused for this model the honest answer is "nothing usable", not "pick
+	// one and watch it fail". The region slice is kept above only so the
+	// ranking still classifies them instead of letting them look healthy.
+	_ = region
 	if m := pick(quarantined); m != nil {
 		return m.Proxy
 	}
-	// Everything was excluded (single-exit pool): fall back to any exit that
-	// has not been retired.
-	for _, m := range p.members {
-		m.mu.Lock()
-		ret := m.retired
-		m.mu.Unlock()
-		if !ret {
-			return m.Proxy
+	// Single-exit limp: the sole member was passed as `exclude`, so the tiers
+	// above saw an empty pool. Hand it back unless it is region-blocked for
+	// this model. Multi-exit pools must not resurrect an excluded exit or a
+	// region-blocked peer through this door — that undoes fail-fast.
+	if exclude != "" && len(p.members) == 1 {
+		m := p.members[0]
+		if m.ID == exclude {
+			m.mu.Lock()
+			ret := m.retired
+			reg := p.regionBlockedLocked(m, model, now)
+			m.mu.Unlock()
+			if !ret && !reg {
+				return m.Proxy
+			}
 		}
 	}
 	// Every exit in the pool is retired. Returning nil here would 502 the
@@ -676,6 +715,11 @@ func (p *Pool) MarkSuccess(id string, latency time.Duration) {
 
 // MarkFailure records a bad round trip and quarantines the exit once the
 // configured threshold is crossed, with exponential backoff per exit.
+//
+// TLS/certificate poison is special-cased: one strike quarantines, and a short
+// consecutive streak retires. A MITM resin slot that passes a TCP tunnel but
+// fails x509 on the real HTTPS request used to need FailureThreshold hits to
+// nap and RetireAfter hits to leave — while probes kept clearing the streak.
 func (p *Pool) MarkFailure(id, reason string) {
 	p.mu.RLock()
 	m, ok := p.byID[id]
@@ -689,10 +733,19 @@ func (p *Pool) MarkFailure(id, reason string) {
 	m.consecFails++
 	m.lastErr = reason
 	m.lastCheck = time.Now()
-	if m.consecFails >= p.health.FailureThreshold {
+
+	threshold := p.health.FailureThreshold
+	if threshold < 1 {
+		threshold = 1
+	}
+	poison := PoisonTLS(reason)
+	if poison {
+		threshold = 1
+	}
+	if m.consecFails >= threshold {
 		m.healthy = false
 		backoff := p.health.Quarantine
-		for i := 1; i < m.consecFails-p.health.FailureThreshold+1 && backoff < p.health.MaxBackoff; i++ {
+		for i := 1; i < m.consecFails-threshold+1 && backoff < p.health.MaxBackoff; i++ {
 			backoff *= 2
 		}
 		if backoff > p.health.MaxBackoff {
@@ -701,20 +754,25 @@ func (p *Pool) MarkFailure(id, reason string) {
 		m.quarantineUntil = time.Now().Add(backoff)
 		p.log.Warn("egress quarantined",
 			"exit", id, "failures", m.failures, "consecutive", m.consecFails,
-			"for", backoff.String(), "reason", reason)
+			"for", backoff.String(), "reason", reason, "poison_tls", poison)
 	}
 	// Quarantine is a nap; retirement is the door. An exit that has failed
 	// RetireAfter times running, with no success in between to reset the
 	// counter, is not going to come back — and re-probing it every 30 minutes
 	// forever is exactly the noise this is meant to stop.
-	if p.health.RetireAfter > 0 && !m.retired && m.consecFails >= p.health.RetireAfter {
+	retireAfter := p.health.RetireAfter
+	if poison && retireAfter > 0 && poisonRetireAfter < retireAfter {
+		retireAfter = poisonRetireAfter
+	}
+	if retireAfter > 0 && !m.retired && m.consecFails >= retireAfter {
 		m.retired = true
 		m.retiredAt = time.Now()
 		m.retiredReason = fmt.Sprintf("%d consecutive failures with no success in between; last: %s",
 			m.consecFails, reason)
 		p.log.Warn("egress retired for good",
-			"exit", id, "consecutive", m.consecFails, "retire_after", p.health.RetireAfter,
-			"reason", reason, "undo", "POST /admin/api/proxies/"+id+"/revive")
+			"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
+			"reason", reason, "poison_tls", poison,
+			"undo", "POST /admin/api/proxies/"+id+"/revive")
 	}
 }
 
@@ -1296,15 +1354,31 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	defer cancel()
 
 	start := time.Now()
-	// Reachability: a TCP tunnel to the upstream confirms the exit works for
-	// the traffic we actually care about, without needing credentials.
+	// Reachability: a TCP tunnel is necessary but not sufficient. Measured,
+	// MITM resin slots complete CONNECT/SOCKS to opencode.ai:443 and still
+	// fail the real HTTPS request with x509 name mismatches. Doing the TLS
+	// handshake here (with certificate verification) is what stops those
+	// slots from being marked healthy by a probe that never spoke TLS.
 	if p.health.Reachability != "" {
 		conn, err := m.DialContext(pctx, "tcp", p.health.Reachability)
 		if err != nil {
 			p.MarkFailure(m.ID, "unreachable: "+err.Error())
 			return
 		}
-		conn.Close()
+		host, _, splitErr := net.SplitHostPort(p.health.Reachability)
+		if splitErr != nil || host == "" {
+			host = p.health.Reachability
+		}
+		tlsConn := tls.Client(conn, &tls.Config{
+			ServerName: host,
+			MinVersion: tls.VersionTLS12,
+		})
+		if err := tlsConn.HandshakeContext(pctx); err != nil {
+			_ = conn.Close()
+			p.MarkFailure(m.ID, "tls: "+err.Error())
+			return
+		}
+		_ = tlsConn.Close()
 	}
 	latency := time.Since(start)
 

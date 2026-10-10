@@ -2,6 +2,7 @@ package forward
 
 import (
 	"encoding/base64"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -101,6 +102,29 @@ func TestTierGateIsNeverAttributableToTheExit(t *testing.T) {
 	}
 	if !model.ClassTransport.IPAttributable() {
 		t.Error("transport failures are exactly what rotation is for")
+	}
+}
+
+func TestTransientTransportKeepsAffinityCandidates(t *testing.T) {
+	cases := []struct {
+		err  string
+		want bool
+	}{
+		{"read: unexpected EOF", true},
+		{"write: connection reset by peer", true},
+		{"i/o timeout", true},
+		{"x509: certificate is not valid for any names", false},
+		{"socks5: general failure", false},
+		{"tls: failed to verify certificate", false},
+	}
+	for _, c := range cases {
+		got := isTransientTransport(errors.New(c.err))
+		if got != c.want {
+			t.Errorf("isTransientTransport(%q) = %v, want %v", c.err, got, c.want)
+		}
+	}
+	if isTransientTransport(nil) {
+		t.Error("nil error must not be transient")
 	}
 }
 

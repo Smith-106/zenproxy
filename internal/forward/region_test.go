@@ -285,14 +285,15 @@ func TestAnExitRefusedForOneModelStillServesOthers(t *testing.T) {
 	}
 }
 
-// But if it is the only one left it is still handed out. A refusal is a better
-// outcome than no attempt: the block may have lifted, and nothing announces it.
-func TestARefusedExitIsStillUsedWhenNothingElseRemains(t *testing.T) {
+// When every remaining exit is region-blocked for the model, fail-fast rather
+// than burning an attempt on a known 403. The 6h TTL is the rediscovery path;
+// paying one guaranteed refusal per request was the expensive mistake.
+func TestARefusedExitIsNotUsedWhenNothingElseRemains(t *testing.T) {
 	h := newRegionHarness(t)
 	h.pool.BlockRegion("exit-a", "m-blocked")
 
-	if px := h.pool.PickFor("m-blocked", "exit-b"); px == nil || px.ID != "exit-a" {
-		t.Fatalf("PickFor gave up instead of using the last remaining exit (got %v)", px)
+	if px := h.pool.PickFor("m-blocked", "exit-b"); px != nil {
+		t.Fatalf("PickFor handed out region-blocked %q; want nil (fail-fast)", px.ID)
 	}
 }
 

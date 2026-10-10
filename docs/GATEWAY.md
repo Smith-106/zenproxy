@@ -164,6 +164,20 @@ retry-after: 7099
 | 怎么结束 | **探测成功就清掉** | **只有时间能清掉** |
 | 表现 | 探测失败 | 连接快、响应快、一切正常 |
 
+**探活必须做 TLS，不能只做 TCP。** `reachability` 在隧道成功后会对目标主机做
+TLS 握手并校验证书。只做 TCP 时，MITM / 假证书 resin slot 会 `CONNECT` 成功被标
+healthy，真请求再炸 `x509: certificate is not valid for any names`，再被
+`failure_threshold` 挡几枪才隔离——这是 transport 失败量的主要放大器。证书毒
+失败现在 **一枪隔离**、连续约 3 次 retire。
+
+**地区全灭就 fail-fast。** `Pick` 不再把已知 `RegionError` 的出口当候选项发出去；
+亲和解析（`ExitForModel`）也会跳过对本模型 region-blocked 的绑定。额度冷却仍由
+`avoidSpentExit` 在发送前处理（全员冷却时不瞎换绑）。
+
+**瞬时传输错误先粘出口再试一次。** `unexpected EOF` / `connection reset` 等噪声
+在同出口重试 1 次再 `RotateFor`，避免长对话中途换 IP 把上游 `cached_tokens` 打掉。
+证书毒与 `socks5: general failure` 不走这条粘性路径。
+
 **把冷却做成一种隔离是错的**：额度耗尽的出口探测**会成功**（探的是出口本身能不能通，
 不是上游收不收），于是一次探测就把它"修好"、放回池子，然后照旧被拒。
 

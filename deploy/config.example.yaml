@@ -109,8 +109,9 @@ health:
   interval: 60s
   timeout: 8s
   probe_url: "https://api.ipify.org?format=json"   # 用它拿出口的真实 IP
-  reachability: "opencode.ai:443"                  # 顺带确认上游可达
-  failure_threshold: 3                            # 连续失败 3 次判为坏出口
+  # TCP 隧道 + TLS 握手/校验证书。只做 TCP 会放行 MITM 假证书 slot。
+  reachability: "opencode.ai:443"
+  failure_threshold: 3                            # 普通失败；x509/证书毒一枪出局
   quarantine: 5m                                  # 首次隔离 5 分钟，之后指数退避
   max_backoff: 30m                                # 退避上限
 
@@ -118,6 +119,7 @@ health:
   #   和「隔离」的区别是——隔离到点会自己复活，淘汰不会。这是"垃圾 IP"真正离开池子的方式，
   #   否则一个死透的出口会因为退避到期被反复重试，永远占着位置、永远浪费重试预算。
   #   任何一次成功都会把计数清零，"时好时坏但还能用"的出口不会被淘汰。
+  #   证书毒失败另有更快的 retire（约 3 次），不需等满这个值。
   #   0 = 关闭（只隔离，不淘汰）。
   #   Resin 这类公共/免费节点池实测 94% 的节点是坏的，这个值建议开，20 是保守值。
   retire_after: 20

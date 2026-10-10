@@ -258,6 +258,56 @@ func TestExitForDirectModeSkipsThePool(t *testing.T) {
 	}
 }
 
+// Affinity must not keep returning an exit that is region-blocked for the
+// asked model. Healthy alone used to win, and every request then paid either
+// avoidSpentExit or a real 403 before moving.
+func TestExitForModelAbandonsARegionBlockedBinding(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	pool.BlockRegion("a", "muse-spark-1.3-contributor-free")
+
+	got := r.ExitForModel("zen-01", "muse-spark-1.3-contributor-free")
+	if got == nil {
+		t.Fatal("ExitForModel returned nil while healthy exit b remained")
+	}
+	if got.ID == "a" {
+		t.Fatal("affinity kept a region-blocked exit for the asked model")
+	}
+	// Re-pin to a and ask for a different model: the block must not leak.
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatalf("re-bind: %v", err)
+	}
+	if got := r.ExitForModel("zen-01", "big-pickle"); got == nil || got.ID != "a" {
+		t.Fatalf("region block leaked onto another model: got %v", got)
+	}
+}
+
+// Quota coolings stay on the binding so avoidSpentExit can decide whether a
+// warmer exit exists. ExitForModel must not pre-empt that and churn into
+// another spent exit on its own.
+func TestExitForModelKeepsAQuotaCooledBinding(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	pool.CoolForQuota("a", time.Now().Add(time.Hour), "429")
+
+	got := r.ExitForModel("zen-01", "big-pickle")
+	if got == nil || got.ID != "a" {
+		t.Fatalf("ExitForModel moved off a cooled binding prematurely: got %v", got)
+	}
+}
+
 func TestExitForEmptyPoolIsNil(t *testing.T) {
 	r := New("", poolOf(t), testLogger())
 	if err := r.Upsert(account("zen-01", "k")); err != nil {

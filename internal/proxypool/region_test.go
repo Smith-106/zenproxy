@@ -85,15 +85,12 @@ func TestAnExitRefusedForOneModelStillServesOthers(t *testing.T) {
 	pool, _ := healthyPool(t, 2)
 	pool.BlockRegion("a", "m-1")
 
-	// Excluding b leaves only the blocked a, so this is a question about the
-	// tiering and not about the pool running dry.
+	// Region-blocked exits are never selected: burning an attempt on a known
+	// 403 is strictly worse than failing fast. With b excluded, nothing usable
+	// remains for m-1.
 	for i := 0; i < 10; i++ {
-		px := pool.PickFor("m-1", "b")
-		if px == nil {
-			t.Fatal("PickFor gave up while an exit remained")
-		}
-		if px.ID != "a" {
-			t.Fatalf("PickFor chose %q, but a was the only exit left", px.ID)
+		if px := pool.PickFor("m-1", "b"); px != nil {
+			t.Fatalf("PickFor handed out region-blocked %q; want nil (fail-fast)", px.ID)
 		}
 	}
 	// For a different model the same exit is ordinary again, which is the
@@ -104,6 +101,22 @@ func TestAnExitRefusedForOneModelStillServesOthers(t *testing.T) {
 	}
 	if !seen["a"] {
 		t.Fatal("the exit blocked for m-1 was withheld for m-2 as well")
+	}
+}
+
+// A known region refusal must not be preferred over a healthy free exit, and
+// must not be returned at all while any non-blocked exit remains.
+func TestPickSkipsRegionBlockedWhileAlternativesExist(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	pool.BlockRegion("a", "m-1")
+	for i := 0; i < 20; i++ {
+		px := pool.PickFor("m-1", "")
+		if px == nil {
+			t.Fatal("PickFor returned nil while healthy exit b remained")
+		}
+		if px.ID != "b" {
+			t.Fatalf("PickFor = %q, want b (a is region-blocked for m-1)", px.ID)
+		}
 	}
 }
 

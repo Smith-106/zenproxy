@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -450,7 +451,7 @@ func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 
 	if bound != "" {
 		if px, ok := r.pool.Get(bound); ok {
-			if healthy, _ := r.pool.Healthy(bound); healthy {
+			if healthy, _ := r.pool.Healthy(bound); healthy && r.exitServesModel(bound, model) {
 				r.pool.Bind(bound, accountID)
 				return px
 			}
@@ -459,7 +460,7 @@ func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 
 	if mode != "auto" && mode != "" {
 		if px, ok := r.pool.Get(mode); ok {
-			if healthy, _ := r.pool.Healthy(mode); healthy {
+			if healthy, _ := r.pool.Healthy(mode); healthy && r.exitServesModel(mode, model) {
 				r.setBinding(accountID, mode)
 				return px
 			}
@@ -477,6 +478,19 @@ func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 	}
 	r.setBinding(accountID, px.ID)
 	return px
+}
+
+// exitServesModel reports whether a healthy exit is currently allowed to
+// carry this model. Affinity used to check only Healthy, which kept handing
+// back a region-blocked exit and forced every request to pay a real 403 (or
+// rely on avoidSpentExit). Quota coolings are deliberately NOT checked here:
+// avoidSpentExit owns that decision so it can refuse to churn when every
+// exit is spent. An empty model means "cannot judge" and always allows.
+func (r *Registry) exitServesModel(exitID, model string) bool {
+	if r.pool == nil || strings.TrimSpace(model) == "" {
+		return true
+	}
+	return !r.pool.RegionBlocked(exitID, model)
 }
 
 // BoundExit reports which exit an account is currently bound to, without

@@ -470,6 +470,49 @@ func TestMarkFailureRetiresAfterTheConfiguredStreak(t *testing.T) {
 	}
 }
 
+func TestPoisonTLSQuarantinesOnFirstStrike(t *testing.T) {
+	pool, _ := healthyPool(t, 2) // FailureThreshold=2 for ordinary failures
+	pool.MarkFailure("a", "x509: certificate is not valid for any names")
+	if ok, _ := pool.Healthy("a"); ok {
+		t.Fatal("a poison TLS failure must quarantine on the first strike")
+	}
+	// Ordinary failures still need the configured threshold.
+	pool.MarkFailure("b", "connection refused")
+	if ok, _ := pool.Healthy("b"); !ok {
+		t.Fatal("one ordinary failure must not quarantine at threshold 2")
+	}
+}
+
+func TestPoisonTLSRetiresFasterThanOrdinaryFailures(t *testing.T) {
+	pool := retirePool(t, 2, 20)
+	for i := 0; i < poisonRetireAfter-1; i++ {
+		pool.MarkFailure("a", "tls: failed to verify certificate")
+		if h := healthOf(t, pool, "a"); h.Retired {
+			t.Fatalf("retired after only %d of %d poison failures: %+v", i+1, poisonRetireAfter, h)
+		}
+	}
+	pool.MarkFailure("a", "tls: failed to verify certificate")
+	if h := healthOf(t, pool, "a"); !h.Retired {
+		t.Fatalf("not retired after %d poison TLS failures: %+v", poisonRetireAfter, h)
+	}
+}
+
+func TestPoisonTLSDetector(t *testing.T) {
+	cases := map[string]bool{
+		"x509: certificate is not valid for any names":     true,
+		"tls: failed to verify certificate":                true,
+		"certificate signed by unknown authority":          true,
+		"Get \"https://opencode.ai\": unexpected EOF":      false,
+		"socks5: general failure":                          false,
+		"":                                                 false,
+	}
+	for in, want := range cases {
+		if got := PoisonTLS(in); got != want {
+			t.Errorf("PoisonTLS(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestOneSuccessResetsTheRetirementStreak(t *testing.T) {
 	pool := retirePool(t, 2, 3)
 	// A flapping exit that still answers now and then is not garbage.

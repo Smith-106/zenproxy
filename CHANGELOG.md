@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **降低出口失败循环、保住上游 prompt cache 亲和。**
+  1. 可达性探活在 TCP 隧道之后补做 **TLS 握手+证书校验**（`reachability` 目标），
+     MITM/假证书 resin slot 不再被 TCP-only 探活标绿。
+  2. `x509` / 证书毒失败 **一枪隔离**，连续 3 次即 retire（普通失败仍走
+     `failure_threshold` / `retire_after`）。
+  3. `Pick` **不再发出**已知 region-blocked 的出口（全灭则 fail-fast，避免必 403）。
+  4. `ExitForModel` 亲和命中时拒绝 **region-blocked** 绑定（quota 仍由
+     `avoidSpentExit` 决策，避免全员冷却时无意义 churn）。
+  5. 传输层 `unexpected EOF` / reset 等瞬时错误 **同出口再试 1 次** 再轮换，
+     减少长对话中途丢 `cached_tokens`；证书毒与 socks5 general failure 仍立即轮换。
+
 ### 新增
 
 - **zenproxy 内置 chat→responses 协议桥（muse-spark）。**
