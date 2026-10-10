@@ -373,6 +373,23 @@
 - **new-api 的管理接口用的是 `users.access_token`，不是 `tokens.key`。** 这两把是不同的凭据：
   `/api/*` 认后者会回 `AUTH_UNAUTHORIZED`，而它同时又是有效的推理密钥（`/v1/*` 回 200），
   所以看上去像「密钥是对的但接口不认」。
+- **折流失败时状态码还在说谎：错误被写进 200 的 body 里，然后被下游原样透传出去。**
+  症状是 new-api 转来的请求返回 `HTTP 200`，响应体却是
+  `{"error":{"type":"zenproxy_error","message":"the upstream stream ended without a
+  completed response"}}` —— **状态码说成功、内容说失败**，客户端读到 200 就去取
+  `choices`，取不到。
+  根因在本仓库：`foldStream` 与 `foldResponsesStream` 返回 `[]byte` 一个值，错误信封和
+  正常负载在调用方眼里完全一样，而 `writeFolded` 无条件写
+  `w.WriteHeader(http.StatusOK)`。两者相遇，错误就被伪装成成功。
+  `ssefold.go` 那段注释其实早就点到了要害——「Reporting an empty success here would be a
+  silent lie, so say what happened instead」——**但这个修复只做了一半**：它在 body 里说了
+  实话，状态码仍在说谎。只在一个进程内看，这没错；一旦中间隔着一个按状态码判断的转发方
+  （new-api 就是原样转发），假话就活到了最后。
+  两个 fold 函数改成返回 `(payload []byte, errMsg string)`，`writeFolded` 据 `errMsg`
+  返回 502。成功路径一个字节没动。
+  实测：修复前 `max_tokens=400` 时 `muse-spark-1.3-contributor-free` 回 `200` + 错误体；
+  修复后回 `502`，日志从 `level=INFO` 变成 `level=WARN msg=request … status=502`；
+  同一模型 `max_tokens=2000` 仍回 `200` 且带完整回复。
 
 ### 文档
 

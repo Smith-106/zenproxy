@@ -42,11 +42,47 @@ scripts/redact.py --test
 
 | 7 | `select-string` 递归扫目录查一把 key | 命中的文件里有 6 个根、上万行，其中一行就是第 2 次那张 flow-style 表 |
 | 8 | **`grep -n 'claude-opus-5-5'`** | 那行 flow-style 表**就是文件的一整行**，`grep` 按行输出，于是**整行**被打印：41 把 `nvapi-`、10 把 ollama、stepfun、weixin、siliconflow、windsurfapi、sub2api、黑煤窑的 key，外加 `socks5h://user:pass@host` 里的代理密码（出现两次） |
+| 9 | **`Select-String -Pattern 'DEEPSEEK\|deepseek'`** 递归扫 `.dsh/**/*.yaml` | 想查"这个变量还有谁在用"，结果 `.credentials.yaml` 那一行本身被命中并原样打印。**而且漏出去的是活凭据**（见下） |
 
 第 2、6、8 次是同一个形状（打印 flow-style 行），中间各隔了很久，各又犯了一次。
 第 8 次尤其没道理：动手前刚写下「**绝不打印原始配置行**」，下一秒就用 `grep` 去按内容搜这个文件。
+第 9 次同样没道理：**"找引用"和"读凭据文件"是同一个动作**，只要文件名出现在搜索范围里就必然中招。
 
 共同点：**每一次都以为自己知道密钥长什么样。**
+
+### 第 9 次为什么特殊：变量名不是证据
+
+那次漏出去的 `DEEPSEEK_API_KEY`，看上去是"一把已经失效的 DeepSeek 官方 key"，当时
+正准备删掉它。**两件事都是错的**：
+
+- **它不是 DeepSeek 的 key。** 名字是历史遗留。它的值（`th-…`，32 字符）是
+  `https://tavily.ivanli.cc/api/tavily` 的代理密钥，`cordis.patch.yml` 里的
+  `web-search-tavily` 正在用 `apiKeyEnv: DEEPSEEK_API_KEY` 引用它。DSH 的联网搜索靠它。
+- **它没有失效。** 拿它去问 `api.deepseek.com` 得到 401 是**必然的**——测错了服务。
+  换成正确的服务是 `HTTP 200`，真返回搜索结果。
+
+**差点把一个在用的凭据当成废品删掉。** 教训：确认一个凭据的死活，必须拿它去问
+**它真正所属的那个服务**；变量名、文件名、以及"它看起来像什么"都不算证据。
+（`docs/SECRETS.md` 的这一节之所以留着这段，是因为它比"又漏了一次"更值得记。）
+
+### 怎么安全地查"这把凭据还有谁在用"
+
+想要的是**引用关系**，不是**值**。所以先按名字筛文件，再只看命中行的键名：
+
+```bash
+# ✅ 只列哪些文件提到了这个变量名，不输出内容
+grep -rl --include='*.yaml' --include='*.yml' --include='*.json' 'DEEPSEEK_API_KEY' ~/.dsh \
+  | sed 's|^|  |'
+
+# ✅ 要看命中处在哪一行，就把行号拿出来，再用 read/offset 定位到那一行——不要 cat
+grep -rn --include='*.yaml' 'DEEPSEEK_API_KEY' ~/.dsh | cut -d: -f1,2
+
+# ❌ 直接 grep 变量名并把结果打出来 —— 如果搜索范围里有 .credentials.yaml，
+#    命中的那一行就是「变量名: 值」，值和名字一起被打印
+```
+
+`.credentials.yaml` 这类文件**只能整文件交给 `scripts/redact.py`** 读，
+或者用 `--include` 明确把它排除掉。
 
 ### 那条最危险的结构性质
 

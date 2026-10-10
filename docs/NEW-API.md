@@ -384,6 +384,21 @@ zenproxy 自己另有一道 `stream_idle_timeout`（默认 5 分钟）：
 出口池全挂时 zenproxy 返回 502。如果渠道开了 `auto_ban`，连续几次就可能被 new-api 自动禁用。
 这是符合预期的保护，但要知道它存在——恢复出口池后记得回去把渠道重新启用。
 
+502 不只来自"出口池全挂"这一种情况，凡是 zenproxy **没能凑出一个完整答复**的都算，
+其中最常见的两类：
+
+- 上游流在中途结束，没有任何事件带回答（推理模型在小 `max_tokens` 下最容易撞上）；
+- 上游明确报了 `response.failed`。
+
+这两类以前是**回 200 + 错误体**（错误被塞在 body 里），所以 `auto_ban` 看不见它们。
+现在它们如实回 502 了，于是**会被计进 `auto_ban`**。当前这套部署里所有启用渠道的
+`auto_ban` 都是 `0`，所以不受影响；如果你哪天打开它，要知道 502 的来源比想象中多。
+
+判别办法：502 的 body 里 `message` 会写明是哪一种。
+`the upstream stream ended without a completed response` 是流没走完，
+`the upstream stream ended` 与出口池无关，**换 IP 治不了它**——那是模型在给定预算下
+真的答不出来，把 `max_tokens` 调大即可（同一个模型 400 是 502，2000 就是 200）。
+
 ### 4. 代理字段不支持 socks5
 
 new-api 的"代理"字段走 Go 的 `http.Transport`，只认 `http://` / `https://` 代理。
@@ -506,6 +521,8 @@ new-api 的渠道本身不会因为 zenproxy 下线而丢失，只会请求失�
 | `unknown provider for model xxx`（名字比你要的短一截） | 第七节第 7 条：new-api 把推理级别后缀剥掉了。看渠道类型是不是 1 |
 | 改完渠道模型清单后 `No available channel` | 渠道的 `models` 字段没补上新名字；new-api 只按这个字段路由，不看上游实际有什么 |
 | 管理接口回 `AUTH_UNAUTHORIZED` | 用的是推理密钥。`/api/*` 要 `users.access_token`，`/v1/*` 才用 `tokens.key`——是两把不同的凭据 |
+| 接口回 200，body 却是错误 JSON（没有 `choices`） | 先看 body 里的 `type` 字段。zenproxy 自己造的错会写 `zenproxy_error` 并配非 200 状态码；**如果它是 200，那说明你面对的是旧版 zenproxy**——折流失败曾把错误写进 200 的 body 里 |
+| `the upstream stream ended without a completed response` | 不是出口问题，别去换 IP。推理模型的答复被 `max_tokens` 掐断了；调大预算再看（见第七节第 3 条） |
 
 ---
 
