@@ -122,6 +122,60 @@ new-api → 渠道 → 新建（或编辑现有渠道）：
 
 模型名如果和上游不一致，用渠道的**模型映射**转换；zenproxy 不改写请求体。
 
+### 启用 / 禁用渠道：`PUT` 改不了状态，要用独立端点
+
+改启用状态**不能走 `PUT /api/channel/`**：实测 body 里只要有 `status`，服务端就回
+`{"message":"Invalid parameters","success":false}`（而 `POST` 建渠道时带 `status` 完全正常）。
+这个不对称很容易让人以为「状态只能去控制台点」，于是把本该脚本化的事留给手工。
+
+正确端点是独立的一条：
+
+```bash
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "New-Api-User: 1" \
+     -H 'Content-Type: application/json' --data-binary '{"status":2}' \
+     http://127.0.0.1:3000/api/channel/17/status
+# {"data":true,"message":"","success":true}
+```
+
+`status` 取值：**1 = 启用，2 = 手动禁用，3 = 自动禁用**（上游故障后由 new-api 自己置位）。
+封装成了 `scripts/set-newapi-channel-status.sh`（带改动前后对比，并列出每个模型还剩几个
+启用渠道 —— 只有 1 个就说明那个模型不冗余）。
+
+> ⚠ 这个端点**不是只读的**：探测它就会真的改状态。想确认路由是否存在，用
+> `401`（存在但需鉴权）与 `404`（不存在）区分，但**别把 `POST` 当探测手段**。
+
+### 只暴露免费模型
+
+如果要让 new-api **只**对外提供免费模型，不必逐个渠道去关。先查非免费模型来自哪里：
+
+```sql
+select a.model, string_agg(a.channel_id::text, ',' order by a.channel_id)
+from abilities a join channels c on c.id = a.channel_id
+where c.status = 1 and a.enabled group by a.model order by a.model;
+```
+
+实测生产里那 26 个非免费模型**全部来自单个渠道**（CLIProxyAPI 那条），其余渠道本来就
+是禁用状态。所以关掉这一个渠道，`/v1/models` 立刻只剩免费模型，请求非免费模型会得到
+`503 model_not_found` + `No available channel for model ...`。
+
+### 一个模型要有多个渠道才是冗余
+
+同一个模型挂到多条渠道上，new-api 会在它们之间分流——这才是「某个账号失效不影响服务」。
+实测：`big-pickle` 挂渠道 16 与 19 时，30 次请求 **15/15 均匀分流**；把渠道 16 临时禁用后，
+`big-pickle` **6/6 全部由渠道 19 承接**。
+
+⚠ 但**渠道的模型清单必须和各账号的真实权限对齐**，否则会分到没有该权限的账号上直接失败。
+实测三个账号的免费模型权限并不相同：
+
+| 免费模型 | zen-01 | zen-02 | zen-03 |
+| :--- | :---: | :---: | :---: |
+| `big-pickle` | ✓ | **✗** | ✓ |
+| 其余 8 个 `*-free` | ✓ | ✓ | ✓ |
+
+所以 zen-02 那条渠道的模型清单**必须去掉 `big-pickle`**，否则 new-api 会把 `big-pickle`
+分给它、拿到 `403 Model access is disabled`。同理，**别从数量上假设两个账号等价**——
+要用 `/v1/models` 逐个比对实际权限集。
+
 ---
 
 ## 六、验证

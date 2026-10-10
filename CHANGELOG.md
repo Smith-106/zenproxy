@@ -7,6 +7,25 @@
 
 ### 新增
 
+- **新增 `scripts/set-newapi-channel-status.sh`：改 new-api 渠道的启用状态。**
+  起因是一个很容易被误判成「只能去控制台点」的不对称：**`PUT /api/channel/` 改不了状态**，
+  body 里只要有 `status` 就回 `{"message":"Invalid parameters","success":false}`，
+  而 `POST` 建渠道时带 `status` 却完全正常。正确端点是独立的一条
+  `POST /api/channel/{id}/status`，body `{"status":1|2|3}`
+  （1 启用 / 2 手动禁用 / 3 自动禁用）。脚本打印改动前后状态，并列出每个模型
+  还剩几个启用渠道——**只有 1 个就说明那个模型不冗余**。
+  ⚠ 该端点**不是只读的**：探测它就会真的改状态。
+- **文档补上「只暴露免费模型」和「一个模型要有多个渠道才是冗余」两节**（`docs/NEW-API.md`）。
+  实测生产里 26 个非免费模型**全部来自单个渠道**，其余渠道本来就是禁用的，
+  所以关掉这一个渠道即可，不必逐个去关；请求非免费模型会得到
+  `503 model_not_found` + `No available channel for model ...`。
+  冗余那节记录了实测数据：`big-pickle` 挂两条渠道时 30 次请求 **15/15 均匀分流**，
+  临时禁用其中一条后 **6/6 全部由另一条承接**。
+  同时记下一条硬约束：**渠道的模型清单必须和各账号的真实权限对齐**——实测三个账号的
+  免费模型权限并不相同（zen-02 没有 `big-pickle`），所以那条渠道的清单要去掉它，
+  否则 new-api 会把 `big-pickle` 分给没有该权限的账号、拿到 `403 Model access is disabled`。
+  别从账号数量上假设等价，要用 `/v1/models` 逐个比对实际权限集。
+
 - **文档补上「`docker restart` 与 `docker compose up -d` 不能互换」**。判据是改的东西
   在容器的环境里还是在挂载的文件里：改 `config.yaml`（bind mount）用 `restart` 就够；
   改 `docker-compose.yml` 的 `environment:` 或 `.env` 里被 compose 引用的变量

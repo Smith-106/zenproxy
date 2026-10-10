@@ -142,6 +142,9 @@ if [ "$existing" != "0" ]; then
     # ★ 更新路径**不能带 status**：实测 PUT 的 body 里只要有 status，
     #   服务端就回 {"message":"Invalid parameters","success":false}（POST 带 status 却正常）。
     #   不带 status 时其余字段照常更新，而且已发布的分级/启用状态会被保留 —— 正好是我们想要的。
+    # ★ 想**主动改**启用状态，用独立端点，既不是 PUT 也不是 POST /api/channel/：
+    #     POST /api/channel/{id}/status   {"status":1|2|3}   （1 启用 / 2 手动禁用 / 3 自动禁用）
+    #   封装在 scripts/set-newapi-channel-status.sh。⚠ 它**不是只读的**，探测即生效。
     payload=$(python3 - "$cid" "$CHANNEL_JSON" <<'PY'
 import json, sys
 cid, chan = sys.argv[1], json.loads(sys.argv[2])
