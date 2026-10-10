@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **文档补上「哪些故障 IP 轮换治不了，只能靠账号冗余」**（`docs/NEW-API.md`）。
+  界线是：zenproxy 的轮换只对「可归因于出口 IP」的失败生效（按 IP 限额、地区封锁）。
+  上游回「这个模型现在不可用」时换出口毫无意义——那是模型的状态，不是 IP 的状态。
+  实测 `step-5-preview-free`（`ling-3.1-flash-free` 同样）会间歇返回
+  `403 Upstream request failed: Endpoint is unavailable.`，而该模型在三个账号的
+  `/v1/models` 里都存在、权限没问题；同一时刻直连是 zen-01 失败、zen-02/zen-03 成功。
+  **换账号有用，换 IP 没用**——new-api 的渠道级重试正好补上这一层（日志里渠道 16
+  403、渠道 19 成功，客户端拿到 200；单发可能撞上，连打 5 次得到 5/5）。
+  附了一张「故障类型 × 哪一层能治」的对照表，并点明推论：**只挂一个账号时那 403
+  会直接漏给客户端**，因为单渠道没有第二个可重试的选择。
+
 - **新增 `scripts/set-newapi-channel-status.sh`：改 new-api 渠道的启用状态。**
   起因是一个很容易被误判成「只能去控制台点」的不对称：**`PUT /api/channel/` 改不了状态**，
   body 里只要有 `status` 就回 `{"message":"Invalid parameters","success":false}`，

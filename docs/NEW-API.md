@@ -176,6 +176,47 @@ where c.status = 1 and a.enabled group by a.model order by a.model;
 分给它、拿到 `403 Model access is disabled`。同理，**别从数量上假设两个账号等价**——
 要用 `/v1/models` 逐个比对实际权限集。
 
+### 哪些故障 IP 轮换治不了，只能靠账号冗余
+
+有一条界线值得单独记住：**zenproxy 的轮换只对「可归因于出口 IP」的失败生效**
+（限额、地区封锁）。上游说「这个模型现在不可用」时，换出口毫无意义——那是模型的
+状态，不是 IP 的状态。
+
+实测 `step-5-preview-free`（`ling-3.1-flash-free` 也一样）会间歇性返回：
+
+```
+403 Upstream request failed: Endpoint is unavailable.
+```
+
+这个模型在三个账号的 `/v1/models` 里**都存在**，权限没有问题。同一时刻直连三个账号：
+
+```
+zen-01 -> 403 Endpoint is unavailable
+zen-02 -> 200
+zen-03 -> 200
+```
+
+**换账号有用，换 IP 没用。** new-api 的渠道级重试正好补上这一层：同一次请求里渠道 16
+撞到这个 403，new-api 在渠道 19 上重试并成功，客户端拿到的是 200：
+
+```
+渠道 16  status_code=403, Upstream request failed: Endpoint is unavailable.
+渠道 19  成功（type=2）
+```
+
+对照实测：单发一次时可能撞上 403，**经 new-api 连打 5 次得到 5/5 全 200**。
+
+所以两层冗余是互补的，缺一层就有一类故障暴露给客户端：
+
+| 故障 | 换出口（zenproxy） | 换账号（new-api 多渠道） |
+| :--- | :---: | :---: |
+| 按 IP 限额耗尽 / 地区封锁 | ✓ | — |
+| 模型间歇不可用（`Endpoint is unavailable`） | ✗ | ✓ |
+| 账号 key 失效 / 权限变更 | ✗ | ✓ |
+
+⚠ 推论：**只挂一个账号时，那 403 会直接漏给客户端**——单渠道没有可重试的第二个选择。
+这也是为什么值得给同一个模型挂上多条渠道，即使它们指向同一个账号（换 IP 也有用）。
+
 ---
 
 ## 六、验证
