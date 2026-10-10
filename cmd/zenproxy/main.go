@@ -139,7 +139,7 @@ func run() error {
 // likely to break silently: three ingress shapes share one listener, and
 // getting the order wrong turns a working path into a puzzling 404 rather than
 // an error anyone would notice at startup.
-func newMux(engine *forward.Engine, adm *admin.Server) *http.ServeMux {
+func newMux(engine *forward.Engine, adm *admin.Server) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/admin/", adm.Handler())
 	mux.HandleFunc("/healthz", adm.Health)
@@ -147,7 +147,7 @@ func newMux(engine *forward.Engine, adm *admin.Server) *http.ServeMux {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// A forward-proxy request either asks for a tunnel or carries an
 		// absolute URI. Everything else is reverse-mode traffic.
-		if r.Method == http.MethodConnect || r.URL.IsAbs() {
+		if r.URL.IsAbs() {
 			engine.ServeForward(w, r)
 			return
 		}
@@ -166,7 +166,35 @@ func newMux(engine *forward.Engine, adm *admin.Server) *http.ServeMux {
 		}
 		engine.ServeReverse(w, r, account, rest)
 	})
-	return mux
+	return tunnelFirst(engine, mux)
+}
+
+// tunnelFirst hands CONNECT to the forward ingress before ServeMux can answer it.
+//
+// ServeMux dispatches on r.URL.Path, and a CONNECT request has no path: the
+// request line is "CONNECT host:port", so net/http parses a URL with an empty
+// Path. Nothing matches, the mux's own "404 page not found" is written, and the
+// branch that implements tunnelling is never reached.
+//
+// It failed silently in production for exactly that reason. curl reports
+// "Received HTTP code 404 from proxy after CONNECT", the log line has no account
+// in it and reads like any other unknown path, and the reverse ingress on the
+// same listener works - so the reader looks at credentials, the allowlist or the
+// target host. The tests could not catch it either: package forward attaches
+// ServeForward to a server of its own, so nothing put a CONNECT through a mux.
+//
+// Only CONNECT is lifted here. An absolute-form request keeps its existing
+// precedence, where /admin/, /healthz and /metrics still win over the proxy
+// branch - that ordering predates this and is not worth changing to make the
+// fix tidier.
+func tunnelFirst(engine *forward.Engine, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			engine.ServeForward(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // splitAccount pulls the account id off the front of a reverse-mode path.

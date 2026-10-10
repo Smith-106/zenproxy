@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,9 +27,14 @@ import (
 // let splitAccount claim "/v1" first. That mistake produces
 // "unknown or disabled account: v1" for every gateway client — a 404 that
 // looks like the caller's fault.
+//
+// The same blind spot hid a second one for longer: internal/forward serves
+// ServeForward directly in its fixture, so the forward-proxy shape was never
+// put through ServeMux. A CONNECT carries no path, and ServeMux matches on the
+// path, so the request never reached the handler that implements it.
 
 type routerFixture struct {
-	mux    *http.ServeMux
+	mux    http.Handler
 	srv    *httptest.Server
 	seen   []string // Authorization headers the upstream received
 	models []string // model names the upstream received
@@ -250,4 +258,76 @@ func TestRouterModelListReportsDiscoverableModels(t *testing.T) {
 	if len(listing.Data) != 1 || listing.Data[0].ID != "from-upstream" {
 		t.Errorf("data = %+v, want the upstream's own listing", listing.Data)
 	}
+}
+
+// A forward-proxy client sends CONNECT with no path at all, and ServeMux
+// dispatches on the path. So this asserts the shape reaches the router's
+// forward branch rather than the mux's built-in 404 - which is what a CONNECT
+// used to get, in the real binary only, because package forward's fixture
+// attaches ServeForward to a server of its own and never involves a mux.
+//
+// The failure is worth a test of its own because of how it presents. curl says
+// "Received HTTP code 404 from proxy after CONNECT"; the proxy log says
+// method=CONNECT path="" status=404 with no account in it; and the same
+// deployment's reverse ingress is fine. Nothing points at routing, and the
+// only thing that has to change to fix it is which handler sees the request.
+func TestConnectReachesTheForwardIngressThroughTheRealRouter(t *testing.T) {
+	f := newRouter(t, config.Gateway{}, nil)
+
+	// Dial the router by hand: http.Client would not let a CONNECT through
+	// without a proxy configured, and this is about the router, not the client.
+	addr := strings.TrimPrefix(f.srv.URL, "http://")
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// A name that cannot resolve, so no exit will ever answer 200. The fixture
+	// configures no allowlist either, so the forward ingress will try to dial
+	// and fail - which is the point: any answer at all means the request got
+	// there, and no answer is 200.
+	req := "CONNECT example.invalid:443 HTTP/1.1\r\n" +
+		"Host: example.invalid:443\r\n" +
+		"Proxy-Authorization: Basic " + basicAuth("zen-01", "x") + "\r\n\r\n"
+	if _, err := conn.Write([]byte(req)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	br := bufio.NewReader(conn)
+	head, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.HasPrefix(head, "HTTP/1.1 ") {
+		t.Fatalf("status line = %q", strings.TrimSpace(head))
+	}
+	if strings.Contains(head, "404") {
+		t.Fatalf("status line = %q; a CONNECT never reached the forward ingress", strings.TrimSpace(head))
+	}
+
+	// The distinction that matters is which handler wrote the answer, and the
+	// two are told apart by their error shapes rather than by a status code:
+	// the mux writes text/plain "404 page not found", the forward ingress
+	// writes JSON. Asserting the shape keeps this from breaking the next time
+	// an exit happens to be reachable or a target happens to be allowed.
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil || strings.TrimSpace(line) == "" {
+			break
+		}
+		if strings.HasPrefix(strings.ToLower(line), "content-type:") {
+			if !strings.Contains(line, "application/json") {
+				t.Errorf("content-type = %q; want the forward ingress's JSON error, "+
+					"not the mux's plain-text 404", strings.TrimSpace(line))
+			}
+			return
+		}
+	}
+	t.Error("no content-type in the response; cannot tell which handler answered")
+}
+
+func basicAuth(user, pass string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 }
