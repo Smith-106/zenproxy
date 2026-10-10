@@ -7,6 +7,18 @@
 
 ### 新增
 
+- **补回两个「能用但够不着」的免费模型**：muse-spark-1.3-contributor-free 与
+  muse-spark-1.2-contributor-free 只在 \/responses\ 上接单，早就被
+  \scripts/add-responses-only-models.sh\ 加进了 zenproxy 的 \ree_tier.models\，
+  但**没人同步 new-api 渠道的模型列表**，于是 \bilities\ 表里没有这两行，
+  客户端一问就是 Ń model_not_found\——看着像渠道配错，其实是登记漏了。
+  实测这两个模型本身完全可用（直打 zenproxy 的 \/zen-01/v1/responses\ 返回 200
+  \status=completed\），补登记后经 new-api 发送「你好」两个都第一次就 200。
+  文档新增一节说明**两份列表（zenproxy 的 \ree_tier.models\ 与 new-api 的
+  \bilities\）不会自动同步、漂移时双方都不报错**，并记下 new-api 那个坑：
+  \PUT /api/channel/\ 的 body 里只要带 \status\ 就恒定回
+  \Invalid parameters\，与「字段写错」无法区分。
+
 - **sub2api 接入实测通过，并把两处会静默拦住集成的坑写进了文档**。
   sub2api 里能接 zenproxy 的是**代理**那一层而不是上游那一层——它没有「自定义
   OpenAI 兼容上游」的概念（`channels` 表只有 `name/model_mapping/pricing`，没有 URL

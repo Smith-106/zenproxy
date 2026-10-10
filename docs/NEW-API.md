@@ -243,6 +243,47 @@ zenproxy 的正向代理入口就是 HTTP 代理，匹配。但**不要**把 Res
 因为 zenproxy 会用账号自己的 key 覆盖 `Authorization`，所以一个渠道只能对应一个账号。
 多个账号请在 new-api 里建多个渠道（或用渠道的"多密钥"模式配合 zenproxy 的多账号支持）。
 
+### 6. 两个模型列表会各自漂移，谁都不会报错
+
+有两份列表，**长得很像但不通用**，而且**没有任何机制让它们保持同步**：
+
+| 列表 | 位置 | 作用 |
+| :--- | :--- | :--- |
+| `free_tier.models` | zenproxy 的 `config.yaml` | 告诉 zenproxy **哪些模型要补免费额度信封** |
+| 渠道的 `models` → `abilities` 表 | new-api | 决定 new-api **能不能路由到**这个模型 |
+
+只加前者的后果是**静默的**：zenproxy 那边信封备好了，但 new-api 的 `abilities`
+里没有这一行，客户端一问就是
+
+```
+503 {"error":{"code":"model_not_found","message":"No available channel for model muse-spark-1.3-contributor-free ..."}}
+```
+
+这个报错看起来像"渠道配错了"，实际是**登记漏了**——模型本身完全可用。
+
+实测的脱节例子：`scripts/add-responses-only-models.sh` 把
+`muse-spark-1.3/1.2-contributor-free` 加进了 `free_tier.models`，但没人同步渠道的
+`models`，于是这两个模型**有很长一段时间是够不着但能用的状态**。补登记之后：
+
+```
+muse-spark-1.3-contributor-free  /v1/responses → 200 completed
+muse-spark-1.2-contributor-free  /v1/responses → 200 completed
+```
+
+**这两个模型只在 `/responses` 上接单**，所以客户端必须走 `/v1/responses`。
+走 `/v1/chat/completions` 会得到
+
+```
+400 ModelProtocolUnsupported  "Model does not support this protocol."
+```
+
+这是**明确且对称**的：`big-pickle` 反过来的情况一样——它在 `abilities` 里登记着，
+但拿 `/v1/responses` 调它就是同一个错。所以登记不会制造模糊失败。
+
+补登记时注意 new-api 的一个坑：**`PUT /api/channel/` 的 body 里只要带 `status`，
+就恒定回 `{"message":"Invalid parameters","success":false}`**（`POST` 带 `status` 却正常），
+症状与"字段写错了"完全一样。用最小字段集提交，`status` 不要带。
+
 ---
 
 ## 八、回滚
