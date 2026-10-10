@@ -283,6 +283,27 @@ CHANGELOG.md        版本变更记录
 | `probe-resin-slots.sh` | 实测 Resin 粘性身份的真实可用率，用来决定池子该开多大 |
 | `set-resin-slots.py` | 把 `proxies.resin.accounts` 扩到 N 个 slot |
 | `e2e-free-tier.sh` | 端到端：经代理调一次免费模型，验证套壳与 SSE 折叠 |
+| `redact.py` | **读任何含密钥的文件/输出都必须过它**；`--test` 跑历史泄露形状 |
+| `set-newapi-channel-status.sh` | 改 new-api 渠道启用状态，并列出每个模型还剩几条渠道 |
+| `rotate-cpa-inbound-key.py` | 轮换 CLIProxyAPI 入站密钥（定点行替换，保注释，带结构断言） |
 
 免费模型名会随上游漂移，**清单过期必须人工换**（表现是 400 `Model is unavailable`，
 不是 403），换法见 [`docs/FREE-TIER.md` 第五节](docs/FREE-TIER.md)。
+
+### 凭据纪律（请先读这条）
+
+**不要手写 `sed`/`grep` 正则去脱敏。** 这个仓库的历史里有六次凭据被打印进终端/日志，
+六次都是同一个原因：脱敏者**枚举了自己以为存在的模式**——漏掉 YAML 列表项、
+漏掉 `nvapi-`/`<hex>.<base64>`/base64/URL 内嵌密码这些形状、被 `ZEN_KEY_01=` 里的
+`_01` 骗过、用 `len(v) > 12` 当过滤器。
+
+唯一认可的做法是 `scripts/redact.py`（按**键名**与**值形状**两个独立信号判定，
+支持 JSON/YAML/.env/env dump/纯文本，可接管道）：
+
+```bash
+sudo scripts/redact.py /opt/zenproxy/data/state.json
+sudo docker exec zenproxy env | scripts/redact.py -
+```
+
+六次事故的具体形状、这个部署里密钥都在哪、以及漏了之后按「能不能自己换」分类的处理
+步骤，见 [`docs/SECRETS.md`](docs/SECRETS.md)。

@@ -7,6 +7,27 @@
 
 ### 新增
 
+- **新增 `scripts/redact.py` 与 `docs/SECRETS.md`：把脱敏从「手写正则」改成「过工具」。**
+  这个仓库的历史里有**六次**凭据被打印进终端/日志，六次同一个原因：脱敏者枚举了自己
+  以为存在的模式。新增的通用脱敏器按**键名**与**值形状**两个独立信号判定（任一命中即
+  遮蔽），支持 JSON / YAML / `.env` / `env` dump / 纯文本，可读文件也可接管道；
+  `--test` 把历史泄露形状当用例跑（7/7 通过）。已在真实文件上验证：`.env`（5 个密钥）、
+  `state.json`（明文 `api_key`）、`docker exec env` 全部遮蔽且**程序化确认零漏出**，
+  同时对正常输出的**误伤为零**（status JSON 20 个字段原样保留）。
+  `docs/SECRETS.md` 记下六次事故各自的具体形状（含「打印 flow-style 整行」这个犯过两次
+  的坑）、这个部署里密钥都在哪、以及漏了之后按「能不能自己换」分类的处理步骤——
+  并明确点出**改本地副本而外部仍有效等于没轮换**，判据是拿旧凭据必须失败。
+- **新增 `scripts/rotate-cpa-inbound-key.py`：轮换 CLIProxyAPI 入站密钥。**
+  刻意做成定点行替换而不是 YAML load/dump 往返——配置是约 25 KB 的手写文件，
+  `safe_dump` 会把注释全部丢掉。脚本进出一路断言：`access:` 块唯一、列表项恰好一条、
+  写回后除该 key 外**结构完全一致**、旧 key 无残留。实测只改动了一行（24745→24747 字节，
+  差值是给值加的两个引号），并在 CPA 上验证：不带 key 401 `Missing API key`、
+  旧 key 401 `Invalid API key`、新 key 200。
+- **文档补上 sub2api 改密码的真实端点。** 探测下来 `PUT /api/v1/user/password`
+  （body `{"old_password","new_password"}`，`new_password` 有最短长度要求），
+  哈希是 bcrypt —— **不需要碰数据库**。此前在 `/api/v1/admin/users/*`、`/api/v1/auth/*`
+  一路 404，容易误判成「只能去控制台点」。
+
 - **文档补上「哪些故障 IP 轮换治不了，只能靠账号冗余」**（`docs/NEW-API.md`）。
   界线是：zenproxy 的轮换只对「可归因于出口 IP」的失败生效（按 IP 限额、地区封锁）。
   上游回「这个模型现在不可用」时换出口毫无意义——那是模型的状态，不是 IP 的状态。
