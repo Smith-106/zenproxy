@@ -26,7 +26,7 @@ zenproxy 在同一个监听端口上同时干三件事，靠请求形态自动�
 | :--- | :--- | :--- |
 | **统一入口** | `http://zenproxy:9000/v1/chat/completions` + `Authorization: Bearer <key>` | 任何 OpenAI 兼容客户端；LiteLLM / CLIProxyAPI / sub2api 直接当上游导入（`api_base` / `base-url` 写 `http://zenproxy:9000/v1`） |
 | **反代** | `http://zenproxy:9000/<账号ID>/v1/chat/completions`（账号名写进路径） | 需要把请求固定到某个账号时。new-api 的渠道 Base URL 填 `http://zenproxy:9000/<账号ID>`——它自己会补 `/v1/...` |
-| **正向代理** | `http://<账号ID>:x@zenproxy:9000` | new-api 的渠道「代理」字段、任何只支持代理设置的工具 |
+| **正向代理** | `http://<账号ID>:x@zenproxy:9000` | new-api 的渠道「代理」字段、sub2api 的 `proxies` 记录、任何只支持代理设置的工具 |
 
 > ★ **填 base URL 前先跑 `scripts/check-api-base.sh`。** 少写或多写一个 `/v1`
 > 都不会得到「找不到路径」，而是掉进反向入口、报成「账号不存在」——
@@ -234,6 +234,13 @@ node scripts/mock-exit.js &         # 假出口 :28082
   见 [免费额度](#免费额度free-tier)，实测判据与代价在 [`docs/FREE-TIER.md`](docs/FREE-TIER.md)。
 - new-api 的 `STREAMING_TIMEOUT` 默认 120s，会先于 zenproxy 掐断长流式响应。
 - 出口池全挂时返回 502，new-api 的 `auto_ban` 会把它记在渠道头上。
+- **下游必须和 zenproxy 在同一个 docker 网络。** 它默认只接
+  `new-api_default` + `resin_default`，而 CLIProxyAPI、sub2api 之类往往在别的网络上，
+  不接的话容器名根本解析不了：`docker network connect <网络> zenproxy`。
+  另外 `docker compose up -d` 重建容器会丢掉手工接的网络，要重接。
+- **`allowed_hosts` 默认只放行 `opencode.ai`。** 有些下游用
+  `api64.ipify.org` 之类做代理健康探针，不放行的话那条代理永远显示 failed，
+  而实际转发是好的。
 
 关于出口池本身的质量，有一组实测数据值得先看：[`docs/RESIN.md`](docs/RESIN.md)。
 要点：**池子规模 ≠ 可用出口数量**。你服务器上的 Resin 动态池有 1435 个节点，

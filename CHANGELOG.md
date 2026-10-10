@@ -7,6 +7,19 @@
 
 ### 新增
 
+- **sub2api 接入实测通过，并把两处会静默拦住集成的坑写进了文档**。
+  sub2api 里能接 zenproxy 的是**代理**那一层而不是上游那一层——它没有「自定义
+  OpenAI 兼容上游」的概念（`channels` 表只有 `name/model_mapping/pricing`，没有 URL
+  字段），但 `proxies` 表有 `protocol/host/port/username/password`，正好对应正向入口。
+  实测：探针 `success=True "Proxy is accessible"`，`latency_ms=7687`，
+  且**返回的出口 IP 是 `80.15.99.54` 而不是宿主 IP**——最后这条才说明流量确实
+  从 zenproxy 的出口池出去了。
+  两处坑：① **下游必须与 zenproxy 在同一 docker 网络**（生产默认只接
+  `new-api_default` + `resin_default`，而 CPA 在 `llm-internal`、sub2api 在自己的网络上，
+  不接网络容器名解析不了；`docker compose up -d` 重建还会丢掉手工接的网络）；
+  ② **`allowed_hosts` 要放行下游的健康探针**（sub2api 探 `api64.ipify.org`，
+  zenproxy 默认只放行 `opencode.ai`，不放行则那条代理永远显示 failed）。
+  这两条对任何下游都成立，之前没写过。
 - **LiteLLM 兼容改为实测，并纠正了模板里一处会让人查错方向的错误**。
   `deploy/litellm.config.yaml` 原本写着「api_base 不带 `/v1`」，**这是错的**：
   LiteLLM 的 `openai/` provider 把 `api_base` 和 `/chat/completions` **直接拼接**，
@@ -157,6 +170,21 @@
 
 ### 修复
 
+- **正向代理模式的 CONNECT 在真实二进制里从来没到达处理器**——https 上游全部 404，
+  而所有 LLM 上游都是 https，所以这个入口实际上等于没有。
+  原因是路由不是代理实现：`http.ServeMux` 按 `r.URL.Path` 分发，CONNECT 请求
+  **没有路径**（请求行是 `CONNECT host:port`），任何模式都匹配不上，mux 自己的
+  `404 page not found` 先生效，实现隧道的代码根本没被调用。
+  它错了很久没被发现，因为症状完全没有指向性：curl 说
+  `Received HTTP code 404 from proxy after CONNECT`（像目标的问题）、日志是
+  `method=CONNECT path="" status=404` 且不含账号名（像普通的未知路径）、而同一监听上的
+  反代入口与统一入口都正常。**测试也抓不到**：`internal/forward` 的 fixture 把
+  `ServeForward` 挂在它自己的 server 上，CONNECT 从来没经过任何 mux。
+  是接第二个聚合器时才暴露的——它的管理面接受了代理记录，但探针一直失败，
+  而失败既不是凭据、也不是白名单、也不是目标。
+  修法是在 mux 之前把 CONNECT 拦出来（`tunnelFirst`），只动 CONNECT 一个方法。
+  实测对照：修复前 `status=404`，修复后 `status=200`，经正向入口取
+  `https://opencode.ai/zen/v1/models` 返回 200。
 - **`/responses` 端点现在也套免费额度信封——此前两个本来能用的模型被误判成废品。**
   免费额度门禁对请求形状是**逐端点**的，而此前只对 `/chat/completions` 套壳。
   后果不只是"少一个端点"：`muse-spark-1.3-contributor-free` 与

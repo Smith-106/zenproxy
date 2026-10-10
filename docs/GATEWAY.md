@@ -510,11 +510,50 @@ api-keys:
 > 自己；`routing.cooldown.transient-error-cooldown-seconds` 只管瞬时错误，
 > 认证类冷却长得多。排查时先看这句话，别去改 base URL。
 
-### sub2api：先看它的 URL 白名单
+### sub2api：走它的「代理」而不是「上游」（已实测）
 
-sub2api 有 `SECURITY_URL_ALLOWLIST_*` 一组环境变量。默认是关的，所以
-`http://zenproxy:9000/v1` 能直接用；但**一旦打开白名单，私有主机名和 http 都会被拦**，
-zenproxy 就会从上游列表里消失，且报错不会提到白名单：
+sub2api 里能接 zenproxy 的是**代理**那一层，不是上游那一层——它没有「自定义
+OpenAI 兼容上游」这个概念（`channels` 表只有 `name/model_mapping/pricing` 之类，
+没有 URL 字段），但 `proxies` 表有 `protocol/host/port/username/password`，
+正好对应正向入口的 `http://<账号ID>:x@zenproxy:9000`。
+
+实测结果（生产，`proxies` 里一条指向 zenproxy 的记录）：
+
+```
+探针: success=True  "Proxy is accessible"     3/4 次（失败那次是已知的 Resin 抖动）
+latency_ms = 7687
+ip_address = 80.15.99.54                      ← 出口 IP，不是宿主 IP 217.142.224.178
+```
+
+**最后一行才是重点**：sub2api 的流量确实从 zenproxy 的出口池出去了。
+填法：
+
+```
+protocol = http
+host     = zenproxy           # 与 zenproxy 同一 docker 网络
+port     = 9000
+username = <zenproxy 的账号 ID，例如 zen-01>   # 正向入口用它选账号
+password = 任意非空
+```
+
+三件必须同时成立的事，缺一件都会失败，而且失败信息都不指向原因：
+
+1. **zenproxy 与 sub2api 必须在同一个 docker 网络。** 生产的 zenproxy 默认只接
+   `new-api_default` + `resin_default`，而 sub2api 在 `llm-internal` 上——
+   **不接网络的话容器名根本解析不了**。接一次：
+   `docker network connect llm-internal zenproxy`。
+   （注意 `docker compose up -d` 重建容器会丢掉手工接的网络，要重接。）
+   这一条对**任何**下游都成立，包括 CLIProxyAPI。
+2. **`allowed_hosts` 要放行它的健康探针。** sub2api 用
+   `http://api64.ipify.org?format=json` 探代理，zenproxy 默认只放行 `opencode.ai`，
+   于是探针拿到 403、这条代理永远显示 `latency_status=failed`。
+   实际转发是好的，但那个红色的 failed 会让人以为是坏的。
+3. **正向入口的 CONNECT 曾经是坏的**（`v0.1.0` 及之前），见下面那节。
+   https 上游全靠它，所以当时 sub2api 这类客户端**完全接不进来**。
+
+顺带一个它自己的白名单，与上面无关但同样会静默拦掉集成：sub2api 有
+`SECURITY_URL_ALLOWLIST_*` 一组环境变量，默认关闭，所以现在能用；但一旦打开，
+私有主机名和 http 都会被拦，且报错不提白名单：
 
 ```
 SECURITY_URL_ALLOWLIST_ENABLED=true
@@ -525,6 +564,31 @@ SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=zenproxy
 
 它的上游存在 Postgres 里（`config.yaml` 只有 server/database/redis/jwt），
 所以只能走它的管理面加，不能改文件。
+
+### 正向入口的 CONNECT 曾经是坏的
+
+`v0.1.0` 及之前，正向代理模式**只能处理明文 HTTP，https 全部 404**。而所有 LLM
+上游都是 https，所以这个入口实际上等于没有。
+
+原因是路由，不是代理实现：`http.ServeMux` 按 `r.URL.Path` 分发，而 CONNECT 请求
+**没有路径**（请求行是 `CONNECT host:port`，net/http 解析出空 Path），任何模式都
+匹配不上，于是 mux 自己的 `404 page not found` 先生效，实现隧道的那段代码根本没
+被调用。
+
+它错了很久没被发现，因为**症状没有任何指向性**：
+
+- curl 说 `Received HTTP code 404 from proxy after CONNECT`——像目标的问题；
+- 日志是 `method=CONNECT path="" status=404`，里面有账号名吗？没有——像普通的未知路径；
+- 同一个监听上的反代入口和统一入口都正常——像只有代理那一块的问题。
+
+而测试也抓不到：`internal/forward` 的 fixture 把 `ServeForward` 挂在**自己的**
+server 上，CONNECT 从来没经过任何 mux。**是接第二个聚合器时才暴露的**——它的管理面
+接受了这条代理记录，但探针一直失败，而失败既不是凭据、也不是白名单、也不是目标。
+
+修法是在 mux 之前把 CONNECT 拦出来（`tunnelFirst`），只动 CONNECT 一个方法；
+绝对形式请求保持原有优先级（`/admin/`、`/healthz`、`/metrics` 仍然优先于代理分支）。
+对应的测试手工拨 TCP，因为 `http.Client` 不配代理不会发 CONNECT，并且**按响应的形状
+而不是状态码**判断是谁答的：mux 回 `text/plain`，正向入口回 JSON。
 
 ### 导入之前先用契约脚本验一遍
 
