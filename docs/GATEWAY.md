@@ -572,30 +572,38 @@ SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=zenproxy
 
 #### B. 要用 opencode 免费模型：走 `opencode_go` 账号的 `base_url`（推荐）
 
-`platform=opencode_go` / `type=apikey` 的账号**自带** `credentials.base_url`。
-要在 sub2api 里打 `big-pickle` / `*-free`，把 `base_url` 指到 zenproxy 反代路径，
-不要再指 new-api：
+`platform=opencode_go` / `type=apikey` 的账号**自带**协议分流。正确姿势不是钉死
+`chat_completions`，而是用官方同款的 **`api_protocol=adaptive`** + `api_base_urls`，
+再把地址指到 zenproxy：
 
 ```
-base_url = http://zenproxy:9000/zen-01/v1
-api_key  = 任意非空占位（zenproxy 会用账号自己的上游 key 覆盖 Authorization）
+api_protocol = adaptive
+account_mode = zen
+base_url     = http://zenproxy:9000/zen-01/v1
+api_base_urls = {
+  chat_completions: http://zenproxy:9000/zen-01/v1,
+  responses:        http://zenproxy:9000/zen-01/v1,
+  anthropic:        http://zenproxy:9000/zen-01
+}
+api_key = 任意非空占位（zenproxy 会用账号自己的上游 key 覆盖 Authorization）
 pool_mode = true
-model_mapping 里列入要用的免费模型名
-protocol_rules 里 muse-spark-* → responses
+model_mapping 列入要用的免费模型名
+protocol_rules 可自定义；空则走内置 Zen 表（muse-spark-*/grok-*/gpt-* → responses …）
 ```
+
+这和 sub2api 单测 `account_test_service_opencode_go_test.go` 一致：adaptive 下
+账号「测试连接」会按模型选端点——`muse-spark-*` / `grok-*` 打上游 `/responses`，
+`deepseek-*` 打 `/chat/completions`，`minimax-*` 打 `/messages`。若把
+`api_protocol` 钉成 `chat_completions`，协议规则会被忽略，muse-spark 必 400。
 
 三个 zenproxy 账号就建三条 `opencode_go` 账号（`zen-01/02/03`），都挂到同一个
 Opencode 分组；`pool_mode` 会在上游 403/429 时在账号间重试。改完 DB 后**必须重启
-sub2api**（或走管理面保存），否则进程里还是旧的 `base_url`，表现为
-`model_not_supported` / 仍打到 new-api。
+sub2api**（或走管理面保存）。
 
-客户端用该分组的 API Key 调 `http://<host>:8082/v1/chat/completions` 即可。
+客户端用该分组的 API Key 调 `http://<host>:8082/v1/...` 即可。
 
-**`muse-spark-*` 特别说明：** sub2api 的 zen 模式只会往上游打 `/chat/completions`
-（连客户端 `/v1/responses` 也会被 `forwardResponsesViaRawChatCompletions` 回退）。
-这和 muse-spark「只接 `/responses`」对着干。zenproxy 已在反向入口做
-chat→responses 自动桥接，所以账号测试 / 正式请求走 chat 也能通；不要指望
-sub2api 自己把 chat 转成 responses——它做的是反方向。
+**兜底：** 即便仍有路径把 muse-spark 打成 chat，zenproxy 反向入口也有
+chat→responses 桥；但主配置应走 sub2api 自己的 adaptive 协议分流。
 
 ### 正向入口的 CONNECT 曾经是坏的
 
