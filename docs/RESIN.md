@@ -63,6 +63,56 @@ slot-04  curl: (97) Can't complete SOCKS5 connection to api.ipify.org. (1)   [5.
 所以准确的表述是：**只要被分配到的那个节点还活着，Account 到出口的映射就稳定；
 节点死了，同一个 Account 会漂到别的节点上去。** 这正是 zenproxy 要在出口层做探活和轮换的原因。
 
+### 多账号必须落在不同出口（否则冗余是假的）
+
+一个账号只在**它绑定的出口坏掉时**才重新解析出口。所以「换出口」这个动作天然发生在
+最容易撞车的时刻——旧出口刚坏，新出口随手挑，而随手挑曾经完全不看别人占了哪个。
+
+实测到的两次真实撞车：
+
+```
+zen-01 -> resin-slot-23   zen-02 -> resin-slot-24   zen-03 -> resin-slot-19    无冲突
+      ↓ slot-23 被额度冷却，slot-19 变坏，两个账号各自重新解析
+zen-01 -> resin-slot-06   zen-02 -> resin-slot-24   zen-03 -> resin-slot-24    ⚠ 撞车
+```
+
+**两个账号共用一个出入口，不等于有两次机会**：它们共享同一个 IP 的额度、同一份地区封锁
+判定，所以在按 IP 限流或地区封锁面前会**一起失败**——而那恰恰是账号冗余存在的理由。
+更糟的是这种撞车没有任何报错，`/admin/api/status` 也看不出来，只能主动查。
+
+修法是在**同一健康层内**优先选没有被别的账号占用的出口。它刻意只是**同层内的排序**，
+不是跨层降级：一个「健康但有人用」的出口仍然优于一个「降级」的出口，所以层序原样不动；
+而传入空账号（健康面板、转发入口这些没有账号上下文的调用方）时，谁都不算被占用，
+行为与改动前**完全一致**。
+
+### 附带的第二个坑：离场时没有释放
+
+`Bind` 只增不减，所以账号挪走后，**旧出口上会留下一个幽灵占用记录**。幽灵和真实占用长得
+一模一样，累积下去会让所有出口都显得「有人用」，上面那条优先级就悄悄退化成空操作了。
+实测三个账号留下了四条记录，`resin-slot-07` 在 zen-02 早已挪到 `resin-slot-24` 之后
+仍然声称占用着它。
+
+现在离开时会同释放。（重启也会从 `bindings` 重建一遍，所以幽灵记录不会跨重启存活。）
+
+### 怎么查有没有撞车
+
+```bash
+# 三个账号是否落在三个不同出口
+curl -s -H "X-Admin-Token: $ZEN_ADMIN_TOKEN" http://127.0.0.1:9000/admin/api/accounts \
+  | python3 -c "import json,sys; m={a['id']:a.get('bound_exit') for a in json.load(sys.stdin)['accounts']}; \
+d={}; [d.setdefault(v,[]).append(k) for k,v in m.items()]; \
+print(m); print('撞车:', [v for v,ks in d.items() if len(ks)>1] or '无')"
+
+# 池子里有没有幽灵占用（记录的占用 vs 权威绑定）
+curl -s -H "X-Admin-Token: $ZEN_ADMIN_TOKEN" http://127.0.0.1:9000/admin/api/proxies \
+  | python3 -c "import json,sys; [print(p['id'], p.get('bound_accounts')) for p in json.load(sys.stdin)['exits'] if p.get('bound_accounts')]"
+```
+
+`scripts/check-exit-spread.sh` 把这两件事和「谁和谁撞了」一次做完。
+
+⚠ 注意：**绑定会持续漂移**，所以「此刻无冲突」不代表以后没有。采样要连着几次看，
+单次快照会骗人（这次排查里我自己就被单次快照误导过一次）。
+
 ---
 
 ## 三、池子的真实质量（重要）

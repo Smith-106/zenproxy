@@ -286,6 +286,7 @@ CHANGELOG.md        版本变更记录
 | `redact.py` | **读任何含密钥的文件/输出都必须过它**；`--test` 跑历史泄露形状 |
 | `set-newapi-channel-status.sh` | 改 new-api 渠道启用状态，并列出每个模型还剩几条渠道 |
 | `rotate-cpa-inbound-key.py` | 轮换 CLIProxyAPI 入站密钥（定点行替换，保注释，带结构断言） |
+| `check-exit-spread.sh` | 查账号是否落在不同出口、有无幽灵占用（只读，多次采样，有冲突退出 1） |
 
 免费模型名会随上游漂移，**清单过期必须人工换**（表现是 400 `Model is unavailable`，
 不是 403），换法见 [`docs/FREE-TIER.md` 第五节](docs/FREE-TIER.md)。

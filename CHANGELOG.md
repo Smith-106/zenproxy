@@ -254,6 +254,9 @@
   `CH_KEY` 或 `CH_KEY_CMD` / `CH_MODELS` 或 `CH_MODELS_URL`），并新增
   `connect-newapi-to-llm-internal.sh`（打通 new-api 与其它容器的网络，且写进 compose）、
   `extract-cpa-inbound-key.py`、`verify-cliproxy-via-newapi.sh`。
+- `scripts/check-exit-spread.sh`：查已启用账号是否真的落在**不同出口**、以及有没有**幽灵占用
+  记录**。只读，多次采样（绑定会自己漂，单次快照会骗人），有冲突时点名哪两个账号共用哪个出口
+  并给出分开的命令，退出码 1。已双向验证：人为造出冲突时必须报 🔴，删除后必须恢复 🟢。
 
 ### ⚠️ 升级注意
 
@@ -333,6 +336,18 @@
 - **`deploy/config.example.yaml` 缺整个 `free_tier` 块**：照这个模板部署出来的实例，
   `*-free` 模型全部 403 `FreeTierError`——而这份模板正是服务器上实际生效的那份配置。
   已补上，并让 `TestExampleConfigStaysLoadable` 同时加载根模板与部署模板，防止再次漂移。
+- **多个账号会落在同一个出口上，使账号冗余变成假的。** 选出口时**从不考虑别的账号占了哪个**：
+  `ExitForModel` 和 `RotateFor` 传给 `PickFor` 的只有一个「要跳过的出口」，也就是刚刚失败的那个。
+  而账号**只在旧出口坏掉时**才重新解析出口——那恰恰是最容易撞车的时刻。实测 `zen-02` 与
+  `zen-03` 同时停在 `resin-slot-24`，共用同一个 IP 的额度与地区判定，于是在按 IP 限流或地区
+  封锁面前**一起失败**，而这正是账号冗余存在的理由。现在同层内优先选没人占用的出口；刻意只做
+  **层内排序**而不跨层降级（「健康但有人用」仍优于「降级」），且传入空账号时谁都不算被占用，
+  行为与改动前完全一致。
+- **账号挪走后不释放旧出口，留下幽灵占用记录。** `setBinding` 只调 `Bind`、从不 `Unbind`，
+  于是每次挪动都在旧出口上留一个假占用。幽灵和真实占用长得一模一样，累积下去会让所有出口
+  都显得「有人用」，把上面那条优先级悄悄退化成空操作。实测三个账号留下**四条**记录，
+  `resin-slot-07` 在 `zen-02` 早已挪到 `resin-slot-24` 之后仍声称占用着它。
+  `Delete` 本来就做对了，现在 `setBinding` 也做对了。
 
 ### 文档
 
@@ -381,6 +396,12 @@
   判别方法，以及两种容易被误判成清单过期的失败（`RegionError` 按国家限制、`ModelProtocolUnsupported`）。
 - `config.example.yaml` 与 `deploy/config.example.yaml` 的 `free_tier.models` 换成 2026-10-10 实测可用的
   7 个模型（旧清单里的 `ling-3.0-flash-free`、`mimo-v2.5-free` 等上游已全部改名/下线）。
+- `docs/RESIN.md` 新增「多账号必须落在不同出口」：撞车为什么会发生、为什么它**不报任何错**
+  （`/admin/api/status` 里账号健康、池子也健康，两句话都是真的）、怎么查、以及为什么单次快照
+  不可信（绑定会持续漂移）。
+- `docs/FREE-TIER.md` 新增「哪些状态不落盘」：额度账本、地区封锁记忆、出口健康与退休标记
+  **全是内存态，重启即忘**（实测重启前 4 个退休、重启后 0 个）；`bindings` 相反是落盘的，
+  所以幽灵占用不会跨重启存活。
 
 ## [v0.1.0] — 首次发布
 
