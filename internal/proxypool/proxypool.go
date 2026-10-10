@@ -480,7 +480,24 @@ func (p *Pool) Pick(exclude string) *Proxy { return p.PickFor("", exclude) }
 //
 // A model of "" means the caller cannot judge geography, and no region tier is
 // applied — guessing there would take exits out of rotation on no evidence.
+// PickFor chooses an exit without knowing which account is asking, which means
+// it cannot tell a shared exit from a private one. It is the wrapper for callers
+// that genuinely have no account context, and it keeps the old behaviour.
 func (p *Pool) PickFor(model, exclude string) *Proxy {
+	return p.PickForAccount("", model, exclude)
+}
+
+// PickForAccount chooses an exit for one account's request for one model,
+// skipping exclude (the exit that just failed).
+//
+// It differs from a plain PickFor only in that it knows who is asking, and can
+// therefore prefer an exit that no other account is already using. That matters
+// because the pool is the redundancy: two accounts sharing an exit share its
+// per-IP quota and its region refusals, so a failure that rotation was supposed
+// to absorb instead lands on both of them at once. Collisions arise naturally,
+// since an account only re-resolves its exit when the old one goes bad, and the
+// replacement used to be chosen without regard to anyone else.
+func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 	if len(p.members) == 0 {
 		return nil
 	}
@@ -490,7 +507,8 @@ func (p *Pool) PickFor(model, exclude string) *Proxy {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	var healthy, degraded, cooled, region, quarantined []*member
+	var healthyFree, healthyTaken, degradedFree, degradedTaken []*member
+	var cooled, region, quarantined []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -512,6 +530,19 @@ func (p *Pool) PickFor(model, exclude string) *Proxy {
 		// added member is not starved before its first probe.
 		slow := p.health.MaxLatency > 0 && m.latencyMS > 0 &&
 			time.Duration(m.latencyMS)*time.Millisecond > p.health.MaxLatency
+		// taken means some OTHER account is parked here. An empty accountID
+		// means the caller cannot say who is asking (the health panel, the
+		// forward ingress), and then nothing is taken: without an identity to
+		// compare against, every exit looks equally free and this reduces to
+		// the previous behaviour exactly.
+		taken := false
+		if accountID != "" {
+			others := len(m.boundAccounts)
+			if _, self := m.boundAccounts[accountID]; self {
+				others--
+			}
+			taken = others > 0
+		}
 		m.mu.Unlock()
 		if ret {
 			if bestRetiredFails < 0 || fails < bestRetiredFails {
@@ -530,9 +561,17 @@ func (p *Pool) PickFor(model, exclude string) *Proxy {
 		case reg:
 			region = append(region, m)
 		case h && !slow:
-			healthy = append(healthy, m)
+			if taken {
+				healthyTaken = append(healthyTaken, m)
+			} else {
+				healthyFree = append(healthyFree, m)
+			}
 		default:
-			degraded = append(degraded, m)
+			if taken {
+				degradedTaken = append(degradedTaken, m)
+			} else {
+				degradedFree = append(degradedFree, m)
+			}
 		}
 	}
 	// Round-robin inside a tier spreads load across equally good exits instead
@@ -544,10 +583,22 @@ func (p *Pool) PickFor(model, exclude string) *Proxy {
 		n := p.rr.Add(1)
 		return list[int(n)%len(list)]
 	}
-	if m := pick(healthy); m != nil {
+	// Within a tier, an exit no other account is using comes first. Sharing an
+	// exit means sharing its per-IP allowance and its region refusals, which is
+	// exactly the redundancy the pool exists to provide, so splitting a tier this
+	// way costs nothing and keeps accounts apart. It is deliberately a tiebreak
+	// and not a demotion: a healthy exit that is busy is still better than a
+	// degraded one, so the tier order itself is untouched.
+	if m := pick(healthyFree); m != nil {
 		return m.Proxy
 	}
-	if m := pick(degraded); m != nil {
+	if m := pick(healthyTaken); m != nil {
+		return m.Proxy
+	}
+	if m := pick(degradedFree); m != nil {
+		return m.Proxy
+	}
+	if m := pick(degradedTaken); m != nil {
 		return m.Proxy
 	}
 	if len(cooled) > 0 {

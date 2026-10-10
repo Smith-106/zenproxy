@@ -840,3 +840,69 @@ func TestHealthReportsTheQuotaCooldown(t *testing.T) {
 		t.Error("an uncooled exit reported a cooldown")
 	}
 }
+
+// Sharing an exit means sharing its per-IP allowance and its region refusals, so
+// a third account must not be parked on an exit the other two already occupy.
+func TestPickForAccountPrefersAnExitNobodyElseIsUsing(t *testing.T) {
+	pool, _ := healthyPool(t, 3)
+	pool.Bind("a", "zen-01")
+	pool.Bind("b", "zen-02")
+	for i := 0; i < 30; i++ {
+		got := pool.PickForAccount("zen-03", "", "")
+		if got == nil {
+			t.Fatal("PickForAccount returned nothing while healthy exits existed")
+		}
+		if got.ID != "c" {
+			t.Fatalf("zen-03 landed on %q, which another account already occupies", got.ID)
+		}
+	}
+}
+
+// An account's own binding is not a conflict. If it were treated as one, an
+// account would be pushed off its own exit for no reason and lose affinity.
+func TestPickForAccountDoesNotTreatItsOwnExitAsTaken(t *testing.T) {
+	pool, _ := healthyPool(t, 2)
+	pool.Bind("a", "zen-01")
+	seen := map[string]bool{}
+	for i := 0; i < 60; i++ {
+		got := pool.PickForAccount("zen-01", "", "")
+		if got == nil {
+			t.Fatal("PickForAccount returned nothing")
+		}
+		seen[got.ID] = true
+	}
+	if !seen["a"] {
+		t.Fatal("an account was treated as a stranger on its own exit")
+	}
+}
+
+// The preference is a tiebreak, never a constraint: with one exit and two
+// accounts, limping along on a shared exit beats refusing to serve.
+func TestPickForAccountStillSharesWhenNothingElseIsLeft(t *testing.T) {
+	pool, _ := healthyPool(t, 1)
+	pool.Bind("a", "zen-01")
+	got := pool.PickForAccount("zen-02", "", "")
+	if got == nil || got.ID != "a" {
+		t.Fatalf("a shared exit must still be handed out when it is the only one: %v", got)
+	}
+}
+
+// Without an identity there is no way to tell "occupied by someone else" from
+// "occupied by me", so nothing may be treated as taken: this has to stay exactly
+// the behaviour PickFor had before accounts were considered at all.
+func TestPickForAccountWithoutAnIdentityKeepsEveryExitEligible(t *testing.T) {
+	pool, _ := healthyPool(t, 3)
+	pool.Bind("a", "zen-01")
+	pool.Bind("b", "zen-02")
+	seen := map[string]bool{}
+	for i := 0; i < 60; i++ {
+		got := pool.PickForAccount("", "", "")
+		if got == nil {
+			t.Fatal("PickForAccount with no identity returned nothing")
+		}
+		seen[got.ID] = true
+	}
+	if len(seen) != 3 {
+		t.Fatalf("a caller with no identity only ever saw %v, want all three exits", seen)
+	}
+}

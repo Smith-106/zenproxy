@@ -350,3 +350,90 @@ func TestEnabledIDsSkipsDisabledAccounts(t *testing.T) {
 		t.Fatalf("EnabledIDs = %v", ids)
 	}
 }
+
+
+// Two accounts on one exit are not two chances: they share the per-IP allowance
+// and the region refusals, so the redundancy the pool exists to provide is gone.
+func TestAccountsAreKeptOnSeparateExits(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c")
+	r := New("", pool, testLogger())
+	order := []string{"zen-01", "zen-02", "zen-03"}
+	for _, id := range order {
+		if err := r.Upsert(account(id, "k")); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+	taken := map[string]string{}
+	for _, id := range order {
+		px := r.ExitFor(id)
+		if px == nil {
+			t.Fatalf("ExitFor(%s) returned nil with a populated pool", id)
+		}
+		if other, dup := taken[px.ID]; dup {
+			t.Fatalf("%s and %s both ended up on exit %s", other, id, px.ID)
+		}
+		taken[px.ID] = id
+	}
+}
+
+// Bind only ever adds, so the exit an account leaves has to be released
+// explicitly. A stale occupant is indistinguishable from a live one, and enough
+// of them would mark every exit as taken and quietly disable the separation.
+func TestMovingAnAccountReleasesTheExitItLeftBehind(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatalf("Bind(a): %v", err)
+	}
+	if err := r.Bind("zen-01", "b"); err != nil {
+		t.Fatalf("Bind(b): %v", err)
+	}
+	if got := r.BoundExit("zen-01"); got != "b" {
+		t.Fatalf("BoundExit = %q, want b", got)
+	}
+	for _, h := range pool.Health() {
+		for _, a := range h.BoundAccounts {
+			if a == "zen-01" && h.ID == "a" {
+				t.Fatal("exit a still lists zen-01 after the account moved to b")
+			}
+		}
+	}
+}
+
+// The production failure, reproduced: an account only re-resolves its exit when the
+// old one goes bad, and the replacement used to be chosen with no regard for what
+// anyone else was using. With d free and b and c occupied, moving onto b or c is
+// the bug -- one bad exit would have become two accounts sharing a single IP.
+//
+// Written so it fails without the fix: the round-robin cursor starts untouched
+// because all three accounts are pre-bound, so an unfixed Pick would land on c.
+func TestAnAccountWhoseExitGoesBadMovesToAnUnoccupiedOne(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c", "d")
+	r := New("", pool, testLogger())
+	for _, id := range []string{"zen-01", "zen-02", "zen-03"} {
+		if err := r.Upsert(account(id, "k")); err != nil {
+			t.Fatalf("Upsert: %v", err)
+		}
+	}
+	for _, b := range []struct{ acct, exit string }{
+		{"zen-01", "a"}, {"zen-02", "b"}, {"zen-03", "c"},
+	} {
+		if err := r.Bind(b.acct, b.exit); err != nil {
+			t.Fatalf("Bind(%s, %s): %v", b.acct, b.exit, err)
+		}
+	}
+	pool.MarkFailure("a", "boom")
+	if ok, _ := pool.Healthy("a"); ok {
+		t.Fatal("the failure threshold is 1, so a must be quarantined by now")
+	}
+	got := r.ExitFor("zen-01")
+	if got == nil {
+		t.Fatal("ExitFor returned nil while d was healthy and unoccupied")
+	}
+	if got.ID != "d" {
+		t.Fatalf("zen-01 moved onto %s, which another account already occupies", got.ID)
+	}
+}

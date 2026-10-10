@@ -471,7 +471,7 @@ func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 		}
 	}
 
-	px := r.pool.PickFor(model, "")
+	px := r.pool.PickForAccount(accountID, model, "")
 	if px == nil {
 		return nil
 	}
@@ -530,7 +530,7 @@ func (r *Registry) RotateFor(accountID, excludeExit, model string) *proxypool.Pr
 	}
 	r.mu.Unlock()
 
-	px := r.pool.PickFor(model, excludeExit)
+	px := r.pool.PickForAccount(accountID, model, excludeExit)
 	if px == nil {
 		return nil
 	}
@@ -546,6 +546,18 @@ func (r *Registry) RotateFor(accountID, excludeExit, model string) *proxypool.Pr
 func (r *Registry) setBinding(accountID, exitID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Release the exit this account is leaving. Bind only ever adds, so without
+	// this the pool's per-exit account set grows a stale entry every time an
+	// account moves, and a stale entry is indistinguishable from a real one:
+	// measured in production, three accounts left four binding records behind,
+	// and an exit reported an occupant that had moved off it long before. The
+	// same oversight would eventually mark every exit as taken and silently
+	// disable the preference for keeping accounts apart.
+	if prev, ok := r.bindings[accountID]; ok && prev != "" && prev != exitID {
+		if r.pool != nil {
+			r.pool.Unbind(prev, accountID)
+		}
+	}
 	r.bindings[accountID] = exitID
 	if r.pool != nil {
 		r.pool.Bind(exitID, accountID)
