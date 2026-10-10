@@ -15,10 +15,15 @@ import (
 )
 
 // foldStream reassembles a buffered chat-completions SSE stream into the single
-// JSON object a non-streaming client expects. It always returns valid JSON: an
-// empty or unreadable stream becomes an error envelope rather than a silently
-// empty answer.
-func foldStream(raw []byte) []byte {
+// JSON object a non-streaming client expects.
+//
+// The second result is the failure message, empty on success. It is separate
+// from the payload on purpose. Writing an error envelope into the body of a 200
+// makes it a success the client believes in — and worse, anything relaying this
+// proxy forwards that status verbatim, so the lie survives all the way out.
+// new-api does exactly that: it passed zenproxy's 200 straight through, and the
+// caller saw `{"error":…}` under a 200 and no `choices` to read.
+func foldStream(raw []byte) ([]byte, string) {
 	var (
 		id      string
 		model   string
@@ -92,7 +97,7 @@ func foldStream(raw []byte) []byte {
 	}
 
 	if !seen {
-		return []byte(`{"error":{"type":"zenproxy_error","message":"upstream returned an unreadable event stream"}}`)
+		return nil, "upstream returned an unreadable event stream"
 	}
 	msg := foldedMessage{Role: "assistant", Content: content.String()}
 	for _, i := range order {
@@ -117,9 +122,9 @@ func foldStream(raw []byte) []byte {
 	}
 	enc, err := json.Marshal(out)
 	if err != nil {
-		return []byte(`{"error":{"type":"zenproxy_error","message":"failed to reassemble the streamed reply"}}`)
+		return nil, "failed to reassemble the streamed reply"
 	}
-	return enc
+	return enc, ""
 }
 
 type streamChunk struct {
@@ -205,8 +210,11 @@ type foldedToolCall struct {
 // `response.completed`, whose `response` field *is* the non-streaming object,
 // so the exact upstream bytes are passed through. The delta accumulator below
 // is only a fallback for a stream that ends early, and a stream with nothing
-// recognisable becomes an error envelope rather than an empty answer.
-func foldResponsesStream(raw []byte) []byte {
+// recognisable is reported as a failure rather than an empty answer.
+//
+// The second result is the failure message, empty on success — same contract as
+// foldStream, and for the same reason.
+func foldResponsesStream(raw []byte) ([]byte, string) {
 	var (
 		completed json.RawMessage
 		createdAt int64
@@ -258,20 +266,21 @@ func foldResponsesStream(raw []byte) []byte {
 		case "response.output_text.delta":
 			text.WriteString(ev.Delta)
 		case "response.failed", "error":
-			return []byte(`{"error":{"type":"zenproxy_error","message":"upstream reported the response failed"}}`)
+			return nil, "upstream reported the response failed"
 		}
 	}
 
 	if len(completed) > 0 && !bytes.Equal(bytes.TrimSpace(completed), []byte("null")) {
-		return completed
+		return completed, ""
 	}
 	if !sawEvent {
-		return []byte(`{"error":{"type":"zenproxy_error","message":"upstream returned an unreadable event stream"}}`)
+		return nil, "upstream returned an unreadable event stream"
 	}
 	if text.Len() == 0 {
 		// Events arrived but nothing carried an answer. Reporting an empty
-		// success here would be a silent lie, so say what happened instead.
-		return []byte(`{"error":{"type":"zenproxy_error","message":"the upstream stream ended without a completed response"}}`)
+		// success here would be a silent lie, so say what happened instead —
+		// and this time say it in the status code too, not just the body.
+		return nil, "the upstream stream ended without a completed response"
 	}
 	if createdAt == 0 {
 		createdAt = time.Now().Unix()
@@ -294,9 +303,9 @@ func foldResponsesStream(raw []byte) []byte {
 		}},
 	})
 	if err != nil {
-		return []byte(`{"error":{"type":"zenproxy_error","message":"failed to reassemble the streamed reply"}}`)
+		return nil, "failed to reassemble the streamed reply"
 	}
-	return out
+	return out, ""
 }
 
 // rawField pulls one field out of an already-validated JSON object without

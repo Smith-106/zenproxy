@@ -21,7 +21,10 @@ data: [DONE]
 // A client that asked for one response must get one response, whatever the
 // upstream talked in.
 func TestFoldStreamReassemblesContent(t *testing.T) {
-	out := foldStream([]byte(sampleStream))
+	out, errMsg := foldStream([]byte(sampleStream))
+	if errMsg != "" {
+		t.Fatalf("a good stream reported a failure: %s", errMsg)
+	}
 	var got struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
@@ -67,11 +70,15 @@ data: {"id":"c2","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"functi
 data: [DONE]
 `
 	var got foldedCompletion
-	if err := json.Unmarshal(foldStream([]byte(stream)), &got); err != nil {
+	folded, errMsg := foldStream([]byte(stream))
+	if errMsg != "" {
+		t.Fatalf("a good stream reported a failure: %s", errMsg)
+	}
+	if err := json.Unmarshal(folded, &got); err != nil {
 		t.Fatal(err)
 	}
 	if len(got.Choices) != 1 || len(got.Choices[0].Message.ToolCalls) != 1 {
-		t.Fatalf("tool calls were dropped: %s", foldStream([]byte(stream)))
+		t.Fatalf("tool calls were dropped: %s", folded)
 	}
 	tc := got.Choices[0].Message.ToolCalls[0]
 	if tc.ID != "call_1" || tc.Function.Name != "bash" || tc.Function.Arguments != `{"command":"ls"}` {
@@ -87,11 +94,18 @@ data: [DONE]
 
 // An upstream that accepts the request and then says nothing must produce an
 // error the client can see, not an empty success.
+//
+// The failure has to come back as a message rather than as an error-shaped
+// payload: a caller that can only see bytes has no way to choose a status code,
+// and the envelope ends up inside a 200.
 func TestFoldStreamReportsUnreadableStreams(t *testing.T) {
 	for _, raw := range []string{"", "event: ping\n\n", "<html>gateway timeout</html>"} {
-		out := foldStream([]byte(raw))
-		if !strings.Contains(string(out), "zenproxy_error") {
-			t.Errorf("%q folded to %s, want an error envelope", raw, out)
+		out, errMsg := foldStream([]byte(raw))
+		if errMsg == "" {
+			t.Errorf("%q folded to %s and reported no failure", raw, out)
+		}
+		if out != nil {
+			t.Errorf("%q returned a payload alongside the failure: %s", raw, out)
 		}
 	}
 }
@@ -99,7 +113,10 @@ func TestFoldStreamReportsUnreadableStreams(t *testing.T) {
 // Comments, keep-alives and a missing [DONE] must not stop the fold.
 func TestFoldStreamToleratesNoise(t *testing.T) {
 	stream := ": keep-alive\n\ndata: {\"id\":\"c3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"}}]}\n\n"
-	out := foldStream([]byte(stream))
+	out, errMsg := foldStream([]byte(stream))
+	if errMsg != "" {
+		t.Fatalf("a noisy but good stream reported a failure: %s", errMsg)
+	}
 	if !strings.Contains(string(out), `"content":"ok"`) {
 		t.Errorf("folded = %s", out)
 	}
@@ -122,7 +139,10 @@ func TestFoldResponsesStreamPassesThroughTheCompletedResponse(t *testing.T) {
 		"event: response.completed\n" +
 		`data: {"type":"response.completed","response":` + response + "}\n\n"
 
-	out := foldResponsesStream([]byte(stream))
+	out, errMsg := foldResponsesStream([]byte(stream))
+	if errMsg != "" {
+		t.Fatalf("a good stream reported a failure: %s", errMsg)
+	}
 	if string(out) != response {
 		t.Errorf("the completed response must pass through byte-exact:\ngot  %s\nwant %s", out, response)
 	}
@@ -150,7 +170,11 @@ func TestFoldResponsesStreamRebuildsFromDeltas(t *testing.T) {
 			} `json:"content"`
 		} `json:"output"`
 	}
-	if err := json.Unmarshal(foldResponsesStream([]byte(stream)), &got); err != nil {
+	rebuilt, errMsg := foldResponsesStream([]byte(stream))
+	if errMsg != "" {
+		t.Fatalf("a stream with deltas reported a failure: %s", errMsg)
+	}
+	if err := json.Unmarshal(rebuilt, &got); err != nil {
 		t.Fatalf("folded output is not JSON: %v", err)
 	}
 	if got.Object != "response" || got.Status != "completed" {
@@ -180,9 +204,12 @@ func TestFoldResponsesStreamNeverInventsAnEmptySuccess(t *testing.T) {
 		{"the response failed", "event: response.failed\n" + `data: {"type":"response.failed","response":{"id":"r"}}` + "\n\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out := foldResponsesStream([]byte(tc.stream))
-			if !strings.Contains(string(out), "zenproxy_error") {
-				t.Errorf("folded to %s, want an error envelope", out)
+			out, errMsg := foldResponsesStream([]byte(tc.stream))
+			if errMsg == "" {
+				t.Errorf("folded to %s and reported no failure", out)
+			}
+			if out != nil {
+				t.Errorf("a failure must not carry a payload: %s", out)
 			}
 		})
 	}
@@ -193,8 +220,8 @@ func TestFoldResponsesStreamNeverInventsAnEmptySuccess(t *testing.T) {
 func TestChatFolderCannotReadAResponsesStream(t *testing.T) {
 	stream := "event: response.completed\n" +
 		`data: {"type":"response.completed","response":{"id":"r","output":[]}}` + "\n\n"
-	out := foldStream([]byte(stream))
-	if !strings.Contains(string(out), "zenproxy_error") {
+	out, errMsg := foldStream([]byte(stream))
+	if errMsg == "" {
 		t.Errorf("the chat folder read a Responses stream as %s", out)
 	}
 }

@@ -624,9 +624,17 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, s surfa
 		writeJSONError(w, http.StatusBadGateway, "failed to read the upstream stream: "+err.Error())
 		return
 	}
-	out := foldStream(raw)
+	out, foldErr := foldStream(raw)
 	if s == surfaceResponses {
-		out = foldResponsesStream(raw)
+		out, foldErr = foldResponsesStream(raw)
+	}
+	if foldErr != "" {
+		// A fold that could not produce an answer is an upstream failure, not a
+		// reply. Reporting it only in the body would leave the 200 intact, and
+		// anything relaying this proxy forwards the status verbatim — the client
+		// would believe it succeeded and then find no choices to read.
+		writeJSONError(w, http.StatusBadGateway, foldErr)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
