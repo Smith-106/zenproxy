@@ -461,6 +461,15 @@
   所以**任何按内容匹配的 `grep`/`sed -n 'Np'` 都必然把全部 60 把 key 一起打出来**。
   第 8 次就是这么发生的——写下「绝不打印原始配置行」之后，转头用 `grep` 按内容搜了这个文件。
   同节给出唯一安全的碰法（YAML 解析只报结构、定点替换只报计数、比对只比长度前后缀）。
+- `docs/NEW-API.md` 新增第七节第 8 条「渠道测试测不了 `/responses`-only 的模型，那不是渠道坏了」。
+  后台点测试按钮测 `muse-spark-1.2/1.3-contributor-free` 会得到
+  `400 ModelProtocolUnsupported`，看着像渠道故障，其实是**两条路径不同**：
+  真实流量的 chat→responses 转换发生在 `relay/compatible_handler.go`，
+  而测试按钮的 `testChannel` 直接调 `adaptor.DoRequest`，根本不经过 relay handler。
+  这两个模型**真的不会说 chat 协议**，所以它回 400 是如实反映——测试没说谎，只是问错了问题。
+  同条给出验证办法（`&endpoint_type=openai-response` 改走 `/v1/responses`，实测
+  `success:true`），并记下一个隐患：不指定模型时测试取 `models[0]`，
+  现在恰好都是 chat 模型所以是绿的，但那是运气——把 `muse-spark-*` 挪到首位就会红。
 
 ## [v0.1.0] — 首次发布
 

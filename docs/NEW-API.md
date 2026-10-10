@@ -494,6 +494,52 @@ effortSuffixes := []string{"-high", "-minimal", "-low", "-medium", "-none", "-xh
 别名加完还要**把 new-api 渠道的 `models` 字段补上这三个名字**，否则它会回
 `No available channel for model claude-opus-5-5-hi`——new-api 只按渠道的 `models` 路由。
 
+### 8. 渠道测试测不了 `/responses`-only 的模型，那不是渠道坏了
+
+在后台点某个渠道的「测试」，如果测的是 `muse-spark-1.2/1.3-contributor-free`，会得到：
+
+```
+bad response status code 400, message: Model does not support this protocol.,
+body: {"type":"error","error":{"type":"ModelProtocolUnsupported",
+       "message":"Model does not support this protocol."}}
+```
+
+**这是测试工具的局限，不是渠道故障。** 原因是代码路径不同：
+
+| | 走哪条路 | 会不会做 chat→responses 转换 |
+| :--- | :--- | :--- |
+| 真实流量 `/v1/chat/completions` | `relay/compatible_handler.go` | **会**（第四节那套策略在这里生效） |
+| 后台「测试」按钮 | `controller/channel-test.go` 的 `testChannel`，直接调 `adaptor.DoRequest` | **不会**——它根本不经过 relay handler |
+
+所以转换策略再配对，测试按钮也看不到。而这两个模型**真的不会说 chat 协议**，
+所以它回 400 是**如实反映**——测试没说谎，只是问错了问题。
+
+**怎么验证这两个模型：** 测试时把端点类型一起传过去，它会改走 `/v1/responses`：
+
+```bash
+curl -H "Authorization: Bearer <access_token>" -H 'New-Api-User: 1' \
+  "http://127.0.0.1:3000/api/channel/test/16?model=muse-spark-1.2-contributor-free&endpoint_type=openai-response"
+# {"message":"","success":true,"time":7.658}
+```
+
+（`TestChannel` 从 query 读 `endpoint_type`；不传时 `normalizeChannelTestEndpoint`
+只会按「compact 后缀」和「Codex 渠道类型」两种情形改端点，**没有「这个模型要 responses」这一档**。）
+
+**顺带一个隐患**：不指定模型时，测试用的是 `channel.TestModel`，**没设就取 `models[0]`**。
+
+```go
+models := channel.GetModels()
+if len(models) > 0 {
+    testModel = strings.TrimSpace(models[0])   // 列表里第一个
+}
+```
+
+现在三个渠道恰好第一个都是 chat 模型（`big-pickle` / `ling-3.1-flash-free`），所以「测试全部渠道」
+是绿的。但这是**运气**：哪天把 `muse-spark-*` 挪到列表首位，「测试全部」就会红，
+如果那时 `auto_ban` 是开着的，渠道会被自动禁用。
+要免掉这个运气，在渠道编辑里把「测试模型」显式填成一个确定的 chat 模型即可
+（后台字段是 `test_model`；`PUT /api/channel/` 要绑整个 Channel 对象，所以用界面改更省事）。
+
 ---
 
 ## 八、回滚
@@ -519,6 +565,7 @@ new-api 的渠道本身不会因为 zenproxy 下线而丢失，只会请求失�
 | 流式响应中途断 | new-api 的 `STREAMING_TIMEOUT`；见第七节第 2 条 |
 | 换了出口但出口 IP 没变 | Resin 的粘性身份：同一 `Platform.Account` 在节点存活期间会一直落在同一出口。要么加池子成员，要么在 Resin 侧调整 |
 | `unknown provider for model xxx`（名字比你要的短一截） | 第七节第 7 条：new-api 把推理级别后缀剥掉了。看渠道类型是不是 1 |
+| 后台「测试」报 `Model does not support this protocol` | 第七节第 8 条：你测的是 `/responses`-only 的模型，而测试按钮不经过转换逻辑。**渠道是好的**，加 `&endpoint_type=openai-response` 再测 |
 | 改完渠道模型清单后 `No available channel` | 渠道的 `models` 字段没补上新名字；new-api 只按这个字段路由，不看上游实际有什么 |
 | 管理接口回 `AUTH_UNAUTHORIZED` | 用的是推理密钥。`/api/*` 要 `users.access_token`，`/v1/*` 才用 `tokens.key`——是两把不同的凭据 |
 | 接口回 200，body 却是错误 JSON（没有 `choices`） | 先看 body 里的 `type` 字段。zenproxy 自己造的错会写 `zenproxy_error` 并配非 200 状态码；**如果它是 200，那说明你面对的是旧版 zenproxy**——折流失败曾把错误写进 200 的 body 里 |
