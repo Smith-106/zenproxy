@@ -510,12 +510,13 @@ api-keys:
 > 自己；`routing.cooldown.transient-error-cooldown-seconds` 只管瞬时错误，
 > 认证类冷却长得多。排查时先看这句话，别去改 base URL。
 
-### sub2api：走它的「代理」而不是「上游」（已实测）
+### sub2api：两条接法（代理出口 / opencode_go 上游）
 
-sub2api 里能接 zenproxy 的是**代理**那一层，不是上游那一层——它没有「自定义
-OpenAI 兼容上游」这个概念（`channels` 表只有 `name/model_mapping/pricing` 之类，
-没有 URL 字段），但 `proxies` 表有 `protocol/host/port/username/password`，
-正好对应正向入口的 `http://<账号ID>:x@zenproxy:9000`。
+#### A. 只换出口 IP：走「代理」表（已实测）
+
+sub2api 的普通上游账号（Claude/Gemini/…）没有「自定义 OpenAI 兼容 URL」字段，
+但 `proxies` 表有 `protocol/host/port/username/password`，正好对应正向入口
+`http://<账号ID>:x@zenproxy:9000`。
 
 实测结果（生产，`proxies` 里一条指向 zenproxy 的记录）：
 
@@ -568,6 +569,27 @@ SECURITY_URL_ALLOWLIST_UPSTREAM_HOSTS=zenproxy
 
 它的上游存在 Postgres 里（`config.yaml` 只有 server/database/redis/jwt），
 所以只能走它的管理面加，不能改文件。
+
+#### B. 要用 opencode 免费模型：走 `opencode_go` 账号的 `base_url`（推荐）
+
+`platform=opencode_go` / `type=apikey` 的账号**自带** `credentials.base_url`。
+要在 sub2api 里打 `big-pickle` / `*-free`，把 `base_url` 指到 zenproxy 反代路径，
+不要再指 new-api：
+
+```
+base_url = http://zenproxy:9000/zen-01/v1
+api_key  = 任意非空占位（zenproxy 会用账号自己的上游 key 覆盖 Authorization）
+pool_mode = true
+model_mapping 里列入要用的免费模型名
+protocol_rules 里 muse-spark-* → responses
+```
+
+三个 zenproxy 账号就建三条 `opencode_go` 账号（`zen-01/02/03`），都挂到同一个
+Opencode 分组；`pool_mode` 会在上游 403/429 时在账号间重试。改完 DB 后**必须重启
+sub2api**（或走管理面保存），否则进程里还是旧的 `base_url`，表现为
+`model_not_supported` / 仍打到 new-api。
+
+客户端用该分组的 API Key 调 `http://<host>:8082/v1/chat/completions` 即可。
 
 ### 正向入口的 CONNECT 曾经是坏的
 
