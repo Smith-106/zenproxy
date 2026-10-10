@@ -9,25 +9,31 @@ import (
 	"testing"
 )
 
-// hasInjectedPrompt reports whether a request body carries marker as a system
-// message. It decodes rather than pattern-matching the raw bytes: the injected
-// prompt is JSON-escaped inside the body, so the literal text is not there.
-func hasInjectedPrompt(raw, marker string) bool {
+// hasStructuralGate reports whether a request body carries the free-tier
+// structural tool gate (bash + read). Prompt injection is no longer used.
+func hasStructuralGate(raw string) bool {
 	var b struct {
-		Messages []struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		} `json:"messages"`
+		Tools []struct {
+			Name     string `json:"name"`
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
 	}
 	if err := json.Unmarshal([]byte(raw), &b); err != nil {
 		return false
 	}
-	for _, m := range b.Messages {
-		if m.Role == "system" && strings.Contains(m.Content, marker) {
-			return true
+	seen := map[string]bool{}
+	for _, tl := range b.Tools {
+		name := tl.Function.Name
+		if name == "" {
+			name = tl.Name
+		}
+		if name != "" {
+			seen[name] = true
 		}
 	}
-	return false
+	return seen["bash"] && seen["read"]
 }
 
 // The free-tier refusal is not the client's problem to solve: it is a verdict on
@@ -44,7 +50,7 @@ func TestRefusedFreeModelIsRetriedInsideTheEnvelope(t *testing.T) {
 	)
 	h := newHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
-		enveloped := hasInjectedPrompt(string(raw), "You are a title generator")
+		enveloped := hasStructuralGate(string(raw))
 		mu.Lock()
 		bodies = append(bodies, string(raw))
 		uas = append(uas, r.Header.Get("User-Agent"))
@@ -75,7 +81,7 @@ func TestRefusedFreeModelIsRetriedInsideTheEnvelope(t *testing.T) {
 		defer mu.Unlock()
 		var flags []string
 		for _, raw := range bodies {
-			flags = append(flags, map[bool]string{true: "enveloped", false: "raw"}[hasInjectedPrompt(raw, "You are a title generator")])
+			flags = append(flags, map[bool]string{true: "enveloped", false: "raw"}[hasStructuralGate(raw)])
 		}
 		t.Fatalf("status = %d, attempts = %v, body = %s (a refused free model must be retried, not surfaced)", rec.Code, flags, rec.Body.String())
 	}

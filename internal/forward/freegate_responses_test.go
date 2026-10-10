@@ -2,7 +2,6 @@ package forward
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"zenproxy/internal/config"
@@ -26,16 +25,6 @@ func responsesFreeTier(t *testing.T) *FreeTier {
 	})
 }
 
-// instructionsOf reads the rewritten `instructions` field as text.
-func instructionsOf(t *testing.T, obj map[string]json.RawMessage) string {
-	t.Helper()
-	var s string
-	if err := json.Unmarshal(obj["instructions"], &s); err != nil {
-		t.Fatalf("unmarshal instructions: %v", err)
-	}
-	return s
-}
-
 func flatTool(name string) map[string]any {
 	return map[string]any{
 		"type":       "function",
@@ -44,80 +33,107 @@ func flatTool(name string) map[string]any {
 	}
 }
 
-func TestPrepareResponsesUsesBuildTemplateWithTools(t *testing.T) {
-	raw := body(t, map[string]any{
-		"model":  "muse-spark-1.3-contributor-free",
-		"stream": true,
-		"input":  "hi",
-		"tools":  []any{flatTool("bash"), flatTool("read")},
-	})
-	plan := responsesFreeTier(t).Prepare("/zen/v1/responses", raw, false)
-	if plan == nil {
-		t.Fatal("expected the free model to be enveloped on /responses")
+func flatToolNames(t *testing.T, obj map[string]json.RawMessage) []string {
+	t.Helper()
+	var tools []map[string]json.RawMessage
+	if err := json.Unmarshal(obj["tools"], &tools); err != nil {
+		t.Fatalf("unmarshal tools: %v", err)
 	}
-	if plan.Template != "responses-build" {
-		t.Errorf("template = %q, want responses-build", plan.Template)
+	out := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		var name string
+		if err := json.Unmarshal(tool["name"], &name); err != nil || name == "" {
+			t.Fatalf("every entry must name its function at the top level: %s", tool["name"])
+		}
+		if _, nested := tool["function"]; nested {
+			t.Errorf("tool %q was written in the chat shape on the Responses surface", name)
+		}
+		out = append(out, name)
 	}
-	if plan.Model != "muse-spark-1.3-contributor-free" {
-		t.Errorf("model = %q", plan.Model)
-	}
-	obj := decode(t, plan.Body)
-	if got := instructionsOf(t, obj); !strings.HasPrefix(got, gateBuildChunk) {
-		t.Error("instructions must start with the agent prompt chunk")
-	}
-	// `input` is the caller's content and must survive untouched.
-	var input string
-	if err := json.Unmarshal(obj["input"], &input); err != nil || input != "hi" {
-		t.Errorf("input = %q (err %v), want hi", input, err)
-	}
-	// The chat-shaped field must not appear on this surface.
-	if _, ok := obj["messages"]; ok {
-		t.Error("a Responses body must not gain a messages field")
-	}
+	return out
 }
 
-// A tool-less Responses request is judged on the title prompt, exactly as a
-// tool-less chat request is.
-func TestPrepareResponsesUsesTitleTemplateWithoutTools(t *testing.T) {
+// A Responses request must gain bash+read (flat shape) and tool_choice=auto.
+// instructions / input must survive untouched — no prompt injection.
+func TestPrepareResponsesInjectsToolsWithoutTouchingInstructions(t *testing.T) {
 	raw := body(t, map[string]any{
-		"model":  "big-pickle",
-		"stream": true,
-		"input":  "hi",
-	})
-	plan := responsesFreeTier(t).Prepare("/zen/v1/responses", raw, false)
-	if plan == nil {
-		t.Fatal("expected the free model to be enveloped on /responses")
-	}
-	if plan.Template != "responses-title" {
-		t.Errorf("template = %q, want responses-title", plan.Template)
-	}
-	if got := instructionsOf(t, decode(t, plan.Body)); !strings.HasPrefix(got, gateTitleChunk) {
-		t.Error("instructions must start with the title prompt chunk")
-	}
-}
-
-// The caller's own instructions are prefixed, not replaced: the gate needs the
-// chunk first, and the caller still needs its own prompt to reach the model.
-func TestPrepareResponsesKeepsCallersInstructions(t *testing.T) {
-	raw := body(t, map[string]any{
-		"model":        "big-pickle",
+		"model":        "muse-spark-1.3-contributor-free",
 		"stream":       true,
 		"input":        "hi",
 		"instructions": "You are a pirate.",
 	})
 	plan := responsesFreeTier(t).Prepare("/zen/v1/responses", raw, false)
 	if plan == nil {
+		t.Fatal("expected the free model to be enveloped on /responses")
+	}
+	if plan.Template != "responses-tools" {
+		t.Errorf("template = %q, want responses-tools", plan.Template)
+	}
+	if plan.Model != "muse-spark-1.3-contributor-free" {
+		t.Errorf("model = %q", plan.Model)
+	}
+	obj := decode(t, plan.Body)
+
+	var instructions string
+	if err := json.Unmarshal(obj["instructions"], &instructions); err != nil || instructions != "You are a pirate." {
+		t.Errorf("instructions = %q (err %v), want the caller's own text untouched", instructions, err)
+	}
+	var input string
+	if err := json.Unmarshal(obj["input"], &input); err != nil || input != "hi" {
+		t.Errorf("input = %q (err %v), want hi", input, err)
+	}
+	if _, ok := obj["messages"]; ok {
+		t.Error("a Responses body must not gain a messages field")
+	}
+
+	names := flatToolNames(t, obj)
+	if len(names) != 2 || names[0] != "bash" || names[1] != "read" {
+		t.Errorf("tools = %v, want [bash read]", names)
+	}
+	var choice string
+	if err := json.Unmarshal(obj["tool_choice"], &choice); err != nil || choice != "auto" {
+		t.Errorf("tool_choice = %q (err %v), want auto", choice, err)
+	}
+}
+
+// Client tools stay in front; missing gate names are appended in the flat shape;
+// tool_choice is forced to auto even if the client sent something else.
+func TestPrepareResponsesTopsUpFlatToolsAndForcesAuto(t *testing.T) {
+	raw := body(t, map[string]any{
+		"model":       "big-pickle",
+		"stream":      true,
+		"input":       "hi",
+		"tools":       []any{flatTool("custom_search")},
+		"tool_choice": "none", // Responses rejects this; envelope must overwrite.
+	})
+	plan := responsesFreeTier(t).Prepare("/zen/v1/responses", raw, false)
+	if plan == nil {
 		t.Fatal("expected an envelope")
 	}
-	got := instructionsOf(t, decode(t, plan.Body))
-	if !strings.HasPrefix(got, gateTitleChunk) {
-		t.Fatal("the caller's instructions must not displace the chunk")
+	obj := decode(t, plan.Body)
+	names := flatToolNames(t, obj)
+	if names[0] != "custom_search" {
+		t.Errorf("the caller's own tool must stay in front, got %q", names[0])
 	}
-	if !strings.HasSuffix(got, "You are a pirate.") {
-		t.Error("the caller's own instructions must still reach the model")
+	hits := 0
+	seen := map[string]bool{}
+	for _, n := range names {
+		seen[n] = true
+		for _, g := range gateToolNames {
+			if n == g {
+				hits++
+			}
+		}
 	}
-	if !strings.Contains(got, gateOverride) {
-		t.Error("the injected chunk must still be neutralised by the override")
+	if hits < gateMinToolNames {
+		t.Errorf("only %d official tool names present, want >= %d", hits, gateMinToolNames)
+	}
+	if !seen["bash"] || !seen["read"] {
+		t.Error("bash and read must be present after top-up")
+	}
+	var choice string
+	if err := json.Unmarshal(obj["tool_choice"], &choice); err != nil || choice != "auto" {
+		t.Errorf("tool_choice = %q (err %v), want auto (Responses rejects none)", choice, err)
 	}
 }
 
@@ -143,10 +159,8 @@ func TestPrepareResponsesForcesStreamAndRemembersTheClientWish(t *testing.T) {
 	}
 }
 
-// Responses names tools at the top level. The top-up entries must match that
-// shape — a mixed array is not something the upstream ever sees from a real
-// client, and the count is what the gate reads.
-func TestPrepareResponsesTopsUpFlatToolsKeepingTheirShape(t *testing.T) {
+// A request that already advertises bash+read must not grow further.
+func TestPrepareResponsesDoesNotPadWhenGateNamesAlreadyPresent(t *testing.T) {
 	raw := body(t, map[string]any{
 		"model":  "big-pickle",
 		"stream": true,
@@ -157,34 +171,9 @@ func TestPrepareResponsesTopsUpFlatToolsKeepingTheirShape(t *testing.T) {
 	if plan == nil {
 		t.Fatal("expected an envelope")
 	}
-	var tools []map[string]json.RawMessage
-	if err := json.Unmarshal(decode(t, plan.Body)["tools"], &tools); err != nil {
-		t.Fatalf("unmarshal tools: %v", err)
-	}
-
-	names := map[string]bool{}
-	for _, tool := range tools {
-		var name string
-		if err := json.Unmarshal(tool["name"], &name); err != nil || name == "" {
-			t.Fatalf("every entry must name its function at the top level: %s", tool["name"])
-		}
-		if _, nested := tool["function"]; nested {
-			t.Errorf("tool %q was written in the chat shape on the Responses surface", name)
-		}
-		names[name] = true
-	}
-	hits := 0
-	for _, want := range gateToolNames {
-		if names[want] {
-			hits++
-		}
-	}
-	if hits < gateMinToolNames {
-		t.Errorf("only %d official tool names present, want >= %d", hits, gateMinToolNames)
-	}
-	// The caller's own tools stay in front so its tool calling keeps working.
-	if len(tools) < 2 || !names["bash"] || !names["read"] {
-		t.Error("the caller's own tools must be preserved")
+	names := flatToolNames(t, decode(t, plan.Body))
+	if len(names) != 2 {
+		t.Errorf("tools grew to %d without need: %v", len(names), names)
 	}
 }
 
@@ -216,11 +205,6 @@ func TestPrepareResponsesScope(t *testing.T) {
 	if plan := ft.Prepare("/zen/v1/responses", []byte(`{"model":"gpt-5","input":"hi"}`), true); plan == nil {
 		t.Error("a forced retry must envelop even an unknown model")
 	}
-	// A body that already carries a client prompt must not be wrapped twice.
-	already := body(t, map[string]any{"model": "big-pickle", "input": "hi", "instructions": gateBuildChunk})
-	if plan := ft.Prepare("/zen/v1/responses", already, false); plan != nil {
-		t.Error("an already-enveloped body must not be wrapped again")
-	}
 	// Disabled means disabled.
 	off := NewFreeTier(config.FreeTier{Enabled: false, Models: []string{"big-pickle"}})
 	if plan := off.Prepare("/zen/v1/responses", ok, false); plan != nil {
@@ -228,9 +212,7 @@ func TestPrepareResponsesScope(t *testing.T) {
 	}
 }
 
-// Counting tool names has to read both shapes, or a Responses request looks
-// tool-less and is handed the title prompt — the wrong one for a request that
-// does carry tools.
+// Counting tool names has to read both shapes.
 func TestToolNameOfReadsBothShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name string

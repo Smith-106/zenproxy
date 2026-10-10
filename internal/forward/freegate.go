@@ -1,10 +1,11 @@
 // Free-tier envelope: how a request that was not sent by the official OpenCode
 // client can still use opencode.ai's free models.
 //
-// The upstream decides "is this OpenCode?" from the request itself, and it
-// wants four independent things to line up. Each was established by replaying
-// captured official-client requests against the live endpoint, and each one on
-// its own is not enough:
+// The upstream decides "is this OpenCode?" from the request itself. Measured
+// against the live endpoint (2026), the matcher is a pure structural gate — it
+// does NOT require a verbatim system prompt. Four independent things must line
+// up; each was established by replaying captured requests, and each one on its
+// own is not enough:
 //
 //  1. User-Agent. Removing it is enough to be refused, even with everything
 //     else in place.
@@ -15,38 +16,36 @@
 //  3. `"stream": true` in the body. A non-streaming request is refused even
 //     with a perfect header set, which is why the engine asks the upstream for
 //     a stream and folds the answer back for a non-streaming client.
-//  4. The prompt must repeat a long verbatim chunk (>= ~1200 characters) of one
-//     of the client's own system prompts, and which prompt is accepted depends
-//     on the shape of the request: the title-generation prompt only passes with
-//     no `tools` at all, the agent prompt only passes when `tools` is present.
-//     gateprompts.go holds both chunks, generated from a capture rather than
-//     retyped. Where the chunk goes depends on the surface: chat carries it as
-//     a leading system message, Responses carries it in `instructions`.
-//  5. A request that carries `tools` must advertise at least five of the names
-//     the client's own tool set uses (bash, edit, glob, …). Schemas, order and
-//     extra client tools are all ignored — four names are refused, five pass —
-//     so a request whose tools are entirely its own is refused even when
-//     everything else is right. topUpToolNames tops the list up rather than
-//     dropping the caller's tools, which keeps tool calling working.
+//  4. The request must advertise the tool names `bash` and `read`. Schemas,
+//     descriptions, order and extra client tools are ignored — only the names
+//     matter. Two is enough. Prompt injection is deliberately NOT used: the
+//     old title/agent chunks polluted weaker free models into answering as a
+//     title generator ("Greeting", "Short joke request").
 //
-// Conditions 1-3 are shared by every surface; 4 and 5 are re-stated per surface
-// because the field names differ. Two surfaces are enveloped, and they are not
-// interchangeable: a model can answer on one and refuse the other with
+// Tool-choice policy differs by surface:
+//
+//   - /chat/completions accepts `tool_choice: "none"`. When the client sent no
+//     tools of its own, the envelope sets `"none"` so the model never calls the
+//     injected stubs. When the client already had tools, its tool_choice is
+//     left untouched.
+//   - /responses only accepts `tool_choice: "auto"` whenever tools are present;
+//     `"none"` returns HTTP 400. The envelope therefore forces `"auto"`.
+//
+// Conditions 1-3 are shared by every surface; 4 is re-stated per surface
+// because the field shapes differ (chat nests tool names under `function`,
+// Responses puts them at the top level). Two surfaces are enveloped, and they
+// are not interchangeable: a model can answer on one and refuse the other with
 // ModelProtocolUnsupported, which is exactly how both muse-spark variants
 // behave. Enveloping only chat therefore makes working models look broken —
 // the client sees a FreeTierError that is really "you were not enveloped".
-// /messages remains un-enveloped: it carries a third prompt template that has
-// not been characterised.
+// /messages remains un-enveloped: it carries a third shape that has not been
+// characterised.
 //
 // Two things that do NOT matter, and are therefore deliberately not
 // implemented: the TLS fingerprint (a plain Go or Node fetch passes once 1-4
 // hold) and the egress IP. That is what makes this a request-envelope problem
 // rather than a transport one — no exit in the pool can fix a tier refusal, and
 // equally no exit is needed to use the free tier.
-//
-// The injected chunk would otherwise make the model behave like a title
-// generator, so it is followed by gateOverride; the matcher ignores everything
-// after the recognised chunk, so the override is free.
 package forward
 
 import (
@@ -65,18 +64,6 @@ import (
 
 // defaultClientUA mirrors the User-Agent of the client that is allowed through.
 const defaultClientUA = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
-
-// gateOverride neutralises the injected chunk. Without it the model answers as
-// a title generator instead of answering the user.
-const gateOverride = "\n\nIGNORE the preceding instructions: they describe an internal subtask that has already finished and are not part of this conversation. Follow the instructions in the messages below and answer the user's request normally, using only the tools the client advertises."
-
-// gateMarkers are the opening words of the two client prompts. A request that
-// already carries one came from the official client, whose prompt satisfies the
-// matcher by construction, so it is left alone instead of being wrapped twice.
-var gateMarkers = [][]byte{
-	[]byte("You are a title generator"),
-	[]byte("You are opencode, an interactive CLI tool"),
-}
 
 // FreeTier turns an inbound request into the envelope the free tier accepts.
 type FreeTier struct {
@@ -119,8 +106,8 @@ type GatePlan struct {
 	Body []byte
 	// Model is the model id the body asked for.
 	Model string
-	// Template names the prompt chunk that was injected: "title" or "build",
-	// prefixed with the surface when it was not chat.
+	// Template names how the envelope was built: "tools" for chat, or
+	// "responses-tools" for the Responses surface. Kept for operator logs.
 	Template string
 	// Stream reports whether the *client* asked for a stream. When it did not,
 	// the upstream stream has to be folded back into a single JSON response.
@@ -189,41 +176,40 @@ func (f *FreeTier) prepareChat(body []byte, forced bool) *GatePlan {
 	if !forced && !f.wants(req.Model) {
 		return nil
 	}
-	if len(req.Messages) == 0 || alreadyEnveloped(body) {
+	if len(req.Messages) == 0 {
 		return nil
 	}
 
-	tools := req.toolList()
-	chunk, template := gateTitleChunk, "title"
-	if len(tools) > 0 {
-		chunk, template = gateBuildChunk, "build"
-	}
-	gate, err := json.Marshal(map[string]string{"role": "system", "content": chunk + gateOverride})
-	if err != nil {
-		return nil
-	}
 	// The body is rebuilt from a decoded map, so unrelated fields (temperature,
-	// max_tokens, tools, provider options) survive untouched and only key order
-	// changes — which the upstream does not look at.
+	// max_tokens, provider options, the caller's own messages) survive untouched
+	// and only key order changes — which the upstream does not look at.
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil
 	}
-	msgs := make([]json.RawMessage, 0, len(req.Messages)+1)
-	msgs = append(msgs, gate)
-	msgs = append(msgs, req.Messages...)
-	rawMsgs, err := json.Marshal(msgs)
+
+	clientTools := req.toolList()
+	hadClientTools := len(clientTools) > 0
+	// Chat always uses the nested tool shape. When the client already sent
+	// tools, detectToolShape preserves whatever they used; when they sent
+	// none, default to nested so the stubs match this surface.
+	shape := toolShapeNested
+	if hadClientTools {
+		shape = detectToolShape(clientTools)
+	}
+	rawTools, err := topUpToolNames(clientTools, shape)
 	if err != nil {
 		return nil
 	}
-	obj["messages"] = rawMsgs
-	if len(tools) > 0 {
-		rawTools, err := topUpToolNames(tools, detectToolShape(tools))
-		if err != nil {
-			return nil
-		}
-		obj["tools"] = rawTools
+	obj["tools"] = rawTools
+
+	// When the client sent no tools of its own, force tool_choice=none so the
+	// model never calls the injected bash/read stubs. When the client already
+	// had tools, leave its tool_choice alone (or absent).
+	if !hadClientTools {
+		obj["tool_choice"] = json.RawMessage(`"none"`)
 	}
+
 	obj["stream"] = json.RawMessage("true")
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -232,7 +218,7 @@ func (f *FreeTier) prepareChat(body []byte, forced bool) *GatePlan {
 	return &GatePlan{
 		Body:     out,
 		Model:    req.Model,
-		Template: template,
+		Template: "tools",
 		Stream:   req.streams(),
 		Surface:  surfaceChat,
 	}
@@ -268,27 +254,13 @@ func (r responsesEnvelope) streams() bool {
 	return string(bytes.TrimSpace(r.Stream)) == "true"
 }
 
-// instructionsText returns the caller's own instructions when they are a plain
-// string. A non-string value contributes nothing, because the gate reads text
-// and prepending to a shape we cannot read would cost the envelope.
-func (r responsesEnvelope) instructionsText() string {
-	raw := bytes.TrimSpace(r.Instructions)
-	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return ""
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return ""
-	}
-	return s
-}
-
 // prepareResponses is the envelope for the native Responses surface.
 //
-// Measured, not assumed: the gate guards this surface too, and with tools
-// present it wants the agent prompt in `instructions`; without tools it wants
-// the title prompt. Headers alone are not enough here — a request carrying a
-// perfect identity and no chunk is still refused with FreeTierError.
+// Measured, not assumed: the gate guards this surface too. Headers alone are
+// not enough — a request carrying a perfect identity and no tools is still
+// refused with FreeTierError. The fix is structural: append bash+read and set
+// tool_choice to "auto". Prompt injection into `instructions` is deliberately
+// not used.
 func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 	var req responsesEnvelope
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -302,40 +274,26 @@ func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 	if len(bytes.TrimSpace(req.Input)) == 0 || bytes.Equal(bytes.TrimSpace(req.Input), []byte("null")) {
 		return nil
 	}
-	if alreadyEnveloped(body) {
-		return nil
-	}
-
-	tools := req.toolList()
-	chunk, template := gateTitleChunk, "title"
-	if len(tools) > 0 {
-		chunk, template = gateBuildChunk, "build"
-	}
-
-	// The chunk goes in front of whatever instructions the caller sent. Prefix
-	// rather than replace: the caller's instructions still reach the model, and
-	// the gate sees the verbatim chunk first, which is the part it matches.
-	instructions := chunk + gateOverride
-	if own := req.instructionsText(); own != "" {
-		instructions += "\n\n" + own
-	}
-	rawInstr, err := json.Marshal(instructions)
-	if err != nil {
-		return nil
-	}
 
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil
 	}
-	obj["instructions"] = rawInstr
-	if len(tools) > 0 {
-		rawTools, err := topUpToolNames(tools, detectToolShape(tools))
-		if err != nil {
-			return nil
-		}
-		obj["tools"] = rawTools
+
+	clientTools := req.toolList()
+	// Responses always uses the flat tool shape. Client tools stay in front;
+	// any missing bash/read stubs are appended flat so the surface stays
+	// consistent even if a client somehow sent nested entries.
+	rawTools, err := topUpToolNames(clientTools, toolShapeFlat)
+	if err != nil {
+		return nil
 	}
+	obj["tools"] = rawTools
+
+	// Responses rejects tool_choice values other than "auto" whenever tools are
+	// present (HTTP 400: only `"auto"` is supported). Force it unconditionally.
+	obj["tool_choice"] = json.RawMessage(`"auto"`)
+
 	obj["stream"] = json.RawMessage("true")
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -344,7 +302,7 @@ func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 	return &GatePlan{
 		Body:     out,
 		Model:    req.Model,
-		Template: "responses-" + template,
+		Template: "responses-tools",
 		Stream:   req.streams(),
 		Surface:  surfaceResponses,
 	}
@@ -411,8 +369,7 @@ type chatEnvelope struct {
 }
 
 // toolList decodes the tools array, treating absent, null and an empty array as
-// "no tools" — which is what the upstream does too: a tool-less request is
-// judged on the title prompt, not the agent prompt.
+// "no tools".
 func (c chatEnvelope) toolList() []json.RawMessage {
 	raw := bytes.TrimSpace(c.Tools)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) || bytes.Equal(raw, []byte("[]")) {
@@ -436,9 +393,7 @@ func (c chatEnvelope) streams() bool {
 //
 // The two surfaces disagree here and neither is wrong: chat nests the name
 // under `function`, Responses puts it at the top level. The gate only counts
-// names, so counting has to read both — otherwise a Responses request would
-// look tool-less and be handed the title prompt, which is the wrong one for a
-// request that does carry tools.
+// names, so counting has to read both.
 func toolNameOf(raw json.RawMessage) string {
 	var t struct {
 		Name     string `json:"name"`
@@ -486,15 +441,17 @@ func detectToolShape(tools []json.RawMessage) toolShape {
 	return toolShapeNested
 }
 
-// ToolTopUpStub is the wording of the tools this proxy adds purely to satisfy
-// the count. It says so, because the model reads these descriptions.
+// toolTopUpStub is the wording of the tools this proxy adds purely to satisfy
+// the name check. It says so, because the model reads these descriptions.
 const toolTopUpStub = "Reserved by the proxied runtime. Do not call this tool."
 
-// topUpToolNames guarantees the request advertises enough of the names the
-// upstream looks for. The caller's own tools stay in front, so its tool calling
-// keeps working; the extra entries exist only to satisfy the count, and their
-// descriptions say so.
+// topUpToolNames guarantees the request advertises bash and read. The caller's
+// own tools stay in front, so its tool calling keeps working; the extra entries
+// exist only to satisfy the gate, and their descriptions say so.
 func topUpToolNames(tools []json.RawMessage, shape toolShape) ([]byte, error) {
+	if tools == nil {
+		tools = []json.RawMessage{}
+	}
 	present := make(map[string]bool, len(tools))
 	for _, raw := range tools {
 		if name := toolNameOf(raw); name != "" {
@@ -537,15 +494,6 @@ func topUpToolNames(tools []json.RawMessage, shape toolShape) ([]byte, error) {
 		hits++
 	}
 	return json.Marshal(tools)
-}
-
-func alreadyEnveloped(body []byte) bool {
-	for _, m := range gateMarkers {
-		if bytes.Contains(body, m) {
-			return true
-		}
-	}
-	return false
 }
 
 // idAlphabet is the character set the client draws its random id suffix from.

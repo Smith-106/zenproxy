@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **免费门改为纯结构工具门，去掉 prompt 注入。**
+  上游实测：身份头 + `stream: true` + 工具名 `bash`/`read` 即可过门，不再需要
+  title/agent 系统提示词前缀。旧注入会污染弱模型（`step-5-preview-free` 回答
+  `Greeting` / `Short joke request`）。`prepareChat` / `prepareResponses` 只补工具、
+  按端点设置 `tool_choice`（chat 无客户端工具时 `"none"`；Responses 强制 `"auto"`），
+  不改 `messages` / `instructions`。`gateToolNames` 收敛为 `["bash","read"]`，
+  `gateMinToolNames=2`。详见 `docs/FREE-TIER.md`。
+
 ### 新增
 
 - **修复：只支持 `/responses` 的模型在 new-api 上永远不可达。**
