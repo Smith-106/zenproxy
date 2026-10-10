@@ -435,6 +435,50 @@ muse-spark-1.2-contributor-free  /v1/responses → 200 completed
 就恒定回 `{"message":"Invalid parameters","success":false}`**（`POST` 带 `status` 却正常），
 症状与"字段写错了"完全一样。用最小字段集提交，`status` 不要带。
 
+### 7. 模型名里的推理级别后缀会被 new-api **无条件**剥掉
+
+如果某个上游的模型名以 `-high` / `-medium` / `-xhigh` / `-low` / `-minimal` / `-none` 结尾，
+那它经 new-api（**渠道类型 1，OpenAI 兼容**）转发时**一定会被改名**，而且**没有任何开关**：
+
+```go
+// relay/channel/openai/adaptor.go:45
+effortSuffixes := []string{"-high", "-minimal", "-low", "-medium", "-none", "-xhigh"}
+// 命中就把后缀剥掉，转发裸名，同时塞一个 reasoning_effort 参数
+```
+
+实测：`claude-opus-5-5-high` 经 new-api 转发出去的是 `claude-opus-5-5`，
+日志里写着 `modelName=claude-opus-5-5-high` 但上游收到的是裸名：
+
+```
+400 {"error":{"message":"unknown provider for model claude-opus-5-5","type":"invalid_request_error"}}
+```
+
+而 CPA 和它背后的 windsurfapi **都只认带后缀的名字**（windsurfapi 有 260 个模型，
+裸名 `claude-opus-5-5` 回 `The model ... is not a valid model for this endpoint`）。
+
+**这不是配置没写对，是新旧两套命名约定的正面冲突**：一边把后缀当推理级别，
+另一边把后缀当模型名的一部分。
+
+修法是**给上游加一个不含这些后缀的别名**，让 new-api 剥不到东西。CPA 的
+`alias` / `name` 正好就是干这个的（`alias` = 客户端看到的名字，`name` = 转发给上游的真名）：
+
+```yaml
+# /opt/cli-proxy-api/config.yaml，windsurfapi 的 models 里
+{"alias": "", "name": "claude-opus-5-5-high"},                          # 原名，直连用
+{"alias": "claude-opus-5-5-hi", "name": "claude-opus-5-5-high"},        # 给 new-api 用的别名
+```
+
+同一个 `name` 出现两次是允许的，配置里 `deepseek-flash` / `deepseek-v4.1-flash`
+本来就是这个写法。加完之后**两条路各用各的名字，互不影响**：
+
+| 通路 | 用哪个名字 |
+| :--- | :--- |
+| 直连 CPA（`cpa.nikoniko.tech`） | 原名 `claude-opus-5-5-high` |
+| 经 new-api | 别名 `claude-opus-5-5-hi` |
+
+别名加完还要**把 new-api 渠道的 `models` 字段补上这三个名字**，否则它会回
+`No available channel for model claude-opus-5-5-hi`——new-api 只按渠道的 `models` 路由。
+
 ---
 
 ## 八、回滚
@@ -459,3 +503,38 @@ new-api 的渠道本身不会因为 zenproxy 下线而丢失，只会请求失�
 | 一直是 403 且 `last_class: tier_gate` | 见第七节第 1 条，跟 IP 无关 |
 | 流式响应中途断 | new-api 的 `STREAMING_TIMEOUT`；见第七节第 2 条 |
 | 换了出口但出口 IP 没变 | Resin 的粘性身份：同一 `Platform.Account` 在节点存活期间会一直落在同一出口。要么加池子成员，要么在 Resin 侧调整 |
+| `unknown provider for model xxx`（名字比你要的短一截） | 第七节第 7 条：new-api 把推理级别后缀剥掉了。看渠道类型是不是 1 |
+| 改完渠道模型清单后 `No available channel` | 渠道的 `models` 字段没补上新名字；new-api 只按这个字段路由，不看上游实际有什么 |
+| 管理接口回 `AUTH_UNAUTHORIZED` | 用的是推理密钥。`/api/*` 要 `users.access_token`，`/v1/*` 才用 `tokens.key`——是两把不同的凭据 |
+
+---
+
+## 十、改配置时的正确姿势
+
+这一节是踩了坑之后补的，两条都是操作纪律，不是原理。
+
+### 1. CPA 冷启动要 ~50 秒，别在 40 秒下结论
+
+实测：A/B 两个实例（同一份配置，只差三个别名）**都是 50 秒**才起来。
+`docker restart` 之后 5~40 秒去 `curl` 一定是 `000`，而这段时间日志里
+**什么都没有**——插件注册完了，但 `API server started successfully` 还没出现。
+没有报错、没有退出码、`status=running`、`RestartCount=0`，看上去和"卡死"一模一样。
+
+**判据是日志里那一行 `API server started successfully on: :8317`**，不是端口、不是
+`curl` 的返回码。轮询要留到 150 秒。
+
+### 2. 改配置先在一次性实例上验证，别拿生产重启去试
+
+同一个坑的代价：把新配置写进生产、`docker restart`、38 秒查到 `000`，
+就认定"配置把 CPA 弄坏了"并回滚——**回滚掉了一份本来能用的配置**。
+
+正确做法是两个临时容器做 A/B，全程不碰生产：
+
+```bash
+# 复制一份配置 + plugins + auths 到临时目录，一个原样、一个改过
+sudo docker run -d --name cpa-abi-alias --network llm-internal     -v /opt/cpa-abi/alias/config.yaml:/CLIProxyAPI/config.yaml     -v /opt/cpa-abi/alias/plugins:/CLIProxyAPI/plugins     -v /opt/cpa-abi/alias/auths:/root/.cli-proxy-api     -p 127.0.0.1:8400:8317 eceasy/cli-proxy-api:v8.0.15 ./CLIProxyAPI
+```
+
+**对照组不能省**：没有它，"实验组没起来"分不清是配置的问题还是环境的问题
+（比如端口、网络、plugins 没挂上）。这次正是对照组同时 50 秒起来，
+才证明别名是无辜的。

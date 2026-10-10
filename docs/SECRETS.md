@@ -29,7 +29,7 @@ scripts/redact.py --test
 它按**两个独立信号**判定：键名像凭据 **或** 值本身是凭据形状，任一命中即遮蔽。
 所以「键名出乎意料」不再能让密钥漏出去。
 
-## 六次事故的形状（都是真实发生过的）
+## 事故的形状（都是真实发生过的）
 
 | # | 做法 | 为什么漏 |
 | :--- | :--- | :--- |
@@ -40,9 +40,39 @@ scripts/redact.py --test
 | 5 | 正则 `s/(KEY\|TOKEN)=.*/` | 变量名是 `ZEN_KEY_01=`，`KEY` 与 `=` 之间隔着 `_01`，**模式没匹配上** |
 | 6 | `sed -E 's/(sk-[A-Za-z0-9_-]{6})…'` 遮 `sk-` | 那一行里的 key 是 `nvapi-…`、`<hex>.<base62>`、base64、以及 URL 内嵌的 `socks5h://user:pass@host` —— **一个都不是 `sk-` 形状** |
 
-第 2 次和第 6 次是同一个形状（打印 flow-style 行），中间隔了很久又犯了一次。
+| 7 | `select-string` 递归扫目录查一把 key | 命中的文件里有 6 个根、上万行，其中一行就是第 2 次那张 flow-style 表 |
+| 8 | **`grep -n 'claude-opus-5-5'`** | 那行 flow-style 表**就是文件的一整行**，`grep` 按行输出，于是**整行**被打印：41 把 `nvapi-`、10 把 ollama、stepfun、weixin、siliconflow、windsurfapi、sub2api、黑煤窑的 key，外加 `socks5h://user:pass@host` 里的代理密码（出现两次） |
+
+第 2、6、8 次是同一个形状（打印 flow-style 行），中间各隔了很久，各又犯了一次。
+第 8 次尤其没道理：动手前刚写下「**绝不打印原始配置行**」，下一秒就用 `grep` 去按内容搜这个文件。
 
 共同点：**每一次都以为自己知道密钥长什么样。**
+
+### 那条最危险的结构性质
+
+`/opt/cli-proxy-api/config.yaml` 的 `api-keys.openai-compatibility` **整个数组是一行**
+（flow-style，9 个 provider 全挤在同一个物理行里）。所以：
+
+**任何按内容匹配的 `grep` / `sed -n 'Np'` / `awk` 都会把全部 60 把 key 一次性打出来。**
+不是"可能"，是必然——匹配到就是打印整行，没有中间状态。
+
+这个文件只能这样碰：
+
+```bash
+# ✅ 用 YAML 解析，只报告结构，不打印内容
+sudo python3 -c "
+import yaml
+d = yaml.safe_load(open('/opt/cli-proxy-api/config.yaml'))
+for p in d['api-keys']['openai-compatibility']:
+    print('  %-20s keys=%d models=%d' % (p['name'], len(p.get('keys') or []), len(p.get('models') or [])))
+"
+
+# ✅ 要改就定点字符串替换，断言命中次数，只打印计数
+# ✅ 要比对密钥就只比长度 + 前缀 + 后缀
+
+# ❌ sudo grep -n '<任何内容>' /opt/cli-proxy-api/config.yaml
+# ❌ sudo sed -n '404p'   同一条路
+```
 
 ## 这个部署里密钥都在哪
 

@@ -12,3 +12,7 @@ config.yaml
 .idea/
 .vscode/
 *.swp
+
+# 我自己用的临时脚本，永远不该进仓库
+# （有一次 git add -A 把它们一起提交了，所以写进这里）
+.tmp-*
