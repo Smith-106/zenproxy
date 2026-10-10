@@ -7,6 +7,24 @@
 
 ### 新增
 
+- **修复：只支持 `/responses` 的模型在 new-api 上永远不可达。**
+  `muse-spark-1.2/1.3-contributor-free` 只在 `/responses` 协议上存在，走 `/chat/completions`
+  必得 `400 ModelProtocolUnsupported`；而 new-api 的渠道是 `type=1`，只会往 `/chat/completions`
+  发。结果是这两个模型**挂在渠道列表里却永远拿不到 200**——列表里有，实际不可达。
+  new-api 内置的 `relay/chat_completions_via_responses.go` 会把 chat 请求改写成 Responses
+  请求再转回来，开关是 `global.chat_completions_to_responses_policy`。按渠道 16/18/19 +
+  模型正则精确开启后，两个模型均返回 200 且内容正确，全部 9 个模型回归通过。
+  过程中确认了三处容易踩的细节：**该策略的默认值是 `all_channels: true`，只改 `enabled`
+  会把所有渠道所有模型的 chat 请求全改走 `/responses`，`big-pickle`/`ling-*` 会立刻全部 400**；
+  值必须是 JSON **字符串**（`UpdateOption` 对非字符串走 `fmt.Sprintf("%v")`，传对象会被格式化成
+  Go map 字面量）；改完**立即生效不用重启**（`handleConfigUpdate` → `UpdateConfigFromMap`）。
+- **文档补上「可达 ≠ 可信」的实测数据。** 修好可达性之后实测输出质量：同一个问题
+  「8+9 是多少，只回数字」，`big-pickle` 4/5 答对、耗 35 token；`muse-spark-1.3` 1–2/5、耗 1976；
+  `muse-spark-1.2` **0/5**、耗 1210。`muse-spark-1.3` 曾直接输出
+  `I see title-generator instructions in the developer content,` —— 它把免费套壳注入的
+  opencode 信封当成了任务本身。这是**结构性**的：套壳则复述信封，不套壳则上游 403，
+  通用调用方两条路都绕不开。文档里如实写了这个代价，以及一行即可停用的回滚方式。
+
 - **新增 `scripts/redact.py` 与 `docs/SECRETS.md`：把脱敏从「手写正则」改成「过工具」。**
   这个仓库的历史里有**六次**凭据被打印进终端/日志，六次同一个原因：脱敏者枚举了自己
   以为存在的模式。新增的通用脱敏器按**键名**与**值形状**两个独立信号判定（任一命中即

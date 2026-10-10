@@ -217,6 +217,62 @@ zen-03 -> 200
 ⚠ 推论：**只挂一个账号时，那 403 会直接漏给客户端**——单渠道没有可重试的第二个选择。
 这也是为什么值得给同一个模型挂上多条渠道，即使它们指向同一个账号（换 IP 也有用）。
 
+### 只支持 `/responses` 的模型：用 new-api 的 `chat_completions_to_responses_policy`
+
+有些模型**只在 `/responses` 协议上存在**，走 `/chat/completions` 一定失败：
+
+```
+muse-spark-1.3-contributor-free   /chat/completions -> 400 ModelProtocolUnsupported
+muse-spark-1.3-contributor-free   /responses        -> 200
+big-pickle                        /chat/completions -> 200
+big-pickle                        /responses        -> 400 ModelProtocolUnsupported
+```
+
+而 new-api 的渠道（`type=1`）只会往 `/chat/completions` 发。结果是**这两个模型挂在渠道上
+却永远拿不到 200**——列表里有，实际不可达。
+
+new-api 内置了一条把它接上的通路：`relay/chat_completions_via_responses.go` 会把
+chat/completions 请求改写成 Responses 请求（`RequestURLPath = "/v1/responses"`），再把
+Responses 回复转回 chat 格式。开关是一个全局设置：
+
+```bash
+# 值必须是 JSON「字符串」（不是对象）——UpdateOption 对非字符串走 fmt.Sprintf("%v")，
+# 传对象会被格式化成 Go 的 map 字面量，解析失败后静默保持原状。
+curl -X PUT -H "Authorization: Bearer <access_token>" -H "New-Api-User: 1" \
+  -H 'Content-Type: application/json' http://127.0.0.1:3000/api/option/ \
+  --data-binary '{"key":"global.chat_completions_to_responses_policy",
+    "value":"{\"enabled\":true,\"all_channels\":false,\"channel_ids\":[16,18,19],\"model_patterns\":[\"^muse-spark-1\\\\.[23]-contributor-free$\"]}"}'
+```
+
+```json
+{ "enabled": true, "all_channels": false,
+  "channel_ids": [16, 18, 19],
+  "model_patterns": ["^muse-spark-1\\.[23]-contributor-free$"] }
+```
+
+几个必须知道的点：
+
+| 要点 | 说明 |
+| :--- | :--- |
+| **键名格式** | `<Register 名>.<结构体 json tag>`。这个策略注册名是 `global`，所以在 `options` 表里就是 `global.chat_completions_to_responses_policy` |
+| **⚠ 默认值是 `all_channels: true`** | **只把 `enabled` 改成 true 就会让所有渠道、所有模型的 chat 请求全部改走 `/responses`**——`big-pickle`、`ling-*` 会立刻全部 400。必须同时给 `channel_ids` 并把 `all_channels` 设为 false |
+| **改完立即生效** | `updateOptionMap` → `handleConfigUpdate` → `UpdateConfigFromMap`，**不用重启 new-api** |
+| **正则是非锚定的** | Go 的 `regexp.MatchString` 是子串匹配，所以要自己写 `^...$`，否则 `muse-spark-1.3` 会误伤一切含该子串的名字 |
+| **判定是「且」** | 渠道命中 **且** 模型正则命中，两个条件都满足才改写 |
+
+**⚠ 实测的一个代价：可达 ≠ 可信。** 这两个模型能返回 200 了，但输出质量很差——它们是推理
+模型，而且免费套壳注入的 opencode 信封会被它当成任务本身。同一个问题「8+9 是多少，只回数字」：
+
+| 模型 | 答对率 | 典型输出 | 同样问题的 token 消耗 |
+| :--- | :---: | :--- | :--- |
+| `big-pickle` | **4/5** | `17` | **35** |
+| `muse-spark-1.3-contributor-free` | 1–2/5 | `17` 或 `8+9 addition` | **1976** |
+| `muse-spark-1.2-contributor-free` | **0/5** | `8+9 addition calculation` | 1210 |
+
+`muse-spark-1.3` 曾直接吐出 **`I see title-generator instructions in the developer content,`**
+——它把套壳注入的信封当成了任务。这是**结构性**的：套壳则模型复述信封，不套壳则上游 403，
+通用调用方两条路都绕不开。要停用只需把该 key 的值改成 `{"enabled":false}`。
+
 ---
 
 ## 六、验证
