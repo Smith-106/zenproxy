@@ -75,3 +75,35 @@ scripts/redact.py --test
 
 **不要做假动作**：把「我本地存的副本」改掉，而外部那把仍然有效，等于没轮换。
 判断标准是**拿旧凭据去用，必须失败**。
+
+---
+
+## 轮换要两个方向都成立，只做一个方向等于没做
+
+上面那条讲的是「只改本地、外部还活着」。**反过来同样成立，而且更阴**：只改服务端、客户端还留着旧副本。
+
+真实事故：CLIProxyAPI 的入站密钥在服务端轮换了，**同时有三份客户端配置在另一台机器上没有被改**：
+
+```
+~/.dsh/.credentials.yaml          CPA_API_KEY
+~/.pi/agent/models.json           providers.cpa-responses.apiKey
+~/.pi/agent/auth.json             cpa-responses.key
+```
+
+症状是 `401 "Invalid API key"`。**这个症状指向的方向是错的**——它看起来像「代理坏了」，
+而实际上代理好好的，是客户端手里那把已经是废的。当时的表现是：一次摘要压缩静默失败、
+以及被判定成「CLIProxyAPI 不能正常工作」。
+
+判断轮换是否完成，标准不是「我改过服务端了」，而是**「没有任何地方还留着旧值」**：
+
+```bash
+# --old / --new 指向存放这两个值的文件（不是值本身，免得进 shell 历史和进程表）
+python3 scripts/sweep-stale-credential.py --old /tmp/old.key --new /tmp/new.key --apply
+python3 scripts/sweep-stale-credential.py --old /tmp/old.key   # 复查，必须 0 命中
+```
+
+只报路径和行号，从不打印凭据。`--apply` 会改写并复查，有残留则退出码 1。
+
+⚠ 一个坑：`--old` / `--new` 文件如果落在被扫描的目录里，**它们自己就会永远命中**，
+于是工具变成一个永远报「有残留」的噪音源。脚本已显式跳过这两个文件（实测踩过，退出码
+本该是 0 却一直是 1）。
