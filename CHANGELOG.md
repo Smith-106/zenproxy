@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **zenproxy 内置 chat→responses 协议桥（muse-spark）。**
+  sub2api 的 `opencode_go`/`zen` 模式没有原生 `/responses` 上游 URL，会把客户端
+  `/v1/responses` 也回退成上游 `/chat/completions`（`forwardResponsesViaRawChatCompletions`）；
+  账号「测试连接」同样写死 chat。结果 `muse-spark-*-contributor-free` 恒得
+  `400 ModelProtocolUnsupported`。现在 zenproxy 在反向入口识别这类模型后，把
+  chat 请求改写成 `/responses`、走 Responses 免费信封，再把折叠结果转回
+  chat completion（非流式 JSON / 流式最小 SSE）。`big-pickle` 等只接 chat 的模型不受影响。
+
 ### 变更
 
 - **免费门改为纯结构工具门，去掉 prompt 注入。**

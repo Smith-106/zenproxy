@@ -117,6 +117,11 @@ type GatePlan struct {
 	// surfaces stream entirely different events, and folding Responses events
 	// with the chat folder would hand the client a valid-looking empty answer.
 	Surface surface
+	// ReplyAsChat means the client spoke chat/completions but the upstream was
+	// rewritten to /responses (muse-spark and friends). The response path folds
+	// Responses events, then converts the object back into a chat completion
+	// (JSON or a minimal chat SSE) before answering.
+	ReplyAsChat bool
 }
 
 // Prepare returns the envelope for a request, or nil when it should travel

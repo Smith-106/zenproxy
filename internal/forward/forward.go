@@ -275,13 +275,49 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		return
 	}
 
+	// Some models refuse /chat/completions and only answer on /responses.
+	// sub2api's opencode_go/zen mode always forwards via raw chat completions
+	// (even for its own /v1/responses clients), so without a rewrite those
+	// models are unreachable. Convert once here; free-tier prepare then sees a
+	// Responses path/body and builds the matching envelope.
+	viaChatToResponses := false
+	clientWantedStream := false
+	preparePath := cur.target.Path
+	if !truncated && surfaceFor(cur.target.Path) == surfaceChat && needsChatViaResponses(modelField(body)) {
+		converted, clientStream, convErr := chatToResponsesBody(body)
+		if convErr == nil {
+			body = converted
+			clientWantedStream = clientStream
+			preparePath = rewritePathChatToResponses(cur.target.Path)
+			viaChatToResponses = true
+			e.log.Info("rewriting chat/completions to responses for protocol-limited model",
+				"model", modelField(converted), "path", preparePath)
+		} else {
+			e.log.Warn("chat→responses rewrite skipped", "err", convErr)
+		}
+	}
+
 	// The free tier is decided by the request envelope, not by the exit, so the
 	// rewrite happens once, before the first attempt, and every retry reuses it.
 	// An oversized body that had to be streamed through unreplayed cannot be
 	// rewritten at all, because it never lands in memory as a whole.
 	var plan *GatePlan
 	if !truncated {
-		plan = e.free.Prepare(cur.target.Path, body, false)
+		plan = e.free.Prepare(preparePath, body, false)
+		if viaChatToResponses {
+			if plan == nil {
+				plan = &GatePlan{
+					Body:        body,
+					Model:       modelField(body),
+					Template:    "chat-via-responses",
+					Stream:      clientWantedStream,
+					Surface:     surfaceResponses,
+					ReplyAsChat: true,
+				}
+			} else {
+				plan.ReplyAsChat = true
+			}
+		}
 	}
 
 	// Which model this request is for decides which exits the upstream will
@@ -319,7 +355,12 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			e.reg.BeginRequest(ent.ID)
 			counted = ent.ID
 		}
-		up, target := cur.up, cur.target
+		up := cur.up
+		targetCopy := *cur.target
+		if viaChatToResponses {
+			targetCopy.Path = rewritePathChatToResponses(targetCopy.Path)
+		}
+		target := &targetCopy
 		exitID := ""
 		proxy := e.reg.ExitForModel(ent.ID, askedModel)
 		if proxy != nil {
@@ -370,10 +411,14 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			e.reg.Record(ent.ID, model.ClassOK, nil)
-			if plan != nil && !plan.Stream {
+			if plan != nil && (!plan.Stream || plan.ReplyAsChat) {
 				// The client asked for a single response and the free tier only
 				// answers streams, so the stream is folded back here.
-				e.writeFolded(w, resp, plan.Surface)
+				// ReplyAsChat also folds: even a streaming chat client gets a
+				// synthetic chat SSE built from the folded Responses object,
+				// because translating every Responses event live is a larger
+				// contract than this bridge needs.
+				e.writeFolded(w, resp, plan)
 				cancel()
 				return
 			}
@@ -430,6 +475,9 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				gateRetried = true
 				if p := e.free.Prepare(target.Path, body, true); p != nil {
 					e.free.Learn(p.Model)
+					if viaChatToResponses {
+						p.ReplyAsChat = true
+					}
 					plan = p
 					e.log.Info("upstream refused this client for a free model; retrying inside the OpenCode envelope",
 						"account", ent.ID, "model", p.Model, "template", p.Template, "stream_folded", !p.Stream)
@@ -617,12 +665,16 @@ func (e *Engine) writeStream(w http.ResponseWriter, resp *http.Response) {
 // The fold is chosen by the surface that was enveloped: chat and Responses
 // stream different events, and the wrong folder does not fail loudly, it
 // returns an empty answer.
-func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, s surface) {
+func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *GatePlan) {
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, e.pol.MaxBodyBytes))
 	resp.Body.Close()
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "failed to read the upstream stream: "+err.Error())
 		return
+	}
+	s := surfaceChat
+	if plan != nil {
+		s = plan.Surface
 	}
 	out, foldErr := foldStream(raw)
 	if s == surfaceResponses {
@@ -635,6 +687,28 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, s surfa
 		// would believe it succeeded and then find no choices to read.
 		writeJSONError(w, http.StatusBadGateway, foldErr)
 		return
+	}
+	if plan != nil && plan.ReplyAsChat {
+		chatJSON, convErr := responsesToChatCompletion(out)
+		if convErr != nil {
+			writeJSONError(w, http.StatusBadGateway, "failed to convert responses reply to chat: "+convErr.Error())
+			return
+		}
+		if plan.Stream {
+			sse, sseErr := chatCompletionToSSE(chatJSON)
+			if sseErr != nil {
+				writeJSONError(w, http.StatusBadGateway, "failed to stream converted chat reply: "+sseErr.Error())
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Del("Content-Length")
+			w.Header().Del("Transfer-Encoding")
+			w.Header().Del("Content-Encoding")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(sse)
+			return
+		}
+		out = chatJSON
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")

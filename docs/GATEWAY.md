@@ -591,6 +591,12 @@ sub2api**（或走管理面保存），否则进程里还是旧的 `base_url`，
 
 客户端用该分组的 API Key 调 `http://<host>:8082/v1/chat/completions` 即可。
 
+**`muse-spark-*` 特别说明：** sub2api 的 zen 模式只会往上游打 `/chat/completions`
+（连客户端 `/v1/responses` 也会被 `forwardResponsesViaRawChatCompletions` 回退）。
+这和 muse-spark「只接 `/responses`」对着干。zenproxy 已在反向入口做
+chat→responses 自动桥接，所以账号测试 / 正式请求走 chat 也能通；不要指望
+sub2api 自己把 chat 转成 responses——它做的是反方向。
+
 ### 正向入口的 CONNECT 曾经是坏的
 
 `v0.1.0` 及之前，正向代理模式**只能处理明文 HTTP，https 全部 404**。而所有 LLM
