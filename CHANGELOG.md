@@ -7,6 +7,15 @@
 
 ### 新增
 
+- **文档警告：在 config.yaml 里删账号是无效的**。实测手删 zen-02 后重启，
+  启动日志照旧 \ccounts=2\、\/admin/api/accounts\ 里 zen-02 依然在——因为
+  egistry.Load()\ 先把 \state.json\ 里的账号**全部**恢复，egistry.Seed()  才补配置里 state 还没有的，且遇到同 ID **直接跳过**（源码注释：Existing state
+  always wins, so an operator editing the file by hand cannot clobber keys that were
+  rotated through the admin API）。所以状态文件对账号是权威的、配置只是播种。
+  唯一正确的删除路径是 \DELETE /admin/api/accounts/{id}\（先 eg.Delete()\ 再
+  eg.Save()\ 重写状态，实测删除后重启不复活）。两份 \config.example.yaml  都在 \state_file\ 上方补了这段警告，并说明手改配置只应作为「让配置与状态保持一致」
+  的配合动作——否则哪天 state.json 被删掉重建，那个账号会被重新播种出来。
+
 - **补回两个「能用但够不着」的免费模型**：muse-spark-1.3-contributor-free 与
   muse-spark-1.2-contributor-free 只在 \/responses\ 上接单，早就被
   \scripts/add-responses-only-models.sh\ 加进了 zenproxy 的 \ree_tier.models\，

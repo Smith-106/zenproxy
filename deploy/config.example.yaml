@@ -173,6 +173,24 @@ accounts:
 # 运行期状态（出口健康度、账号↔出口绑定、轮换计数）的落盘位置。
 #   ★ 默认路线（容器）→ "/data/state.json"，对应 docker-compose.yml 里 ./data:/data
 #     这个约定是死的：只改了 config.yaml 而不改挂载，状态会写进容器可写层，重启即丢。
+#
+#   ⚠⚠ 状态文件对【账号】是权威的，本文件只是「播种」：启动时 registry.Load() 先把
+#      state.json 里的账号全部恢复，registry.Seed() 再补本文件里 state 还没有的。
+#      Seed 遇到同 ID 会**直接跳过**（源码注释：Existing state always wins, so an
+#      operator editing the file by hand cannot clobber keys that were rotated through
+#      the admin API）。
+#
+#      后果：**在这里删掉一个账号是没有任何效果的**——下次启动它会被 state.json
+#      原样复活，连 api_key 一起，而日志照常打印 accounts=N，看不出你改的东西没生效。
+#      实测：手删 zen-02 后重启，启动日志仍是 accounts=2、/admin/api/accounts 里
+#      zen-02 依然在（state.json 是唯一来源，本文件已无该行）。
+#
+#      ★ 正确做法只有两条：
+#        1. DELETE /admin/api/accounts/{id} —— 先 reg.Delete() 再 reg.Save() 重写
+#           state.json，账号立刻消失且重启不复活（推荐，实测通过）；
+#        2. 停服务后手工编辑 state.json 再启动。
+#      在这里删配置行只能作为「配合」动作：让本文件与 state 保持一致，否则哪天
+#      state.json 被删掉重建时，那个账号会从本文件里被重新播种出来。
 state_file: "/data/state.json"
 
 # =============================================================================
