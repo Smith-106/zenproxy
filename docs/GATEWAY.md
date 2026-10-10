@@ -540,10 +540,14 @@ password = 任意非空
 
 1. **zenproxy 与 sub2api 必须在同一个 docker 网络。** 生产的 zenproxy 默认只接
    `new-api_default` + `resin_default`，而 sub2api 在 `llm-internal` 上——
-   **不接网络的话容器名根本解析不了**。接一次：
-   `docker network connect llm-internal zenproxy`。
-   （注意 `docker compose up -d` 重建容器会丢掉手工接的网络，要重接。）
+   **不接网络的话容器名根本解析不了**，而报错是「连不上 zenproxy」，看起来像下游的问题。
    这一条对**任何**下游都成立，包括 CLIProxyAPI。
+
+   ★ **网络要写进 compose 的 `networks:`，不要用 `docker network connect` 手工接。**
+   手工接的网络不在 compose 的期望状态里，下一次 `docker compose up -d` 重建容器就没了，
+   于是下游突然全部失败。仓库的 `deploy/docker-compose.yml` 已经把 `llm-internal`
+   声明为 external 网络并加进 zenproxy 的服务 networks，照它部署即不会丢。
+   （曾经就是靠手工 `docker network connect`，踩过这个坑。）
 2. **`allowed_hosts` 要放行它的健康探针。** sub2api 用
    `http://api64.ipify.org?format=json` 探代理，zenproxy 默认只放行 `opencode.ai`，
    于是探针拿到 403、这条代理永远显示 `latency_status=failed`。

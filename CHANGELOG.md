@@ -7,6 +7,18 @@
 
 ### 新增
 
+- **文档补上「`docker restart` 与 `docker compose up -d` 不能互换」**。判据是改的东西
+  在容器的环境里还是在挂载的文件里：改 `config.yaml`（bind mount）用 `restart` 就够；
+  改 `docker-compose.yml` 的 `environment:` 或 `.env` 里被 compose 引用的变量
+  **必须用 `up -d` 重建**——`restart` 不会重新注入环境变量，容器仍用创建时的旧 env。
+  实测踩过：往 `.env` 加 `ZEN_KEY_02`、compose 加引用行之后用了 `restart`，变量没进容器，
+  zenproxy 的启动闸门直接拒绝启动（`api_key still contains an unexpanded ${ZEN_KEY_02}`），
+  容器进入 `restarting (unhealthy)` 循环、**整个入口下线约一分钟**。
+  这个闸门是刻意的（宁可起不来，也不把字面量当 key 发给上游），恢复动作是
+  `docker compose up -d --force-recreate`。`docs/RESIN.md` 里补了对照表与一行自查命令。
+  同时更正 `docs/GATEWAY.md` 里已经过时的一句：`llm-internal` 现在声明在 compose 里，
+  重建不会再丢，不必再手工 `docker network connect`。
+
 - **文档警告：在 config.yaml 里删账号是无效的**。实测手删 zen-02 后重启，
   启动日志照旧 \ccounts=2\、\/admin/api/accounts\ 里 zen-02 依然在——因为
   egistry.Load()\ 先把 \state.json\ 里的账号**全部**恢复，egistry.Seed()  才补配置里 state 还没有的，且遇到同 ID **直接跳过**（源码注释：Existing state

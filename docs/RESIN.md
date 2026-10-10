@@ -138,6 +138,31 @@ sudo scripts/set-resin-slots.py 24      # 扩到 24 个 slot
 sudo docker restart zenproxy            # config.yaml 是 bind mount，改完要重启才生效
 ```
 
+> ★ **`restart` 与 `up -d` 不能互相替代，选错会让服务起不来。** 判据是「改的东西在
+> 容器的环境里，还是在挂载的文件里」：
+>
+> | 改了什么 | 命令 | 为什么 |
+> | :--- | :--- | :--- |
+> | `config.yaml`（bind mount） | `docker restart` | 进程重读挂载文件即可 |
+> | `docker-compose.yml` 的 `environment:` | **`docker compose up -d`** | `restart` **不会重新注入环境变量**，容器仍用创建时的旧 env |
+> | `.env` 里被 compose 引用的变量 | **`docker compose up -d`** | 同上——`.env` 是 compose 读取的，不是容器直接读的 |
+>
+> 上面第三行是最容易踩的：往 `.env` 里加一个 `ZEN_KEY_02`、又在 compose 的
+> `environment:` 里加一行引用，然后 `docker restart` —— **变量根本没进容器**，
+> 而 zenproxy 的启动闸门会直接拒绝启动：
+>
+> ```
+> account "zen-02" api_key still contains an unexpanded ${ZEN_KEY_02} —
+> set that environment variable, or the literal placeholder would be sent upstream as the key
+> ```
+>
+> 容器于是进入 `restarting (unhealthy)` 循环，**整个入口下线**（实测踩过一次，
+> 服务中断约一分钟）。这个闸门是刻意的——宁可起不来，也不要把字面量 `${ZEN_KEY_02}`
+> 当 key 发给上游。正确的恢复动作就是补一条 `sudo docker compose up -d --force-recreate`。
+>
+> 自查一行：`docker exec zenproxy sh -c 'env | grep -c "^ZEN_KEY"'` 的数字应该等于
+> 你启用的账号数。
+
 扩完之后连打 10 次免费模型请求（`scripts/soak-rotation.sh 10`）的结果是 **10/10 成功**，
 单次 1.3–3.5 秒；池子只有 2 个成员时失败率是肉眼可见的。
 
