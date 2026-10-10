@@ -1375,7 +1375,12 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 		})
 		if err := tlsConn.HandshakeContext(pctx); err != nil {
 			_ = conn.Close()
-			p.MarkFailure(m.ID, "tls: "+err.Error())
+			msg := err.Error()
+			// Handshake errors from crypto/tls already start with "tls:".
+			if !strings.HasPrefix(strings.ToLower(msg), "tls:") {
+				msg = "tls: " + msg
+			}
+			p.MarkFailure(m.ID, msg)
 			return
 		}
 		_ = tlsConn.Close()
