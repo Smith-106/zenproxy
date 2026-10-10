@@ -14,6 +14,11 @@
   按端点设置 `tool_choice`（chat 无客户端工具时 `"none"`；Responses 强制 `"auto"`），
   不改 `messages` / `instructions`。`gateToolNames` 收敛为 `["bash","read"]`，
   `gateMinToolNames=2`。详见 `docs/FREE-TIER.md`。
+- **修复免费模型「HTTP 200 但 content 为空」。**
+  结构门补上 `bash`/`read` 后，推理型免费模型在过小的 `max_tokens`（如 32）下会把
+  预算烧在隐藏 reasoning 上，返回 `finish_reason=length` + 空 content。信封侧对
+  客户端已给出的 `max_tokens` / `max_output_tokens` 设下限 `256`（未设置则不填）；
+  chat 折叠同时保留 `reasoning_content`，避免有用痕迹被折丢。
 
 ### 新增
 

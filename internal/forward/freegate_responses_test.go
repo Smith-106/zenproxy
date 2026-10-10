@@ -267,3 +267,23 @@ func TestSurfaceForRecognisesBothSurfaces(t *testing.T) {
 		}
 	}
 }
+
+func TestPrepareResponsesRaisesTinyMaxOutputTokens(t *testing.T) {
+	raw := body(t, map[string]any{
+		"model":             "muse-spark-1.3-contributor-free",
+		"input":             "hello",
+		"max_output_tokens": 32,
+	})
+	plan := responsesFreeTier(t).Prepare("/zen/v1/responses", raw, false)
+	if plan == nil {
+		t.Fatal("expected a plan")
+	}
+	obj := decode(t, plan.Body)
+	var got int
+	if err := json.Unmarshal(obj["max_output_tokens"], &got); err != nil {
+		t.Fatalf("max_output_tokens: %v", err)
+	}
+	if got != gateMinMaxTokens {
+		t.Errorf("max_output_tokens = %d, want floor %d", got, gateMinMaxTokens)
+	}
+}

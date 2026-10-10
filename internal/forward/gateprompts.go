@@ -15,3 +15,9 @@ var gateToolNames = []string{"bash", "read"}
 
 // gateMinToolNames is how many of gateToolNames a request must carry.
 const gateMinToolNames = 2
+
+// gateMinMaxTokens is the floor applied to a client-supplied token budget on
+// free-tier envelopes. Budgets below this often come back as finish_reason=
+// length with empty content because the model spent the whole allotment on
+// hidden reasoning after the structural tool stubs were attached.
+const gateMinMaxTokens = 256

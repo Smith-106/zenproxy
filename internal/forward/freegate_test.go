@@ -103,6 +103,40 @@ func TestPrepareInjectsToolsWithoutTouchingMessages(t *testing.T) {
 	}
 }
 
+// Tiny client budgets are raised so reasoning-heavy free models do not come
+// back as finish_reason=length with an empty content field.
+func TestPrepareRaisesTinyMaxTokens(t *testing.T) {
+	raw := body(t, map[string]any{
+		"model":      "big-pickle",
+		"stream":     false,
+		"max_tokens": 32,
+		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	plan := testFreeTier(t).Prepare("/zen/v1/chat/completions", raw, false)
+	if plan == nil {
+		t.Fatal("expected a plan")
+	}
+	obj := decode(t, plan.Body)
+	var got int
+	if err := json.Unmarshal(obj["max_tokens"], &got); err != nil {
+		t.Fatalf("max_tokens: %v", err)
+	}
+	if got != gateMinMaxTokens {
+		t.Errorf("max_tokens = %d, want floor %d", got, gateMinMaxTokens)
+	}
+
+	rawOK := body(t, map[string]any{
+		"model":      "big-pickle",
+		"max_tokens": 512,
+		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	objOK := decode(t, testFreeTier(t).Prepare("/zen/v1/chat/completions", rawOK, false).Body)
+	var kept int
+	if err := json.Unmarshal(objOK["max_tokens"], &kept); err != nil || kept != 512 {
+		t.Errorf("budget above the floor must stay put: %d err=%v", kept, err)
+	}
+}
+
 // A request that already carries tools must keep them in front, gain any
 // missing gate names, and leave the client's tool_choice alone.
 func TestPreparePreservesClientToolsAndToolChoice(t *testing.T) {

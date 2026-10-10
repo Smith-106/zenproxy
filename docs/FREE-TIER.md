@@ -141,6 +141,13 @@ Responses 只能设 `"auto"`（上游硬限制）。
 响应：tool_calls=[get_weather({"city": "Paris"})]     ← 调的是客户端的工具，不是占位
 ```
 
+### 3.3b token 预算下限
+
+结构门补上工具后，部分推理型免费模型会把很小的 `max_tokens`（如 32）全部烧在
+隐藏 reasoning 上，返回 `finish_reason=length` + 空 `content`。信封对**已经写出的**
+`max_tokens`（chat）/ `max_output_tokens`（Responses）设下限 `256`；客户端没写预算
+则不填，沿用上游默认。chat 折叠同时保留 `reasoning_content`。
+
 ### 3.4 上游压缩：不要转发 `accept-encoding`
 
 调用方的 `accept-encoding: br, zstd` **不会**被转发。原因不是门禁——是 `net/http`

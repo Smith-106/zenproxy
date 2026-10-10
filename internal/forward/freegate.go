@@ -210,6 +210,12 @@ func (f *FreeTier) prepareChat(body []byte, forced bool) *GatePlan {
 		obj["tool_choice"] = json.RawMessage(`"none"`)
 	}
 
+	// Reasoning-heavy free models often burn a tiny max_tokens budget on
+	// hidden reasoning and return finish_reason=length with empty content.
+	// Raise only when the client set a budget below the floor; omit/absent
+	// stays omitted so upstream defaults remain.
+	ensureMinTokenBudget(obj, "max_tokens", gateMinMaxTokens)
+
 	obj["stream"] = json.RawMessage("true")
 	out, err := json.Marshal(obj)
 	if err != nil {
@@ -293,6 +299,8 @@ func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 	// Responses rejects tool_choice values other than "auto" whenever tools are
 	// present (HTTP 400: only `"auto"` is supported). Force it unconditionally.
 	obj["tool_choice"] = json.RawMessage(`"auto"`)
+
+	ensureMinTokenBudget(obj, "max_output_tokens", gateMinMaxTokens)
 
 	obj["stream"] = json.RawMessage("true")
 	out, err := json.Marshal(obj)
@@ -439,6 +447,31 @@ func detectToolShape(tools []json.RawMessage) toolShape {
 		}
 	}
 	return toolShapeNested
+}
+
+// ensureMinTokenBudget raises a numeric token-budget field when the client set
+// one below gateMinMaxTokens. Absent fields are left absent.
+func ensureMinTokenBudget(obj map[string]json.RawMessage, field string, floor int) {
+	raw, ok := obj[field]
+	if !ok {
+		return
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return
+	}
+	var n float64
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return
+	}
+	if n >= float64(floor) {
+		return
+	}
+	bumped, err := json.Marshal(floor)
+	if err != nil {
+		return
+	}
+	obj[field] = bumped
 }
 
 // toolTopUpStub is the wording of the tools this proxy adds purely to satisfy

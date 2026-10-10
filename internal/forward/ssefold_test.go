@@ -92,6 +92,31 @@ data: [DONE]
 	}
 }
 
+// Reasoning deltas must survive the fold. Dropping them turns a partially
+// useful reply into an empty content field with no trace of what the model did.
+func TestFoldStreamKeepsReasoningContent(t *testing.T) {
+	stream := `data: {"id":"cR","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}
+data: {"id":"cR","choices":[{"index":0,"delta":{"reasoning_content":"ing","content":"Hi"},"finish_reason":null}]}
+data: {"id":"cR","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+`
+	out, errMsg := foldStream([]byte(stream))
+	if errMsg != "" {
+		t.Fatalf("fold failed: %s", errMsg)
+	}
+	var got foldedCompletion
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	msg := got.Choices[0].Message
+	if msg.Content != "Hi" {
+		t.Errorf("content = %q", msg.Content)
+	}
+	if msg.ReasoningContent != "thinking" {
+		t.Errorf("reasoning_content = %q", msg.ReasoningContent)
+	}
+}
+
 // An upstream that accepts the request and then says nothing must produce an
 // error the client can see, not an empty success.
 //

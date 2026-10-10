@@ -25,15 +25,16 @@ import (
 // caller saw `{"error":…}` under a 200 and no `choices` to read.
 func foldStream(raw []byte) ([]byte, string) {
 	var (
-		id      string
-		model   string
-		created int64
-		content strings.Builder
-		finish  string
-		usage   json.RawMessage
-		tools   = map[int]*foldedToolCall{}
-		order   []int
-		seen    bool
+		id        string
+		model     string
+		created   int64
+		content   strings.Builder
+		reasoning strings.Builder
+		finish    string
+		usage     json.RawMessage
+		tools     = map[int]*foldedToolCall{}
+		order     []int
+		seen      bool
 	)
 
 	sc := bufio.NewScanner(bytes.NewReader(raw))
@@ -74,6 +75,7 @@ func foldStream(raw []byte) ([]byte, string) {
 		}
 		for _, ch := range chunk.Choices {
 			content.WriteString(ch.Delta.text())
+			reasoning.WriteString(ch.Delta.reasoningText())
 			for _, tc := range ch.Delta.ToolCalls {
 				acc := tools[tc.Index]
 				if acc == nil {
@@ -100,6 +102,9 @@ func foldStream(raw []byte) ([]byte, string) {
 		return nil, "upstream returned an unreadable event stream"
 	}
 	msg := foldedMessage{Role: "assistant", Content: content.String()}
+	if reasoning.Len() > 0 {
+		msg.ReasoningContent = reasoning.String()
+	}
 	for _, i := range order {
 		tc := tools[i]
 		tc.Index = i
@@ -142,16 +147,25 @@ type streamChunk struct {
 // streamDelta keeps content as raw JSON: a provider that streams something
 // other than a plain string must not break the reassembly.
 type streamDelta struct {
-	Content   json.RawMessage  `json:"content"`
-	ToolCalls []streamToolCall `json:"tool_calls"`
+	Content          json.RawMessage  `json:"content"`
+	ReasoningContent json.RawMessage  `json:"reasoning_content"`
+	ToolCalls        []streamToolCall `json:"tool_calls"`
 }
 
 func (d streamDelta) text() string {
-	if len(d.Content) == 0 {
+	return rawJSONString(d.Content)
+}
+
+func (d streamDelta) reasoningText() string {
+	return rawJSONString(d.ReasoningContent)
+}
+
+func rawJSONString(raw json.RawMessage) string {
+	if len(raw) == 0 {
 		return ""
 	}
 	var s string
-	if err := json.Unmarshal(d.Content, &s); err != nil {
+	if err := json.Unmarshal(raw, &s); err != nil {
 		return ""
 	}
 	return s
@@ -183,9 +197,10 @@ type foldedChoice struct {
 }
 
 type foldedMessage struct {
-	Role      string           `json:"role"`
-	Content   string           `json:"content"`
-	ToolCalls []foldedToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	ToolCalls        []foldedToolCall `json:"tool_calls,omitempty"`
 }
 
 type foldedToolCall struct {
