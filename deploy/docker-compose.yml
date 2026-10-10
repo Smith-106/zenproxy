@@ -99,6 +99,9 @@ services:
     networks:
       - new-api_default
       - resin_default
+      # CLIProxyAPI 与 sub2api 都在这张网上；zenproxy 作为它们的上游必须也在。
+      # 下游若在别的网络上，同样要在这里加一条，不要用 docker network connect 手工接。
+      - llm-internal
 
 networks:
   # external: true = 只加入，不创建、不删除、不改属性。这两个网络分别由 new-api 和
@@ -110,3 +113,10 @@ networks:
   resin_default:
     external: true
     name: resin_default
+  # CPA 与 sub2api 都在这张网上；zenproxy 作为它们的上游必须也在。
+  # ★ 这一条必须写在文件里，不能靠 `docker network connect` 手工加：那个连接不在
+  #   compose 的期望状态里，下一次 `docker compose up -d` 重建容器就没了，而症状是
+  #   下游突然报「连不上 zenproxy」——看起来像下游的问题。
+  llm-internal:
+    external: true
+    name: llm-internal
