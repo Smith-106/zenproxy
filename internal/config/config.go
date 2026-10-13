@@ -144,6 +144,11 @@ type Health struct {
 	// every 30 minutes. A single success resets the counter, so an exit that
 	// still works now and then is never retired. 0 disables retirement.
 	RetireAfter int `yaml:"retire_after"`
+	// ProbeConcurrency caps how many exits one probe round dials at once.
+	// 0 defaults to 64. Pools in the thousands of exits must keep this well
+	// below the provider's concurrent-connection allowance — an unbounded
+	// round is what tripped "CONNECT reply: 429 Not Enough Connections".
+	ProbeConcurrency int `yaml:"probe_concurrency"`
 }
 
 // Policy configures retry and rotation behaviour.

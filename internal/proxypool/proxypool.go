@@ -1515,11 +1515,28 @@ func (p *Pool) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// ProbeAll probes every exit that is still in rotation, concurrently.
-// Retired exits are skipped: they are out of the pool, so spending probe
-// budget on them would be paying rent on an empty room.
+// ProbeAll probes every exit that is still in rotation, under a bounded
+// concurrency. Retired exits are skipped: they are out of the pool, so
+// spending probe budget on them would be paying rent on an empty room.
+//
+// The bound matters at pool sizes in the thousands. Unbounded, every tick
+// opened one CONNECT+TLS per exit at the same instant — measured against a
+// provider that fronts all its exits from a handful of POPs, 3544 concurrent
+// probes every 2 minutes tripped the provider's connection quota
+// ("CONNECT reply: 429 Not Enough Connections"), which then also starved live
+// traffic and quarantined healthy exits in a cascade. The cap (and a longer
+// interval, set together) turns the probe round into a gentle trickle.
+//
+// The cap is a per-round gate, not a global throttle: one round finishes
+// before the ticker fires the next only because the interval is expected to
+// exceed round time at these sizes.
 func (p *Pool) ProbeAll(ctx context.Context) {
 	var wg sync.WaitGroup
+	cap := p.health.ProbeConcurrency
+	if cap <= 0 {
+		cap = 64
+	}
+	sem := make(chan struct{}, cap)
 	for _, m := range p.members {
 		m.mu.Lock()
 		ret := m.retired
@@ -1527,9 +1544,15 @@ func (p *Pool) ProbeAll(ctx context.Context) {
 		if ret {
 			continue
 		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
 		wg.Add(1)
 		go func(m *member) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			p.probe(ctx, m)
 		}(m)
 	}
