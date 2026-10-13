@@ -111,6 +111,14 @@ type Server struct {
 type Proxies struct {
 	Resin  Resin    `yaml:"resin"`
 	Static []string `yaml:"static"`
+	// DirectEgress adds one pseudo-exit (id "direct") that dials the target
+	// from the daemon's own host with no proxy at all. Renting thousands of
+	// egresses from one provider concentrates them on that provider's shared
+	// edge POPs; measured, when those POPs died at TCP connect the server's
+	// own network still reached the target. The direct member is probed and
+	// judged like any other exit, so provider-wide flaps fall back to local
+	// egress through ordinary rotation instead of through 502s.
+	DirectEgress bool `yaml:"direct_egress"`
 }
 
 // Resin describes a Resin forward-proxy listener.

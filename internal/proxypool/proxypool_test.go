@@ -1,6 +1,7 @@
 package proxypool
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"log/slog"
@@ -375,6 +376,77 @@ func TestSpecsFromConfigExpandsResin(t *testing.T) {
 	}
 	if specs[2].ID != "static-01" {
 		t.Fatalf("specs[2].ID = %q", specs[2].ID)
+	}
+}
+
+// The direct pseudo-exit exists so a provider-wide edge outage cannot take
+// every upstream path down at once: its URL carries no host, and both the
+// HTTP transport and the raw-tunnel dial behave like a plain local client.
+func TestDirectExitServesLikeALocalClient(t *testing.T) {
+	var hitRawConn bool
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			hitRawConn = true
+			conn.Close()
+		}
+	}()
+
+	dx, err := New("direct", "direct://")
+	if err != nil {
+		t.Fatalf("New direct: %v", err)
+	}
+	if dx.Scheme != "direct" || dx.Addr != "" {
+		t.Fatalf("direct proxy parsed wrong: scheme=%q addr=%q", dx.Scheme, dx.Addr)
+	}
+	if got := dx.Redacted(); got != "direct://local-egress" {
+		t.Fatalf("Redacted = %q", got)
+	}
+
+	// HTTP path: a request via the direct transport must reach the target.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer srv.Close()
+	resp, err := dx.Client(time.Second, 0).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("direct HTTP request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("direct HTTP status = %d", resp.StatusCode)
+	}
+
+	// Raw-tunnel path (reachability probe): must dial the target directly.
+	if _, err := dx.DialContext(context.Background(), "tcp", ln.Addr().String()); err != nil {
+		t.Fatalf("direct DialContext: %v", err)
+	}
+	if !hitRawConn {
+		t.Fatal("DialContext never reached the target listener")
+	}
+}
+
+// DirectEgress adds exactly one pool member, id "direct".
+func TestSpecsFromConfigAddsDirectEgress(t *testing.T) {
+	specs := SpecsFromConfig(config.Proxies{
+		Static:       []string{"http://1.2.3.4:8080"},
+		DirectEgress: true,
+	})
+	if len(specs) != 2 || specs[1].ID != "direct" || specs[1].URL != "direct://" {
+		t.Fatalf("specs = %+v", specs)
+	}
+	specs = SpecsFromConfig(config.Proxies{Static: []string{"http://1.2.3.4:8080"}})
+	if len(specs) != 1 {
+		t.Fatalf("default must not add direct: %+v", specs)
 	}
 }
 

@@ -78,16 +78,30 @@ type Proxy struct {
 	transport *http.Transport
 }
 
-// New parses a proxy URL. Supported schemes: http, https, socks5, socks5h.
+// New parses a proxy URL. Supported schemes: http, https, socks5, socks5h,
+// and direct — a pseudo-exit that dials the target from the local host with
+// no proxy at all, so the daemon keeps an upstream path open even when every
+// rented egress at once is unreachable (measured: the shared 3129 edge POPs
+// timed out at TCP while the server's own network reached the target fine).
 func New(id, raw string) (*Proxy, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("proxy %q: %w", id, err)
 	}
+	if u.Scheme == "direct" {
+		p := &Proxy{
+			ID:     id,
+			Raw:    raw,
+			Scheme: u.Scheme,
+			url:    u,
+		}
+		p.transport = p.newTransport()
+		return p, nil
+	}
 	switch u.Scheme {
 	case "http", "https", "socks5", "socks5h":
 	default:
-		return nil, fmt.Errorf("proxy %q: unsupported scheme %q (want http, https, socks5 or socks5h)", id, u.Scheme)
+		return nil, fmt.Errorf("proxy %q: unsupported scheme %q (want http, https, socks5, socks5h or direct)", id, u.Scheme)
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("proxy %q: missing host", id)
@@ -118,6 +132,19 @@ func (p *Proxy) newTransport() *http.Transport {
 		// Upstream responses can be long-lived SSE streams; never let the
 		// transport close a stream body underneath us.
 		ResponseHeaderTimeout: 0,
+	}
+	if p.Scheme == "direct" {
+		// No proxy at all: plain dial from the local host, capped like the
+		// SOCKS path so a dead local NIC turns into rotation fuel instead of
+		// a stuck request. No ForceAttemptHTTP2: the measured-good direct
+		// request used HTTP/1.1, keep parity.
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			var d net.Dialer
+			return d.DialContext(dialCtx, network, addr)
+		}
+		return t
 	}
 	if p.Scheme == "http" || p.Scheme == "https" {
 		// net/http handles CONNECT and Proxy-Authorization for us.
@@ -152,6 +179,9 @@ func (p *Proxy) Client(timeout, idle time.Duration) *http.Client {
 
 // Redacted renders the exit for logs and metrics without credentials.
 func (p *Proxy) Redacted() string {
+	if p.Scheme == "direct" {
+		return "direct://local-egress"
+	}
 	if p.Username == "" {
 		return p.Scheme + "://" + p.Addr
 	}
@@ -302,6 +332,15 @@ func socksErr(code byte) error {
 // DialContext opens a raw TCP tunnel to addr through this exit. Used by the
 // reachability probe and by the forward-proxy (CONNECT) ingress.
 func (p *Proxy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if p.Scheme == "direct" {
+		// The local host IS the egress: dial the target directly.
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, fmt.Errorf("direct dial %s: %w", addr, err)
+		}
+		return conn, nil
+	}
 	if p.Scheme == "socks5" || p.Scheme == "socks5h" {
 		return p.dialSOCKS5(ctx, network, addr, p.Scheme == "socks5h")
 	}
@@ -570,6 +609,9 @@ func SpecsFromConfig(pc config.Proxies) []Spec {
 	}
 	for i, raw := range pc.Static {
 		specs = append(specs, Spec{ID: fmt.Sprintf("static-%02d", i+1), URL: raw})
+	}
+	if pc.DirectEgress {
+		specs = append(specs, Spec{ID: "direct", URL: "direct://"})
 	}
 	return specs
 }
