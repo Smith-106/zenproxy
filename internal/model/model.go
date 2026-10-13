@@ -213,6 +213,9 @@ type ProxyHealth struct {
 
 // PruneReport is the outcome of one prune pass over the egress pool.
 type PruneReport struct {
+	// Refused is non-empty when the pass ran nothing: the outage breaker was
+	// open and the operator did not force it, so the pool was left untouched.
+	Refused        string   `json:"refused,omitempty"`
 	Retired        []string `json:"retired"`
 	AlreadyRetired []string `json:"already_retired"`
 	UsableAfter    int      `json:"usable_after"`

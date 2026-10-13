@@ -20,6 +20,45 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// outageStateOf packs the breaker's tri-state for compact assertions.
+type outageState struct {
+	tripped bool
+	fails   int
+	limit   int
+}
+
+func outageStateOf(pool *Pool) outageState {
+	tripped, fails, limit := pool.OutageState()
+	return outageState{tripped: tripped, fails: fails, limit: limit}
+}
+
+// createTestPool builds an n-exit pool with a fully specified health config —
+// the version of retirePool for tests that need to pin breaker knobs.
+func createTestPool(t *testing.T, n int, hc config.Health) *Pool {
+	t.Helper()
+	specs := make([]Spec, 0, n)
+	for i := 0; i < n; i++ {
+		specs = append(specs, Spec{
+			ID:  string(rune('a' + i)),
+			URL: "http://127.0.0.1:9",
+		})
+	}
+	if hc.Timeout == 0 {
+		hc.Timeout = time.Second
+	}
+	if hc.Quarantine == 0 {
+		hc.Quarantine = time.Minute
+	}
+	if hc.MaxBackoff == 0 {
+		hc.MaxBackoff = time.Minute
+	}
+	pool, err := NewPool(specs, hc, testLogger())
+	if err != nil {
+		t.Fatalf("NewPool: %v", err)
+	}
+	return pool
+}
+
 // socks5Fixture is a minimal RFC 1928/1929 server. The SOCKS5 client in this
 // package is hand-rolled, so it is the riskiest code here and deserves a real
 // peer rather than a mock interface.
@@ -539,12 +578,12 @@ func TestRealSuccessClearsPoisonStreak(t *testing.T) {
 
 func TestPoisonTLSDetector(t *testing.T) {
 	cases := map[string]bool{
-		"x509: certificate is not valid for any names":     true,
-		"tls: failed to verify certificate":                true,
-		"certificate signed by unknown authority":          true,
-		"Get \"https://opencode.ai\": unexpected EOF":      false,
-		"socks5: general failure":                          false,
-		"":                                                 false,
+		"x509: certificate is not valid for any names": true,
+		"tls: failed to verify certificate":            true,
+		"certificate signed by unknown authority":      true,
+		"Get \"https://opencode.ai\": unexpected EOF":  false,
+		"socks5: general failure":                      false,
+		"":                                             false,
 	}
 	for in, want := range cases {
 		if got := PoisonTLS(in); got != want {
@@ -653,7 +692,7 @@ func TestPruneRetiresUnusableExitsAndReportsThem(t *testing.T) {
 		t.Fatalf("a healthy exit was advertised as prunable: %+v", h)
 	}
 
-	rep := pool.Prune("test")
+	rep := pool.Prune("test", false)
 	if len(rep.Retired) != 2 || rep.Retired[0] != "b" || rep.Retired[1] != "c" {
 		t.Fatalf("Retired = %v, want [b c]", rep.Retired)
 	}
@@ -662,7 +701,7 @@ func TestPruneRetiresUnusableExitsAndReportsThem(t *testing.T) {
 	}
 
 	// Idempotent: a second pass retires nothing and reports the same state.
-	rep2 := pool.Prune("test")
+	rep2 := pool.Prune("test", false)
 	if len(rep2.Retired) != 0 || len(rep2.AlreadyRetired) != 2 {
 		t.Fatalf("second prune = %+v, want nothing retired and both already retired", rep2)
 	}
@@ -679,12 +718,155 @@ func TestPruneReportsAnEmptiedPool(t *testing.T) {
 	pool := retirePool(t, 1, 0)
 	pool.MarkFailure("a", "dial: refused")
 	pool.MarkFailure("a", "dial: refused")
-	rep := pool.Prune("test")
+	rep := pool.Prune("test", false)
 	if !rep.PoolEmpty || rep.UsableAfter != 0 {
 		t.Fatalf("Prune = %+v, want PoolEmpty with zero usable", rep)
 	}
 	if got := pool.Pick(""); got == nil {
 		t.Fatal("Pick returned nil after the pool emptied; it must limp")
+	}
+}
+
+// The measured massacre behind the breaker: one provider backing the whole
+// pool glitches for an hour, every exit racks up its own consecutive-failure
+// streak, and RetireAfter executes all of them (3518 of 3544 overnight, none
+// individually dead). The breaker must suspend retirement while failures are
+// pool-wide and hand judgment back the moment any success lands, retaining
+// the accrued streaks so genuinely dead exits still leave promptly.
+func TestOutageBreakerDefersRetirementWhileFailuresArePoolWide(t *testing.T) {
+	pool := createTestPool(t, 3, config.Health{
+		Timeout:          time.Second,
+		FailureThreshold: 1,
+		Quarantine:       time.Minute,
+		MaxBackoff:       time.Minute,
+		RetireAfter:      2,
+		OutageThreshold:  6,
+	})
+
+	// Two exits retire before the breaker has evidence: the breaker needs
+	// consecutive pool-wide failures to open, and the first casualties fall
+	// inside that evidence window. This is inherent, and acceptable — the
+	// incident it guards against was a sustained storm, not two failures.
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("a", "dial: refused")
+	if h := healthOf(t, pool, "a"); !h.Retired {
+		t.Fatalf("pre-trip retirement must behave as before: %+v", h)
+	}
+
+	// Drive the pool-wide run to the threshold: b (2) + c (2) reaches 6.
+	pool.MarkFailure("b", "dial: refused")
+	pool.MarkFailure("b", "dial: refused")
+	pool.MarkFailure("c", "dial: refused")
+	pool.MarkFailure("c", "dial: refused")
+	if !pool.OutageActive() {
+		t.Fatal("breaker did not open after 6 consecutive pool-wide failures")
+	}
+	// c's streak already sits at RetireAfter, yet it must survive.
+	if h := healthOf(t, pool, "c"); h.Retired {
+		t.Fatalf("exit retired while the breaker was open: %+v", h)
+	}
+	// Deeper failures keep deferring, not executing.
+	pool.MarkFailure("c", "dial: refused")
+	pool.MarkFailure("c", "dial: refused")
+	if h := healthOf(t, pool, "c"); h.Retired {
+		t.Fatalf("deferred exit was executed on a later failure: %+v", h)
+	}
+
+	// One success anywhere lifts the breaker and heals the successful exit.
+	pool.MarkSuccess("c", time.Millisecond)
+	if pool.OutageActive() {
+		t.Fatal("breaker stayed open after a success")
+	}
+	if h := healthOf(t, pool, "c"); h.ConsecFails != 0 {
+		t.Fatalf("success must clear the streak: %+v", h)
+	}
+
+	// Judgment resumes: an exit that stays dead after recovery retires on the
+	// next failure past RetireAfter — individually, not by massacre.
+	pool.MarkFailure("b", "dial: refused")
+	pool.MarkFailure("b", "dial: refused")
+	if h := healthOf(t, pool, "b"); !h.Retired {
+		t.Fatalf("post-recovery retirement did not resume: %+v", h)
+	}
+}
+
+// A soft failure (429/5xx) proves the tunnel carried traffic, so it feeds the
+// breaker as life: an account-level quota storm must not freeze the pool.
+func TestSoftFailureCountsAsLifeForTheBreaker(t *testing.T) {
+	pool := createTestPool(t, 2, config.Health{
+		Timeout:          time.Second,
+		FailureThreshold: 1,
+		Quarantine:       time.Minute,
+		MaxBackoff:       time.Minute,
+		RetireAfter:      5,
+		OutageThreshold:  3,
+	})
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("b", "dial: refused")
+	st := outageStateOf(pool)
+	if !st.tripped {
+		t.Fatal("precondition: breaker should be open after 3 pool-wide failures")
+	}
+	pool.MarkSoftFailure("b", "429 quota")
+	if pool.OutageActive() {
+		t.Fatal("a 429 is evidence of life and must lift the breaker")
+	}
+	if st2 := outageStateOf(pool); st2.fails != 0 {
+		t.Fatalf("lifted breaker must reset the failure run, got %d", st2.fails)
+	}
+}
+
+// Disabling the breaker restores pre-breaker semantics: retirement fires on
+// streak alone, exactly as pools behaved before the massacre incident.
+func TestOutageBreakerCanBeDisabled(t *testing.T) {
+	pool := createTestPool(t, 1, config.Health{
+		Timeout:          time.Second,
+		FailureThreshold: 1,
+		Quarantine:       time.Minute,
+		MaxBackoff:       time.Minute,
+		RetireAfter:      2,
+		OutageThreshold:  -1,
+	})
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("a", "dial: refused")
+	if pool.OutageActive() {
+		t.Fatal("breaker must never open when disabled")
+	}
+	if h := healthOf(t, pool, "a"); !h.Retired {
+		t.Fatalf("disabled breaker left retirement deferred: %+v", h)
+	}
+}
+
+// Pruning during an open breaker would execute the whole quarantined pool for
+// a correlated failure — refused unless the operator forces it.
+func TestPruneRefusedWhileOutageBreakerIsOpen(t *testing.T) {
+	pool := createTestPool(t, 2, config.Health{
+		Timeout:          time.Second,
+		FailureThreshold: 1,
+		Quarantine:       time.Minute,
+		MaxBackoff:       time.Minute,
+		RetireAfter:      5, // high: no exit may retire from streaks in this test
+		OutageThreshold:  3,
+	})
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("a", "dial: refused")
+	pool.MarkFailure("b", "dial: refused")
+	if !pool.OutageActive() {
+		t.Fatal("precondition: breaker should be open")
+	}
+
+	rep := pool.Prune("test", false)
+	if rep.Refused == "" || len(rep.Retired) != 0 {
+		t.Fatalf("prune must refuse while the breaker is open: %+v", rep)
+	}
+	if h := healthOf(t, pool, "a"); h.Retired {
+		t.Fatal("refused prune must not execute exits")
+	}
+
+	forced := pool.Prune("test", true)
+	if forced.Refused != "" || len(forced.Retired) != 2 {
+		t.Fatalf("forced prune must run: %+v", forced)
 	}
 }
 

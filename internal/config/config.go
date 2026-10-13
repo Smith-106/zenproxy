@@ -149,6 +149,20 @@ type Health struct {
 	// below the provider's concurrent-connection allowance — an unbounded
 	// round is what tripped "CONNECT reply: 429 Not Enough Connections".
 	ProbeConcurrency int `yaml:"probe_concurrency"`
+	// OutageThreshold is the global-failure circuit breaker guarding
+	// retirement from false execution. When failures are pool-wide — one
+	// provider backing every exit glitches for an hour — each exit still
+	// racks up its own consecutive-failure streak and RetireAfter executes
+	// all of them; measured once at 3518 of 3544 exits retired overnight,
+	// none of them individually dead. The breaker trips after this many
+	// consecutive failure outcomes with no success of any kind (request,
+	// probe, even a 429, which proves the tunnel carried traffic) anywhere
+	// in the pool, and while it is open no exit is retired: quarantine still
+	// applies (it expires on its own), streaks keep accruing, and the moment
+	// any success lands the breaker lifts and individual retirement resumes,
+	// cleanly killing whatever stayed dead and forgetting what recovered.
+	// 0 defaults to 40; a negative value disables the breaker.
+	OutageThreshold int `yaml:"outage_threshold"`
 }
 
 // Policy configures retry and rotation behaviour.

@@ -443,6 +443,82 @@ type Pool struct {
 	dirty     atomic.Bool
 
 	rr atomic.Uint64
+
+	// outageMu guards the global-failure circuit breaker (see
+	// noteFailureOutcome). It is deliberately a leaf lock — never held while
+	// taking p.mu or a member lock — so MarkFailure's hold order
+	// p.mu.RLock -> member.mu -> outageMu cannot deadlock.
+	outageMu    sync.Mutex
+	globalFails int
+	outage      bool
+}
+
+// defaultOutageThreshold is how many consecutive pool-wide failure outcomes
+// trip the retirement breaker when config leaves OutageThreshold at zero.
+// Twelve-attempt rotation means roughly four fully-failed requests; measured
+// against the incident that motivated the breaker (3518 of 3544 exits
+// retired overnight by one provider-wide glitch), 40 catches the mass
+// failure while staying well above single-exit noise, which any success
+// elsewhere in the pool keeps reset.
+const defaultOutageThreshold = 40
+
+// outageLimit resolves the configured breaker sensitivity. Zero means use
+// the default; negative disables the breaker entirely.
+func (p *Pool) outageLimit() int {
+	switch t := p.health.OutageThreshold; {
+	case t < 0:
+		return 0
+	case t == 0:
+		return defaultOutageThreshold
+	default:
+		return t
+	}
+}
+
+// noteFailureOutcome feeds the breaker one more failure. It reports whether
+// the breaker is open, in which case callers must not retire.
+func (p *Pool) noteFailureOutcome() bool {
+	p.outageMu.Lock()
+	defer p.outageMu.Unlock()
+	p.globalFails++
+	limit := p.outageLimit()
+	if limit > 0 && !p.outage && p.globalFails >= limit {
+		p.outage = true
+		p.log.Warn("outage circuit breaker OPEN — retirement suspended pool-wide",
+			"consecutive_failures", p.globalFails, "threshold", limit,
+			"hint", "failures look correlated (provider-wide); quarantine still applies, streaks keep accruing, breaker lifts on the next success")
+	}
+	return p.outage
+}
+
+// noteSuccessOutcome records one pool-wide success — a request that got
+// headers, a successful probe, even a soft 429, all of which prove some
+// tunnel carried traffic — clearing the breaker and the failure run.
+func (p *Pool) noteSuccessOutcome() {
+	p.outageMu.Lock()
+	was := p.outage
+	p.globalFails = 0
+	p.outage = false
+	p.outageMu.Unlock()
+	if was {
+		p.log.Info("outage circuit breaker lifted — retirement resumes individually",
+			"hint", "exits that stayed dead retire again on their next failure; streaks accrued during the outage are preserved")
+	}
+}
+
+// OutageActive reports whether the retirement breaker is currently open.
+func (p *Pool) OutageActive() bool {
+	p.outageMu.Lock()
+	defer p.outageMu.Unlock()
+	return p.outage
+}
+
+// OutageState returns the breaker snapshot for consoles: tripped, current
+// consecutive-failure count, and the effective threshold (0 when disabled).
+func (p *Pool) OutageState() (tripped bool, globalFails, threshold int) {
+	p.outageMu.Lock()
+	defer p.outageMu.Unlock()
+	return p.outage, p.globalFails, p.outageLimit()
 }
 
 // Spec is one exit to build the pool from.
@@ -755,6 +831,7 @@ func (p *Pool) MarkSuccess(id string, latency time.Duration) {
 	}
 	m.lastCheck = time.Now()
 	p.markDirty()
+	p.noteSuccessOutcome()
 }
 
 // MarkFailure records a bad round trip and quarantines the exit once the
@@ -778,6 +855,12 @@ func (p *Pool) MarkFailure(id, reason string) {
 	m.lastErr = reason
 	m.lastCheck = time.Now()
 
+	// Feed the global breaker before deciding anything per-exit: during a
+	// provider-wide outage every exit looks individually dead, and acting on
+	// that perception is exactly the mass-retire false positive the breaker
+	// exists to prevent (3518 of 3544 exits, one bad night).
+	outage := p.noteFailureOutcome()
+
 	threshold := p.health.FailureThreshold
 	if threshold < 1 {
 		threshold = 1
@@ -800,13 +883,18 @@ func (p *Pool) MarkFailure(id, reason string) {
 		p.log.Warn("egress quarantined",
 			"exit", id, "failures", m.failures, "consecutive", m.consecFails,
 			"poison_consec", m.poisonConsec,
-			"for", backoff.String(), "reason", reason, "poison_tls", poison)
+			"for", backoff.String(), "reason", reason, "poison_tls", poison,
+			"outage", outage)
 	}
 	// Quarantine is a nap; retirement is the door. Ordinary exits use
 	// consecFails vs RetireAfter. Poison TLS uses poisonConsec vs
 	// poisonRetireAfter so a lucky probe between MITM blips cannot wipe the
 	// streak (probe success clears consecFails but not poisonConsec).
-	if !m.retired {
+	// While the outage breaker is open the door is locked: no retirement on
+	// any path. Streaks keep accruing, so whatever stays dead after the
+	// breaker lifts retires on its very next failure; whatever recovered
+	// heals via probe success instead.
+	if !m.retired && !outage {
 		if poison && poisonRetireAfter > 0 && m.poisonConsec >= poisonRetireAfter {
 			m.retired = true
 			m.retiredAt = time.Now()
@@ -827,6 +915,13 @@ func (p *Pool) MarkFailure(id, reason string) {
 					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
 					"reason", reason, "poison_tls", false,
 					"undo", "POST /admin/api/proxies/"+id+"/revive")
+			} else if retireAfter > 0 && m.consecFails == retireAfter {
+				// Exactly at the threshold but held by the breaker: say so
+				// once per streak, so consoles can tell deferred executions
+				// from healthy exits during an outage.
+				p.log.Info("retirement deferred by outage breaker",
+					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
+					"reason", reason)
 			}
 		}
 	}
@@ -851,6 +946,11 @@ func (p *Pool) MarkSoftFailure(id, reason string) {
 	m.softFails++
 	m.lastErr = reason
 	m.mu.Unlock()
+	// A 429 or 5xx still proves the tunnel carried a round trip, so it counts
+	// as pool-wide evidence of life for the outage breaker — an account-level
+	// quota storm must not be able to hold the breaker open and freeze the
+	// pool into quarantine-only mode.
+	p.noteSuccessOutcome()
 	p.markDirty()
 }
 
@@ -1411,8 +1511,16 @@ func (p *Pool) Revive(id string) error {
 // should be told the pool is now empty, not have one piece of garbage quietly
 // kept on their behalf. Traffic keeps flowing anyway through Pick's
 // least-bad-retired fallback.
-func (p *Pool) Prune(reason string) model.PruneReport {
+func (p *Pool) Prune(reason string, force bool) model.PruneReport {
 	rep := model.PruneReport{}
+	if !force && p.OutageActive() {
+		// Pruning during a breaker-open outage would execute the whole
+		// quarantined pool for a correlated failure — the exact massacre the
+		// breaker exists to prevent. Refuse unless the operator insists.
+		rep.Refused = "outage circuit breaker is open; retirement is suspended pool-wide (pass force=1 to override)"
+		p.log.Warn("prune refused while outage breaker is open", "hint", "pass force=1 to override")
+		return rep
+	}
 	if reason == "" {
 		reason = "pruned as unusable"
 	}
@@ -1644,6 +1752,11 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	}
 	m.lastCheck = time.Now()
 	m.mu.Unlock()
+	// A probe that cleared reachability is the strongest life signal the pool
+	// sees — it runs even when request traffic is absent — so it feeds the
+	// breaker directly: recovery is detected at probe cadence, not request
+	// cadence.
+	p.noteSuccessOutcome()
 }
 
 func (p *Pool) fetchExitIP(ctx context.Context, m *member) (string, error) {

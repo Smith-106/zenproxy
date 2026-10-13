@@ -101,6 +101,14 @@ func (s *Server) Health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
+// boolGauge renders a boolean as a Prometheus gauge value.
+func boolGauge(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // Metrics renders a minimal Prometheus exposition.
 func (s *Server) Metrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -110,6 +118,10 @@ func (s *Server) Metrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "# TYPE zenproxy_exits gauge\nzenproxy_exits %d\n", s.pool.Len())
 	fmt.Fprintf(&b, "# TYPE zenproxy_exits_healthy gauge\nzenproxy_exits_healthy %d\n", s.pool.HealthyCount())
 	fmt.Fprintf(&b, "# TYPE zenproxy_exits_retired gauge\nzenproxy_exits_retired %d\n", s.pool.RetiredCount())
+	tripped, fails, limit := s.pool.OutageState()
+	fmt.Fprintf(&b, "# TYPE zenproxy_pool_outage gauge\nzenproxy_pool_outage %d\n", boolGauge(tripped))
+	fmt.Fprintf(&b, "# TYPE zenproxy_pool_outage_failures gauge\nzenproxy_pool_outage_failures %d\n", fails)
+	fmt.Fprintf(&b, "# TYPE zenproxy_pool_outage_threshold gauge\nzenproxy_pool_outage_threshold %d\n", limit)
 	fmt.Fprintf(&b, "# TYPE zenproxy_uptime_seconds gauge\nzenproxy_uptime_seconds %.0f\n", time.Since(s.started).Seconds())
 	fmt.Fprintf(&b, "# TYPE zenproxy_account_requests counter\n")
 	fmt.Fprintf(&b, "# TYPE zenproxy_account_failures counter\n")
@@ -143,6 +155,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		sort.Strings(learned)
 	}
 	cooled := s.pool.QuotaCooledIDs()
+	tripped, outageFails, outageLimit := s.pool.OutageState()
 	// Computed once: asking twice would allocate twice and could report a count
 	// that does not match the list under a concurrent write.
 	blocks := s.pool.RegionBlocks()
@@ -154,12 +167,17 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"exits":            s.pool.Len(),
 		"exits_healthy":    s.pool.HealthyCount(),
 		"exits_retired":    s.pool.RetiredCount(),
-		"requests":         totalReq,
-		"failures":         totalFail,
-		"rotations":        totalRot,
-		"upstreams":        upstreams,
-		"allowed_hosts":    s.cfg.Policy.AllowedHosts,
-		"state_file":       s.cfg.StateFile,
+		"outage_breaker": map[string]any{
+			"open":                 tripped,
+			"consecutive_failures": outageFails,
+			"threshold":            outageLimit,
+		},
+		"requests":      totalReq,
+		"failures":      totalFail,
+		"rotations":     totalRot,
+		"upstreams":     upstreams,
+		"allowed_hosts": s.cfg.Policy.AllowedHosts,
+		"state_file":    s.cfg.StateFile,
 		// Read-only view of the knobs that shape rotation, so the console can
 		// show why the proxy behaves the way it does without opening the YAML.
 		// Nothing here is a secret: tokens and keys are deliberately absent.
@@ -391,10 +409,13 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePrune retires every exit that is currently unusable. Idempotent: a
-// second call retires nothing and reports the same pool state.
+// second call retires nothing and reports the same pool state. While the
+// outage breaker is open the pass refuses unless force=1 — a correlated
+// provider-wide outage must not be executed pool-wide by one button.
 func (s *Server) handlePrune(w http.ResponseWriter, r *http.Request) {
 	reason := strings.TrimSpace(r.URL.Query().Get("reason"))
-	rep := s.pool.Prune(reason)
+	force := r.URL.Query().Get("force") == "1"
+	rep := s.pool.Prune(reason, force)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"report": rep,
 		"exits":  s.pool.Health(),
