@@ -42,6 +42,17 @@ import (
 // health.RetireAfter + consecFails.
 const poisonRetireAfter = 2
 
+// tunnelKeepAlive arms TCP keepalive on every dialed conn — proxy tunnels,
+// SOCKS slots and direct dials alike. The custom dialers used zero-value
+// net.Dialers, which silently DISABLE keepalive (only net/http's built-in
+// default dialer turns it on), so idle tunnels had no way to keep NAT and
+// provider-edge bindings alive. The measured victim class: muse xhigh streams
+// think silently for minutes, the edge reaps the quiet tunnel, and the stream
+// dies mid-flight ("upstream stream ended without a completed response").
+// 30s matches net/http's own default; the probes cost nothing at this rate
+// and the kernel reaps a genuinely dead TCP peer within ~9 intervals.
+const tunnelKeepAlive = 30 * time.Second
+
 // PoisonTLS reports whether a failure reason means the exit cannot be trusted
 // to carry the upstream's TLS stream. These are not blips: a slot that
 // tunnels TCP but fails x509 verification will keep failing every real
@@ -151,7 +162,7 @@ func (p *Proxy) newTransport() *http.Transport {
 		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			var d net.Dialer
+			d := net.Dialer{KeepAlive: tunnelKeepAlive}
 			return d.DialContext(dialCtx, network, addr)
 		}
 		return t
@@ -169,7 +180,7 @@ func (p *Proxy) newTransport() *http.Transport {
 		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dialCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
-			var d net.Dialer
+			d := net.Dialer{KeepAlive: tunnelKeepAlive}
 			return d.DialContext(dialCtx, network, addr)
 		}
 		t.ForceAttemptHTTP2 = true
@@ -214,7 +225,7 @@ func (p *Proxy) Redacted() string {
 
 // dialSOCKS5 performs an RFC 1928 CONNECT with optional RFC 1929 auth.
 func (p *Proxy) dialSOCKS5(ctx context.Context, network, addr string, remoteDNS bool) (net.Conn, error) {
-	var d net.Dialer
+	d := net.Dialer{KeepAlive: tunnelKeepAlive}
 	conn, err := d.DialContext(ctx, "tcp", p.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("socks5 dial %s: %w", p.Addr, err)
@@ -358,7 +369,7 @@ func socksErr(code byte) error {
 func (p *Proxy) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if p.Scheme == "direct" {
 		// The local host IS the egress: dial the target directly.
-		var d net.Dialer
+		d := net.Dialer{KeepAlive: tunnelKeepAlive}
 		conn, err := d.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, fmt.Errorf("direct dial %s: %w", addr, err)
@@ -368,7 +379,7 @@ func (p *Proxy) DialContext(ctx context.Context, network, addr string) (net.Conn
 	if p.Scheme == "socks5" || p.Scheme == "socks5h" {
 		return p.dialSOCKS5(ctx, network, addr, p.Scheme == "socks5h")
 	}
-	var d net.Dialer
+	d := net.Dialer{KeepAlive: tunnelKeepAlive}
 	conn, err := d.DialContext(ctx, "tcp", p.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("http proxy dial %s: %w", p.Addr, err)

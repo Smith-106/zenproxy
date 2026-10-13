@@ -906,6 +906,15 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 		// reply. Reporting it only in the body would leave the 200 intact, and
 		// anything relaying this proxy forwards the status verbatim — the client
 		// would believe it succeeded and then find no choices to read.
+		//
+		// Feed it back to the exit's health as well: the exit carried a stream
+		// that never reached a terminal event — a truncated tunnel, an edge
+		// that reaped it, or relay garbage. One strike means nothing, but a
+		// slot that repeatedly ships dead streams climbs its failure streak
+		// and leaves rotation like any other sick exit.
+		if exitID != "" && e.pool != nil {
+			e.pool.MarkFailure(exitID, "fold: "+foldErr)
+		}
 		if hdrSent {
 			payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
 			_, _ = w.Write([]byte("data: "))
