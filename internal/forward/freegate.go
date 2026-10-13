@@ -77,6 +77,12 @@ import (
 // spec docs (docs/FREE-TIER.md).
 const defaultClientUA = "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
 
+// freeTierUpstreamCredential is the bearer token the opencode app itself uses
+// on the free conversation surface (captured: `Authorization: Bearer public`).
+// Account keys belong to the paid /zen surface and are rejected by the free
+// gate with FreeTierError.
+const freeTierUpstreamCredential = "Bearer public"
+
 // FreeTier turns an inbound request into the envelope the free tier accepts.
 type FreeTier struct {
 	enabled bool

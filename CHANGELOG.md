@@ -7,22 +7,25 @@
 
 ### 变更
 
-- **免费上游端点迁移：`zen/v1` → `inference/v1`（mitm 抓包实测）。** 用真实 opencode
-  1.19.0 CLI 抓包（本机住宅 IP + mitmproxy）：CLI 对 muse 的完整时序是
-  `zen/v1/responses` 402（标题生成的付费小调用，Insufficient account funds）→
-  `zen/v1/chat/completions` **403 FreeTierError ×6** → failover
-  **`inference/v1/responses` 200**。即 zen 面 chat 对免费 key 已关闭、CLI 靠内置
-  failover 活在 inference 面。zenproxy 上游 `zen.base_url` 随之切换到
-  `https://opencode.ai/inference/v1`，muse 族的 chat→responses 桥保持不变。
-- **免费门行为学更新（本机连续实验 20+ 次）。** 同一 (key×IP×body×UA) 组合在
-  几分钟内 200 → 之后 13+ 连 403；urllib / bun fetch / curl_cffi chrome 指纹 /
-  mitmproxy 转发 / 服务器端三个「今晨幸存」slot 全部 403 —— **排除静态指纹门**，
-  结论是小时级批次窗（窗内放行一小批身份，窗外统一 FreeTierError）。此前
-  「403=IP 信誉门」的结论要加上时间维度：同一 IP 会随批次翻面。
-- **信封 UA 更新为 CLI 真值。** 抓包显示 CLI 实际发送
-  `opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14`
-  （/responses 面；短形式只在 models 拉取等处）。`default_client_ua` 与之一致，
-  config 仍可覆盖。
+- **免费层凭据修正（当晚破解）：`/inference` 使用 `Authorization: Bearer public`。**
+  mitm 抓包 + 源码（`packages/opencode/src/id/id.ts`）双线验证：opencode CLI 在
+  免费对话面（`opencode.ai/inference/v1/*`）发送的是字面量 `Bearer public`，
+  不携带任何 zen key；zen key（sk-…/oc_sk_…）只属于付费 `/zen` 面。此前链路
+  「403 FreeTierError = 反代未识别为 OpenCode 客户端」的根因即此：以账号 key
+  调用免费端点，上游一律以 FreeTierError 拒绝。zenproxy 现在对信封免费请求
+  覆写上游凭据为 `Bearer public`（付费/未信封请求仍用账号 key）。住宅 IP 直连
+  实测：任意客户端（python raw TLS）、任意 body（合成或 CLI 原文）、随机 id —
+  `Bearer public` 一律 200。
+- **免费门三段语义修正**（凭据修正后测得）：
+  - `403 FreeTierError` = 该出口 IP 此刻不在上游放行批次（分钟级翻转，slot-01
+    曾在同分钟内 429→403）；
+  - `429 FreeUsageLimitError` = IP 已被批次接受、命中公共凭据每 IP 限速；
+  - `200` = 全通。免费面完全不消耗 4 个 zen 账号（公凭据无账号绑定）。
+  出口健康语义（403/429 park）随之沿用：探针+轮换自动捕捉批次窗口。
+- **上游端点迁移：`zen/v1` → `inference/v1`**（CLI 抓包实测：zen chat 对免费
+  请求永久 403×6，CLI 靠内置 failover 活在 `inference/v1/responses`）。
+- **信封 UA 更新为 CLI 线上真值** `opencode/1.19.0 ai-sdk/provider-utils/4.0.40
+  runtime/bun/1.3.14`。
 - **出口健康状态持久化（`exits-state.json`）。** 此前 quarantine / free-tier 封锁 /
   quota 冷却 / retire 判决全部只活在内存里，`docker restart` 等于给全池「大赦」：
   同一批已知死 IP 重启后重新吃满 attempt 预算（账面上游调用 34 万+，失败 29 万+，

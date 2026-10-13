@@ -652,6 +652,18 @@ func (e *Engine) buildRequest(src *http.Request, target string, body io.Reader, 
 		}
 	}
 	req.Header.Set("Authorization", "Bearer "+ent.APIKey)
+	// 2026-10-13 night, mitm + wire experiments: the free conversation surface
+	// (opencode.ai/inference) authenticates with the literal "Bearer public" —
+	// the opencode CLI itself sends `Authorization: Bearer public` there
+	// (captured), and its source ships no key handling on this path. An account
+	// zen key (sk-…/oc_sk_…) on this surface is exactly what the upstream reads
+	// as "not OpenCode" and answers FreeTierError for. So for enveloped
+	// free-tier requests the account credential is replaced by the app
+	// credential; paid/unenveloped requests keep the account key. (Verified
+	// end to end from a residential IP: any client, any body — public 200.)
+	if plan != nil {
+		req.Header.Set("Authorization", freeTierUpstreamCredential)
+	}
 	if src.Header.Get("x-api-key") != "" {
 		req.Header.Set("x-api-key", ent.APIKey)
 	}
