@@ -57,11 +57,11 @@ package forward
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -358,7 +358,7 @@ func (f *FreeTier) ApplyHeaders(h http.Header) {
 	if strings.TrimSpace(h.Get("x-opencode-directory")) == "" {
 		h.Set("x-opencode-directory", "%2Fworkspace")
 	}
-	h.Set("x-opencode-request", newClientID("msg_"))
+	h.Set("x-opencode-request", newRequestID())
 	session := stableClientSessionID(h)
 	h.Set("x-opencode-session", session)
 	h.Set("x-opencode-session-id", session)
@@ -390,7 +390,7 @@ func stableClientSessionID(h http.Header) string {
 		}
 		return deriveClientSessionID(raw)
 	}
-	return newClientID("ses_")
+	return newSessionID()
 }
 
 // looksLikeClientSessionID reports whether s already has the measured
@@ -414,19 +414,44 @@ func looksLikeClientSessionID(s string) bool {
 	return true
 }
 
-// deriveClientSessionID maps an arbitrary inbound conversation key onto the
-// upstream's ses_* shape without losing stickiness: the same seed always
-// yields the same id.
+// deriveClientSessionID maps an arbitrary inbound conversation key onto a
+// session the gate accepts. Two constraints bind: the session must be STICKY
+// (the same seed always yields the same id — a fresh ses_* per turn is what
+// wiped prompt-cache hits), and the 12 hex clock characters must satisfy the
+// counter gate. Those are at odds for a purely derived id — a digest hex blob
+// fails the gate ~98% of the time — so the id is MINTED once per seed and
+// memoized (FIFO-evicted; the clock segment is the real wall clock at mint
+// time, the seed never collides into the tail of another conversation because
+// each seed owns its own memo slot).
+var stickySessions struct {
+	sync.Mutex
+	ids   map[string]string
+	order []string
+}
+
+const stickySessionLimit = 4096
+
 func deriveClientSessionID(seed string) string {
-	sum := sha256.Sum256([]byte(seed))
-	id := "ses_" + hex.EncodeToString(sum[:6])
-	var sb strings.Builder
-	sb.Grow(len(id) + 14)
-	sb.WriteString(id)
-	for _, b := range sum[6:20] {
-		sb.WriteByte(idAlphabet[int(b)%len(idAlphabet)])
+	stickySessions.Lock()
+	id, ok := stickySessions.ids[seed]
+	stickySessions.Unlock()
+	if ok {
+		return id
 	}
-	return sb.String()
+	id = newSessionID()
+	stickySessions.Lock()
+	defer stickySessions.Unlock()
+	if stickySessions.ids == nil {
+		stickySessions.ids = make(map[string]string, stickySessionLimit)
+	}
+	if len(stickySessions.ids) >= stickySessionLimit {
+		evict := stickySessions.order[0]
+		stickySessions.order = stickySessions.order[1:]
+		delete(stickySessions.ids, evict)
+	}
+	stickySessions.ids[seed] = id
+	stickySessions.order = append(stickySessions.order, seed)
+	return id
 }
 
 // Learn remembers a model the upstream refused, so the next request for it is
@@ -649,22 +674,83 @@ func marshalGateToolStub(name string, shape toolShape) (json.RawMessage, error) 
 // idAlphabet is the character set the client draws its random id suffix from.
 const idAlphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-// newClientID mints an id shaped like the client's own: a prefix, 12 lowercase
-// hex characters, then 14 characters of base62. The upstream accepts ids it has
-// never seen before, so this is a shape to match, not a value to learn.
-func newClientID(prefix string) string {
-	var buf [20]byte // 6 bytes -> 12 hex characters, 14 bytes -> 14 base62 characters
+// idClock serializes the per-millisecond sequence the upstream expects inside
+// a minted identifier. Live-probed 2026-10-13 (and independently by
+// FishBottle7/opencode2dsh, issue #62): the free gate decodes the 12 hex
+// characters back as a wall clock bitwise-inverted with a per-millisecond
+// counter in the low 12 bits, and accepts only counter values in [0, 63]. A
+// digest- or random-derived hex blob lands in that window with probability
+// ~64/4096 ≈ 1.5% — which is what the earlier random mint was doing, and why
+// the envelope was 403-shaped almost every time while the real CLI sailed
+// through. The high clock bits are not checked (an id decoding to 1970
+// passes); the counter is.
+var idClock struct {
+	sync.Mutex
+	ms      int64
+	counter uint32
+}
+
+// nextClockRaw yields now_ms*0x1000 + counter with the counter in [1, 63],
+// mint-once per millisecond. If a single millisecond somehow sees 63 mints
+// (a pathological ~63k ids/second) the caller yields until the clock ticks so
+// ids never repeat: uniqueness beats latency here.
+func nextClockRaw() int64 {
+	for {
+		idClock.Lock()
+		now := time.Now().UnixMilli()
+		if idClock.ms != now {
+			idClock.ms = now
+			idClock.counter = 0
+		}
+		if idClock.counter < 63 {
+			idClock.counter++
+			raw := now*0x1000 + int64(idClock.counter)
+			idClock.Unlock()
+			return raw
+		}
+		idClock.Unlock()
+		runtime.Gosched()
+	}
+}
+
+// clockHex renders the 12 hex characters of one identifier: the raw clock value
+// masked to 48 bits, bitwise-inverted first for the descending (session) order.
+// JS `~x` is -(x+1), and upstream's own generator inverts before masking, so
+// the inversion happens on the raw value — matching that is the whole point.
+func clockHex(raw int64, inverted bool) string {
+	mask := uint64(1)<<48 - 1
+	v := uint64(raw) & mask
+	if inverted {
+		v = ^uint64(raw) & mask
+	}
+	return fmt.Sprintf("%012x", v)
+}
+
+// randomBase62 draws n characters of the id tail exactly the way the client
+// does: one random byte per character, modulo the base62 alphabet.
+func randomBase62(n int) string {
+	var buf [20]byte
 	if _, err := rand.Read(buf[:]); err != nil {
-		// crypto/rand does not fail on the platforms this ships to. Degrade to a
-		// timestamp rather than failing a proxy request over an id.
+		// crypto/rand does not fail on the platforms this ships to. A
+		// timestamp-derived tail is worse than crashing a request over an id.
 		binary.BigEndian.PutUint64(buf[:8], uint64(time.Now().UnixNano()))
 	}
-	id := prefix + hex.EncodeToString(buf[:6])
 	var sb strings.Builder
-	sb.Grow(len(id) + 14)
-	sb.WriteString(id)
-	for _, b := range buf[6:] {
+	sb.Grow(n)
+	for _, b := range buf[:n] {
 		sb.WriteByte(idAlphabet[int(b)%len(idAlphabet)])
 	}
 	return sb.String()
+}
+
+// newRequestID mints an ascending identifier (`msg_…`): the plain clock plus
+// counter, then the random tail — the order the real CLI emits for requests.
+func newRequestID() string {
+	return "msg_" + clockHex(nextClockRaw(), false) + randomBase62(14)
+}
+
+// newSessionID mints a descending identifier (`ses_…`): the clock inverted, so
+// ids sort newest-first — the shape the real CLI emits for sessions.
+func newSessionID() string {
+	return "ses_" + clockHex(nextClockRaw(), true) + randomBase62(14)
 }

@@ -3,8 +3,10 @@ package forward
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"zenproxy/internal/config"
 )
@@ -355,6 +357,67 @@ func TestApplyHeadersMintsClientShapedIDs(t *testing.T) {
 	}
 	if hdrs.Get("x-opencode-request") == hdrs.Get("x-opencode-session") {
 		t.Error("request and session ids must differ")
+	}
+}
+
+// The gate decodes the 12 hex clock characters and accepts only a per-millisecond
+// counter in [0, 63] in the low 12 bits — a random blob passes ~1.5% of the time
+// (independently measured by opencode2dsh #62, 2026-10-13). Sessions must be
+// inverted (descending) and requests plain (ascending), matching the CLI's own
+// encoder.
+func TestMintedIDsSatisfyTheCounterGate(t *testing.T) {
+	const mask48 = (1 << 48) - 1
+	for i := 0; i < 200; i++ {
+		sess := newSessionID()
+		msg := newRequestID()
+		for _, tc := range []struct {
+			id       string
+			inverted bool
+		}{{sess, true}, {msg, false}} {
+			clockChars := tc.id[len(tc.id)-26 : len(tc.id)-14]
+			hex, err := strconv.ParseUint(clockChars, 16, 64)
+			if err != nil {
+				t.Fatalf("%s: clock segment %q is not lowercase hex", tc.id, clockChars)
+			}
+			// Descending ids carry the bitwise-INVERTED clock: undo it first,
+			// both for the counter window and for the wall-clock check. A real
+			// counter-1 session therefore ends its clock segment in `ffe`.
+			if tc.inverted {
+				hex = ^hex & mask48
+			}
+			counter := hex & 0xfff
+			if counter > 63 {
+				t.Fatalf("%s: counter %d over 63 — the gate will refuse this id", tc.id, counter)
+			}
+			// The clock is stored mod 2^48 (36 bits of wall clock survive the
+			// left-shift-12), so the decoded millisecond can only be checked
+			// modulo 2^36 — which is exactly why the upstream cannot hard-check
+			// the wall clock either; only the counter survives verification.
+			ms := int64(hex) >> 12
+			const mask36 = (1 << 36) - 1
+			d := ms&mask36 - time.Now().UnixMilli()&mask36
+			if d > 1<<35 {
+				d -= 1 << 36
+			}
+			if d < -(1 << 35) {
+				d += 1 << 36
+			}
+			if d > 5000 || d < -5000 {
+				t.Fatalf("%s: clock decodes to %d, not congruent to now mod 2^36 (delta %d)", tc.id, ms, d)
+			}
+		}
+		if sess == msg {
+			t.Fatal("session and request ids must never collide")
+		}
+	}
+	// Stickiness: the same seed pins one session even as the wall clock moves.
+	id1 := deriveClientSessionID("conversation-42")
+	id2 := deriveClientSessionID("conversation-42")
+	if id1 != id2 {
+		t.Fatalf("seed memos diverged: %q vs %q", id1, id2)
+	}
+	if id1 == deriveClientSessionID("conversation-43") {
+		t.Fatal("distinct seeds must not share a session id")
 	}
 }
 
