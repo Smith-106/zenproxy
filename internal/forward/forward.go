@@ -6,6 +6,7 @@ package forward
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -198,7 +199,9 @@ type candidate struct {
 // spending an attempt to be told the same thing.
 type chooser interface {
 	first() (candidate, bool)
-	next(failed *registry.Entry, class model.ErrorClass, exitID, mdl string) (candidate, bool)
+	// sessionID is the CPA-style conversation key for this request; empty
+	// disables session→exit rebinding on rotate.
+	next(failed *registry.Entry, class model.ErrorClass, exitID, mdl, sessionID string) (candidate, bool)
 	budget() int
 }
 
@@ -222,27 +225,28 @@ func (f *fixedChooser) first() (candidate, bool) {
 // next keeps the account and moves only its exit, which is precisely what the
 // reverse ingress could always do. Retrying the same account on a fresh IP is
 // the whole remedy available when the caller named the account.
-func (f *fixedChooser) next(_ *registry.Entry, _ model.ErrorClass, exitID, mdl string) (candidate, bool) {
-	f.eng.rotateExitFor(f.ent.ID, exitID, mdl)
+func (f *fixedChooser) next(_ *registry.Entry, _ model.ErrorClass, exitID, mdl, sessionID string) (candidate, bool) {
+	f.eng.rotateExitFor(f.ent.ID, sessionID, exitID, mdl)
 	return candidate{f.ent, f.up, f.target}, true
 }
 
 // rotateExit moves an account onto a different egress IP and says so in the
 // log. Split out so both choosers describe the same event identically.
 func (e *Engine) rotateExit(accountID, exitID string) {
-	e.rotateExitFor(accountID, exitID, "")
+	e.rotateExitFor(accountID, "", exitID, "")
 }
 
 // rotateExitFor is rotateExit with the model, so the replacement can avoid exits
-// this model is refused from.
-func (e *Engine) rotateExitFor(accountID, exitID, mdl string) {
+// this model is refused from. sessionID, when set, also rebinds the CPA-style
+// session→exit sticky entry.
+func (e *Engine) rotateExitFor(accountID, sessionID, exitID, mdl string) {
 	if exitID != "" {
 		// The exit worked — it carried the request and brought back an answer.
 		// Only the binding moves, so an account-level quota cannot drain the IP
 		// pool.
 		e.pool.MarkSoftFailure(exitID, "upstream refused after a successful exchange")
 	}
-	e.reg.RotateFor(accountID, exitID, mdl)
+	e.reg.RotateForSession(accountID, sessionID, exitID, mdl)
 }
 
 func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *registry.Entry, up model.Upstream, target *url.URL) {
@@ -302,8 +306,14 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// An oversized body that had to be streamed through unreplayed cannot be
 	// rewritten at all, because it never lands in memory as a whole.
 	var plan *GatePlan
+	// Real free-tier enveloping (as opposed to a synthesized chat→responses
+	// rewrite, which is not a gate matter). Only envelope-gated requests may
+	// fail fast on a fully-blocked pool: a paid model or an unenveloped
+	// request must keep the ordinary attempt path.
+	gated := false
 	if !truncated {
 		plan = e.free.Prepare(preparePath, body, false)
+		gated = plan != nil
 		if viaChatToResponses {
 			if plan == nil {
 				plan = &GatePlan{
@@ -332,6 +342,35 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	if plan != nil && plan.Model != "" {
 		askedModel = plan.Model
 	}
+	// When every healthy exit is already unusable for this model, rotating
+	// maxAttempts just burns minutes. Quota-cooled pools fail fast with 429 +
+	// Retry-After. Free-tier-blocked pools fail with 403 instead: a 429 here
+	// was tripping session-sticky's stampede circuit even though no per-IP
+	// quota clock was involved.
+	if gated && e.pool != nil && !e.pool.HasUncooledExit(askedModel) {
+		cools := e.pool.QuotaCooledIDs()
+		if len(cools) > 0 {
+			until := cools[0].Until
+			secs := int(time.Until(until).Seconds())
+			if secs < 1 {
+				secs = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(secs))
+			msg := fmt.Sprintf("Upstream rate limit exceeded, please retry later (all exits cooled until %s)", until.UTC().Format(time.RFC3339))
+			e.log.Warn("refusing request: every healthy exit is quota-cooled",
+				"model", askedModel, "cooled", len(cools), "until", until.UTC().Format(time.RFC3339),
+				"after", cools[0].After)
+			writeJSONError(w, http.StatusTooManyRequests, msg)
+			return
+		}
+		e.log.Warn("refusing request: no free-tier-eligible exit available", "model", askedModel)
+		writeJSONError(w, http.StatusForbidden, "OpenCode free tier: no eligible egress exit right now; retry shortly")
+		return
+	}
+	// CPA-style explicit session identity. Prefer headers (session-sticky and
+	// OpenCode clients already stamp them); fall back to prompt_cache_key in
+	// the body so a body-only sticky seed still pins the exit.
+	sessionID := inboundSessionID(r.Header, body)
 
 	maxAttempts := ch.budget()
 	if maxAttempts < 1 {
@@ -367,7 +406,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		}
 		target := &targetCopy
 		exitID := ""
-		proxy := e.reg.ExitForModel(ent.ID, askedModel)
+		proxy := e.reg.ExitForSession(ent.ID, sessionID, askedModel)
 		if proxy != nil {
 			exitID = proxy.ID
 		}
@@ -393,7 +432,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			return
 		}
 		start := time.Now()
-		resp, err := e.clientFor(proxy).Do(req)
+		resp, err := e.clientFor(proxy, plan != nil).Do(req)
 		if err != nil {
 			cancel()
 			class := classifyTransport(err)
@@ -414,7 +453,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 						"account", ent.ID, "exit", exitID, "attempt", attempt)
 					continue
 				}
-				e.reg.RotateFor(ent.ID, exitID, askedModel)
+				e.reg.RotateForSession(ent.ID, sessionID, exitID, askedModel)
 				continue
 			}
 			break
@@ -425,6 +464,9 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			e.reg.Record(ent.ID, model.ClassOK, nil)
+			if exitID != "" {
+				e.pool.ClearFreeTier(exitID)
+			}
 			if plan != nil && (!plan.Stream || plan.ReplyAsChat) {
 				// The client asked for a single response and the free tier only
 				// answers streams, so the stream is folded back here.
@@ -500,16 +542,21 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 					continue
 				}
 			}
-			e.log.Warn("upstream refused this request on client identity and no exit change can alter that",
+			e.log.Warn("upstream refused this free-tier request after the OpenCode envelope",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode,
 				"enveloped", plan != nil, "hint", "see docs/FREE-TIER.md")
+			// Park on the free-tier axis (probe-proof) so rotation skips known-bad
+			// free proxies instead of rediscovering the same FreeTierError.
+			if plan != nil && exitID != "" {
+				e.pool.BlockFreeTier(exitID, 15*time.Minute, "enveloped FreeTierError")
+			}
 		}
 		if attempt < maxAttempts && e.shouldRotate(resp.StatusCode, class) {
 			e.log.Info("rotating egress after upstream error",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class)
 			// The chooser owns what "switch" means here: another IP for the same
 			// account, or another account entirely.
-			nextCand, ok := ch.next(ent, class, exitID, askedModel)
+			nextCand, ok := ch.next(ent, class, exitID, askedModel, sessionID)
 			if !ok {
 				writeUpstreamResponse(w, resp, errBody)
 				cancel()
@@ -532,10 +579,25 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 // FreeTier exposes the envelope writer for the dashboard, which reports which
 // models were discovered by refusal.
 func (e *Engine) FreeTier() *FreeTier { return e.free }
-func (e *Engine) clientFor(proxy *proxypool.Proxy) *http.Client {
+// freeAttemptHeaderTimeout caps how long an enveloped free-tier attempt may
+// take to produce response headers. The envelope always streams upstream, so
+// a live slot answers in well under a second and a stuck one is dead weight;
+// without this a single hang ran into the 3600s request ctx (measured 773s).
+// Paid/non-stream traffic is untouched: those responses legitimately delay
+// headers until generation finishes.
+const freeAttemptHeaderTimeout = 30 * time.Second
+
+func (e *Engine) clientFor(proxy *proxypool.Proxy, free bool) *http.Client {
 	t := e.direct
 	if proxy != nil {
 		t = proxy.Transport()
+	}
+	if free {
+		// Clone (never mutate the shared per-exit transport) so the cap dies
+		// with this request.
+		tc := t.Clone()
+		tc.ResponseHeaderTimeout = freeAttemptHeaderTimeout
+		t = tc
 	}
 	return &http.Client{
 		Transport: t,
@@ -587,7 +649,9 @@ func (e *Engine) buildRequest(src *http.Request, target string, body io.Reader, 
 	}
 	// The free tier identifies its client by these headers, so they are stamped
 	// before the operator's own overrides: an explicit account or upstream
-	// header is a deliberate decision and still wins.
+	// header is a deliberate decision and still wins. Inbound session /
+	// conversation headers have already been copied above; ApplyHeaders reuses
+	// them so the upstream keeps prompt-cache identity across turns.
 	if plan != nil {
 		e.free.ApplyHeaders(req.Header)
 	}
@@ -679,10 +743,51 @@ func (e *Engine) writeStream(w http.ResponseWriter, resp *http.Response) {
 // The fold is chosen by the surface that was enveloped: chat and Responses
 // stream different events, and the wrong folder does not fail loudly, it
 // returns an empty answer.
+//
+// For ReplyAsChat+stream clients, SSE comment keepalives are flushed while the
+// upstream Responses stream is still being folded. Without them, muse xhigh
+// turns stay silent for minutes and the client (X-Stainless-Timeout / OpenCode)
+// aborts with HTTP 499 long before any chat chunk arrives.
 func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *GatePlan) {
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, e.pol.MaxBodyBytes))
+	wantChatStream := plan != nil && plan.ReplyAsChat && plan.Stream
+	var (
+		flusher http.Flusher
+		hdrSent bool
+	)
+	if wantChatStream {
+		if f, ok := w.(http.Flusher); ok {
+			flusher = f
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Del("Content-Length")
+		w.Header().Del("Transfer-Encoding")
+		w.Header().Del("Content-Encoding")
+		w.WriteHeader(http.StatusOK)
+		hdrSent = true
+		if flusher != nil {
+			_, _ = w.Write([]byte(": connected\n\n"))
+			flusher.Flush()
+		}
+	}
+
+	raw, err := readAllKeepalive(resp.Body, e.pol.MaxBodyBytes, 15*time.Second, func() {
+		if !hdrSent || flusher == nil {
+			return
+		}
+		if _, werr := w.Write([]byte(": keepalive\n\n")); werr == nil {
+			flusher.Flush()
+		}
+	})
 	resp.Body.Close()
 	if err != nil {
+		if hdrSent {
+			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"failed to read the upstream stream\",\"type\":\"api_error\"}}\n\ndata: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
 		writeJSONError(w, http.StatusBadGateway, "failed to read the upstream stream: "+err.Error())
 		return
 	}
@@ -699,27 +804,55 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 		// reply. Reporting it only in the body would leave the 200 intact, and
 		// anything relaying this proxy forwards the status verbatim — the client
 		// would believe it succeeded and then find no choices to read.
+		if hdrSent {
+			payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
+			_, _ = w.Write([]byte("data: "))
+			_, _ = w.Write(payload)
+			_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
 		writeJSONError(w, http.StatusBadGateway, foldErr)
 		return
 	}
 	if plan != nil && plan.ReplyAsChat {
 		chatJSON, convErr := responsesToChatCompletion(out)
 		if convErr != nil {
+			if hdrSent {
+				payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "failed to convert responses reply to chat: " + convErr.Error(), "type": "api_error"}})
+				_, _ = w.Write([]byte("data: "))
+				_, _ = w.Write(payload)
+				_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return
+			}
 			writeJSONError(w, http.StatusBadGateway, "failed to convert responses reply to chat: "+convErr.Error())
 			return
 		}
 		if plan.Stream {
 			sse, sseErr := chatCompletionToSSE(chatJSON)
 			if sseErr != nil {
+				if hdrSent {
+					payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "failed to stream converted chat reply: " + sseErr.Error(), "type": "api_error"}})
+					_, _ = w.Write([]byte("data: "))
+					_, _ = w.Write(payload)
+					_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+					if flusher != nil {
+						flusher.Flush()
+					}
+					return
+				}
 				writeJSONError(w, http.StatusBadGateway, "failed to stream converted chat reply: "+sseErr.Error())
 				return
 			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Del("Content-Length")
-			w.Header().Del("Transfer-Encoding")
-			w.Header().Del("Content-Encoding")
-			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(sse)
+			if flusher != nil {
+				flusher.Flush()
+			}
 			return
 		}
 		out = chatJSON
@@ -730,6 +863,36 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 	w.Header().Del("Content-Encoding")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// readAllKeepalive copies r up to limit bytes while invoking onTick on a
+// wall-clock ticker. Used to keep reverse proxies / SSE clients alive while a
+// Responses stream is still being folded into one chat reply — muse xhigh can
+// sit silent for minutes before the first chat chunk would otherwise appear.
+func readAllKeepalive(r io.Reader, limit int64, every time.Duration, onTick func()) ([]byte, error) {
+	if limit <= 0 {
+		limit = 32 << 20
+	}
+	done := make(chan struct{})
+	defer close(done)
+	if onTick != nil {
+		if every <= 0 {
+			every = 15 * time.Second
+		}
+		go func() {
+			t := time.NewTicker(every)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					onTick()
+				}
+			}
+		}()
+	}
+	return io.ReadAll(io.LimitReader(r, limit))
 }
 
 // writeUpstreamResponse replays a buffered error response verbatim.
@@ -1052,6 +1215,48 @@ func truncate(b []byte, n int) string {
 		return string(b)
 	}
 	return string(b[:n]) + "…"
+}
+
+// inboundSessionID extracts the CPA-style explicit conversation key from the
+// request. Headers win; prompt_cache_key in the JSON body is the fallback so a
+// body-only sticky seed still pins the exit. Empty means "no session affinity".
+func inboundSessionID(h http.Header, body []byte) string {
+	for _, name := range inboundSessionHeaderNames {
+		if v := strings.TrimSpace(h.Get(name)); v != "" {
+			return v
+		}
+	}
+	if len(body) == 0 {
+		return ""
+	}
+	// Cheap scan: avoid a full decode when the key is absent.
+	const needle = `"prompt_cache_key"`
+	i := bytes.Index(body, []byte(needle))
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(needle):]
+	// skip : and whitespace / quotes
+	j := 0
+	for j < len(rest) && (rest[j] == ':' || rest[j] == ' ' || rest[j] == '\t' || rest[j] == '\n' || rest[j] == '\r') {
+		j++
+	}
+	if j >= len(rest) || rest[j] != '"' {
+		return ""
+	}
+	j++
+	start := j
+	for j < len(rest) && rest[j] != '"' {
+		if rest[j] == '\\' && j+1 < len(rest) {
+			j += 2
+			continue
+		}
+		j++
+	}
+	if j > start {
+		return string(rest[start:j])
+	}
+	return ""
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {

@@ -223,7 +223,7 @@ func (c *poolChooser) first() (candidate, bool) {
 //     every good IP for this account has been tried).
 //   - rotate-both does the first, then the second, which is why it needs the
 //     per-account exit counter.
-func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID, mdl string) (candidate, bool) {
+func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID, mdl, sessionID string) (candidate, bool) {
 	if failed == nil {
 		return candidate{}, false
 	}
@@ -242,10 +242,10 @@ func (c *poolChooser) next(failed *registry.Entry, _ model.ErrorClass, exitID, m
 			}
 			// Nothing else in the pool: fall back to moving this one again
 			// rather than giving up while exits remain.
-			c.eng.rotateExitFor(failed.ID, exitID, mdl)
+			c.eng.rotateExitFor(failed.ID, sessionID, exitID, mdl)
 			return c.build(failed)
 		}
-		c.eng.rotateExitFor(failed.ID, exitID, mdl)
+		c.eng.rotateExitFor(failed.ID, sessionID, exitID, mdl)
 		return c.build(failed)
 	}
 }
@@ -350,7 +350,7 @@ func (e *Engine) fetchUpstreamModels(r *http.Request, pool string) []string {
 	req.ContentLength = 0
 
 	proxy := e.reg.ExitFor(ent.ID)
-	client := e.clientFor(proxy)
+	client := e.clientFor(proxy, false)
 	// Short and separate from UpstreamTimeout: this call decorates a listing,
 	// it is not the request the user is waiting for.
 	client.Timeout = 20 * time.Second
@@ -405,3 +405,4 @@ func (e *Engine) upstreamURLFor(pool, rest string) (*url.URL, bool) {
 	}
 	return target, true
 }
+

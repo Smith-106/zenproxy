@@ -10,15 +10,21 @@
 //  1. User-Agent. Removing it is enough to be refused, even with everything
 //     else in place.
 //  2. The x-opencode-* identity headers: `x-opencode-client: cli` plus the
-//     request and session ids. The values are not stateful — ids the server has
-//     never seen are accepted — only their shape is, so the envelope mints
-//     fresh ones: `msg_`/`ses_` + 12 lowercase hex + 14 base62 characters.
+//     request and session ids. The *shape* must match
+//     (`msg_`/`ses_` + 12 lowercase hex + 14 base62). Fresh request ids are
+//     fine every turn, but the session id is sticky: minting a new `ses_*`
+//     per attempt makes the upstream treat every turn as a new conversation
+//     and drops prompt-cache hits. When the inbound request already carries a
+//     session / conversation / prompt-cache key, it is reused (normalized into
+//     `ses_*` shape when needed).
 //  3. `"stream": true` in the body. A non-streaming request is refused even
 //     with a perfect header set, which is why the engine asks the upstream for
 //     a stream and folds the answer back for a non-streaming client.
 //  4. The request must advertise the tool names `bash` and `read`. Schemas,
-//     descriptions, order and extra client tools are ignored — only the names
-//     matter. Two is enough. Prompt injection is deliberately NOT used: the
+//     descriptions and extra client tools are ignored — only the names matter.
+//     Two is enough. Order is also ignored by the gate, but zenproxy pins
+//     bash+read at the front of `tools` so prompt-cache prefixes survive
+//     client tool-list churn. Prompt injection is deliberately NOT used: the
 //     old title/agent chunks polluted weaker free models into answering as a
 //     title generator ("Greeting", "Short joke request").
 //
@@ -51,6 +57,7 @@ package forward
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -63,7 +70,10 @@ import (
 )
 
 // defaultClientUA mirrors the User-Agent of the client that is allowed through.
-const defaultClientUA = "opencode/1.18.35 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+// OpenCode 1.19+ ships Bun with `--user-agent=opencode/<ver>` and also sends
+// the short `opencode/<ver>` form from several fetch sites; the older
+// `ai-sdk/… runtime/bun/…` suffix is no longer what the binary emits.
+const defaultClientUA = "opencode/1.19.0"
 
 // FreeTier turns an inbound request into the envelope the free tier accepts.
 type FreeTier struct {
@@ -292,9 +302,9 @@ func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 	}
 
 	clientTools := req.toolList()
-	// Responses always uses the flat tool shape. Client tools stay in front;
-	// any missing bash/read stubs are appended flat so the surface stays
-	// consistent even if a client somehow sent nested entries.
+	// Responses always uses the flat tool shape. Gate tools are pinned first
+	// for prompt-cache stability; any missing bash/read stubs are synthesized
+	// flat so the surface stays consistent even if a client sent nested entries.
 	rawTools, err := topUpToolNames(clientTools, toolShapeFlat)
 	if err != nil {
 		return nil
@@ -324,14 +334,91 @@ func (f *FreeTier) prepareResponses(body []byte, forced bool) *GatePlan {
 // ApplyHeaders stamps the official client's identity onto an upstream request.
 // The caller runs it before the operator's own header overrides, so an explicit
 // account or upstream header still wins.
+//
+// Request ids stay per-attempt. Session ids stay sticky across turns of the
+// same conversation: if the inbound request already carried a session /
+// conversation identifier (copied onto h before this runs), that value is
+// reused — reshaped into the upstream's `ses_*` form when needed — instead of
+// minting a fresh one that would bust prompt cache.
 func (f *FreeTier) ApplyHeaders(h http.Header) {
 	h.Set("User-Agent", f.ua)
 	h.Set("x-opencode-client", "cli")
 	h.Set("x-opencode-project", "global")
+	// 1.19+ always attaches the workspace directory (URI-encoded). Upstream
+	// helpers strip/re-apply it around some hops; omitting it is a visible
+	// difference from the real client, so stamp a stable synthetic path.
+	if strings.TrimSpace(h.Get("x-opencode-directory")) == "" {
+		h.Set("x-opencode-directory", "%2Fworkspace")
+	}
 	h.Set("x-opencode-request", newClientID("msg_"))
-	session := newClientID("ses_")
+	session := stableClientSessionID(h)
 	h.Set("x-opencode-session", session)
 	h.Set("x-opencode-session-id", session)
+}
+
+// inboundSessionHeaderNames are the conversation identifiers the gateway and
+// upstream schedulers already understand. Order is preference order.
+var inboundSessionHeaderNames = []string{
+	"x-opencode-session",
+	"x-opencode-session-id",
+	"session_id",
+	"session-id",
+	"conversation_id",
+	"x-session-id",
+	"x-session-affinity",
+}
+
+// stableClientSessionID returns a session id the free-tier gate will accept.
+// Prefer an inbound conversation key already present on h; only mint a fresh
+// one when the request carries no stable identity at all.
+func stableClientSessionID(h http.Header) string {
+	for _, name := range inboundSessionHeaderNames {
+		raw := strings.TrimSpace(h.Get(name))
+		if raw == "" {
+			continue
+		}
+		if looksLikeClientSessionID(raw) {
+			return raw
+		}
+		return deriveClientSessionID(raw)
+	}
+	return newClientID("ses_")
+}
+
+// looksLikeClientSessionID reports whether s already has the measured
+// `ses_` + 12 lowercase hex + 14 base62 shape.
+func looksLikeClientSessionID(s string) bool {
+	const prefix = "ses_"
+	if !strings.HasPrefix(s, prefix) || len(s) != len(prefix)+26 {
+		return false
+	}
+	mid := s[len(prefix) : len(prefix)+12]
+	for _, r := range mid {
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			return false
+		}
+	}
+	for _, r := range s[len(prefix)+12:] {
+		if !strings.ContainsRune(idAlphabet, r) {
+			return false
+		}
+	}
+	return true
+}
+
+// deriveClientSessionID maps an arbitrary inbound conversation key onto the
+// upstream's ses_* shape without losing stickiness: the same seed always
+// yields the same id.
+func deriveClientSessionID(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	id := "ses_" + hex.EncodeToString(sum[:6])
+	var sb strings.Builder
+	sb.Grow(len(id) + 14)
+	sb.WriteString(id)
+	for _, b := range sum[6:20] {
+		sb.WriteByte(idAlphabet[int(b)%len(idAlphabet)])
+	}
+	return sb.String()
 }
 
 // Learn remembers a model the upstream refused, so the next request for it is
@@ -483,55 +570,72 @@ func ensureMinTokenBudget(obj map[string]json.RawMessage, field string, floor in
 // the name check. It says so, because the model reads these descriptions.
 const toolTopUpStub = "Reserved by the proxied runtime. Do not call this tool."
 
-// topUpToolNames guarantees the request advertises bash and read. The caller's
-// own tools stay in front, so its tool calling keeps working; the extra entries
-// exist only to satisfy the gate, and their descriptions say so.
+// topUpToolNames guarantees the request advertises bash and read, and puts
+// those gate tools first.
+//
+// Order used to keep the caller's tools in front and append stubs at the end.
+// That is friendly to tool-calling demos but hostile to prompt cache: agent
+// clients churn their own tool list every few turns, and a changing first tool
+// entry busts the entire tools prefix. The free-tier matcher only cares about
+// names, not order, so the stable gate pair is pinned at the front; the
+// caller's remaining tools follow. When the client already sent bash/read,
+// those entries are moved forward (first occurrence kept) instead of being
+// duplicated.
 func topUpToolNames(tools []json.RawMessage, shape toolShape) ([]byte, error) {
 	if tools == nil {
 		tools = []json.RawMessage{}
 	}
-	present := make(map[string]bool, len(tools))
+	gateIdx := make(map[string]json.RawMessage, len(gateToolNames))
+	rest := make([]json.RawMessage, 0, len(tools))
 	for _, raw := range tools {
-		if name := toolNameOf(raw); name != "" {
-			present[name] = true
-		}
-	}
-	hits := 0
-	for _, name := range gateToolNames {
-		if present[name] {
-			hits++
-		}
-	}
-	if hits >= gateMinToolNames {
-		return json.Marshal(tools)
-	}
-	for _, name := range gateToolNames {
-		if hits >= gateMinToolNames {
-			break
-		}
-		if present[name] {
+		name := toolNameOf(raw)
+		if isGateToolName(name) {
+			if _, exists := gateIdx[name]; !exists {
+				gateIdx[name] = raw
+			}
 			continue
 		}
-		params := map[string]any{"type": "object", "properties": map[string]any{}}
-		entry := map[string]any{"type": "function", "description": toolTopUpStub, "parameters": params, "name": name}
-		if shape == toolShapeNested {
-			entry = map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        name,
-					"description": toolTopUpStub,
-					"parameters":  params,
-				},
-			}
+		rest = append(rest, raw)
+	}
+	out := make([]json.RawMessage, 0, len(gateToolNames)+len(rest))
+	for _, name := range gateToolNames {
+		if raw, ok := gateIdx[name]; ok {
+			out = append(out, raw)
+			continue
 		}
-		stub, err := json.Marshal(entry)
+		stub, err := marshalGateToolStub(name, shape)
 		if err != nil {
 			return nil, err
 		}
-		tools = append(tools, stub)
-		hits++
+		out = append(out, stub)
 	}
-	return json.Marshal(tools)
+	out = append(out, rest...)
+	return json.Marshal(out)
+}
+
+func isGateToolName(name string) bool {
+	for _, g := range gateToolNames {
+		if name == g {
+			return true
+		}
+	}
+	return false
+}
+
+func marshalGateToolStub(name string, shape toolShape) (json.RawMessage, error) {
+	params := map[string]any{"type": "object", "properties": map[string]any{}}
+	entry := map[string]any{"type": "function", "description": toolTopUpStub, "parameters": params, "name": name}
+	if shape == toolShapeNested {
+		entry = map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": toolTopUpStub,
+				"parameters":  params,
+			},
+		}
+	}
+	return json.Marshal(entry)
 }
 
 // idAlphabet is the character set the client draws its random id suffix from.

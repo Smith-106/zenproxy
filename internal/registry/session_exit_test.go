@@ -1,0 +1,99 @@
+package registry
+
+import (
+	"testing"
+	"time"
+
+	"zenproxy/internal/model"
+)
+
+func TestExitForSessionStickyAcrossTurns(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	first := r.ExitForSession("zen-01", "pfx_same_conversation", "muse-spark")
+	if first == nil {
+		t.Fatal("ExitForSession returned nil")
+	}
+	for i := 0; i < 8; i++ {
+		got := r.ExitForSession("zen-01", "pfx_same_conversation", "muse-spark")
+		if got == nil || got.ID != first.ID {
+			t.Fatalf("turn %d broke session stickiness: got %v want %s", i, got, first.ID)
+		}
+	}
+	other := r.ExitForSession("zen-01", "pfx_other_conversation", "muse-spark")
+	if other == nil {
+		t.Fatal("other session got nil exit")
+	}
+	if got := r.ExitForSession("zen-01", "pfx_same_conversation", "muse-spark"); got == nil || got.ID != first.ID {
+		t.Fatalf("other session disturbed the first: got %v want %s", got, first.ID)
+	}
+}
+
+func TestExitForSessionReselectsUnusableExit(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	got := r.ExitForSession("zen-01", "pfx_seed", "muse-spark")
+	if got == nil || got.ID != "a" {
+		t.Fatalf("seed want a, got %v", got)
+	}
+	pool.MarkFailure("a", "connection refused")
+	if ok, _ := pool.Healthy("a"); ok {
+		t.Fatal("precondition: a should be quarantined")
+	}
+	next := r.ExitForSession("zen-01", "pfx_seed", "muse-spark")
+	if next == nil || next.ID == "a" {
+		t.Fatalf("unusable sticky exit must be reselected, got %v", next)
+	}
+	again := r.ExitForSession("zen-01", "pfx_seed", "muse-spark")
+	if again == nil || again.ID != next.ID {
+		t.Fatalf("rebind did not stick: got %v want %s", again, next.ID)
+	}
+}
+
+func TestRotateForSessionRebinds(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	first := r.ExitForSession("zen-01", "pfx_rot", "muse-spark")
+	if first == nil {
+		t.Fatal("nil first")
+	}
+	repl := r.RotateForSession("zen-01", "pfx_rot", first.ID, "muse-spark")
+	if repl == nil || repl.ID == first.ID {
+		t.Fatalf("rotate did not move: %v", repl)
+	}
+	got := r.ExitForSession("zen-01", "pfx_rot", "muse-spark")
+	if got == nil || got.ID != repl.ID {
+		t.Fatalf("session did not follow rotate: got %v want %s", got, repl.ID)
+	}
+}
+
+func TestExitForSessionEmptyFallsThrough(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(model.Account{
+		ID: "zen-01", Upstream: "zen", APIKey: "k", Proxy: "a", Enabled: true,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	got := r.ExitForSession("zen-01", "", "muse-spark")
+	if got == nil || got.ID != "a" {
+		t.Fatalf("empty session must use account affinity, got %v", got)
+	}
+}

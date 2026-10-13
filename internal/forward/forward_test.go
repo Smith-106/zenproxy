@@ -93,12 +93,14 @@ func TestClassifyStatusSeparatesTierGateFromAuth(t *testing.T) {
 	}
 }
 
-func TestTierGateIsNeverAttributableToTheExit(t *testing.T) {
-	if model.ClassTierGate.Retryable() {
-		t.Error("a client-identity refusal must not be retried")
+func TestTierGateRotatesAfterEnvelope(t *testing.T) {
+	// 2026-10: free-proxy exits can return FreeTierError for an already
+	// enveloped request that succeeds elsewhere, so rotation is allowed.
+	if !model.ClassTierGate.Retryable() {
+		t.Error("tier-gate refusals must be retryable on another exit")
 	}
-	if model.ClassTierGate.IPAttributable() {
-		t.Error("a client-identity refusal must not consume exits")
+	if !model.ClassTierGate.IPAttributable() {
+		t.Error("tier-gate refusals must be allowed to rotate exits")
 	}
 	if !model.ClassTransport.IPAttributable() {
 		t.Error("transport failures are exactly what rotation is for")

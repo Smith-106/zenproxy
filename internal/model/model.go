@@ -102,7 +102,12 @@ const (
 	ClassRateLimit ErrorClass = "rate_limit" // 429: quota or IP throttling
 	ClassServer    ErrorClass = "server"     // 5xx / 520-524: retry elsewhere
 	ClassAuth      ErrorClass = "auth"       // 401/403 with a credential-shaped body
-	ClassTierGate  ErrorClass = "tier_gate"  // FreeTierError: client-identity gate, NOT an IP problem
+	// ClassTierGate is FreeTierError. Historically this was treated as a pure
+	// client-identity refusal (UA / x-opencode-* / tools / stream). Measured
+	// 2026-10 against free-proxy egress: the same enveloped request can 403 on
+	// one exit and 200 on another, so rotating the exit is now worthwhile once
+	// the envelope has already been applied.
+	ClassTierGate ErrorClass = "tier_gate"
 	// ClassRegion is a 403 saying the model is unavailable in the exit's
 	// country. It is its own class because it is attributable to the exit but
 	// NOT the way the others are: it belongs to the exit-and-model pair, so the
@@ -121,7 +126,7 @@ const (
 // any chance of turning this failure into a success.
 func (c ErrorClass) Retryable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassUnknown:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate, ClassUnknown:
 		return true
 	default:
 		return false
@@ -129,16 +134,21 @@ func (c ErrorClass) Retryable() bool {
 }
 
 // IPAttributable reports whether rotating the exit IP is a sensible response.
-// A FreeTierError is deliberately excluded: it is decided from the request's
-// client identity, so burning a fresh IP on it only wastes exits.
 //
-// ClassRegion is included, and is the one class where the exit is only half the
-// story: rotating is right, but it has to be a rotation *for this model*, which
-// is why the rotation carries the model name. Rotating blind would just as
-// likely land on another exit refused for the same model.
+// ClassTierGate is included as of 2026-10: FreeTierError is still primarily a
+// request-envelope check, but free-proxy egress has been observed to return it
+// intermittently for an already-enveloped request that succeeds on another
+// exit. The forwarder still applies the envelope before rotating, so a pure
+// identity miss is not "fixed" by burning IPs — rotation only helps the
+// exit-correlated refusals.
+//
+// ClassRegion is the one class where the exit is only half the story: rotating
+// is right, but it has to be a rotation *for this model*, which is why the
+// rotation carries the model name. Rotating blind would just as likely land on
+// another exit refused for the same model.
 func (c ErrorClass) IPAttributable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate:
 		return true
 	default:
 		return false

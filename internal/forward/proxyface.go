@@ -244,7 +244,7 @@ func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *re
 			}
 		}
 
-		resp, err := e.clientFor(proxy).Do(req)
+		resp, err := e.clientFor(proxy, false).Do(req)
 		if err != nil {
 			cancel()
 			lastMsg = err.Error()
@@ -266,3 +266,4 @@ func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *re
 	writeJSONError(w, http.StatusBadGateway,
 		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", attempts, ent.ID, lastMsg))
 }
+

@@ -68,6 +68,10 @@ type Registry struct {
 	// are next", which is what a caller-side cursor would do.
 	rrCursor map[string]int
 
+	// sessions is the CPA-style session→exit sticky table. Nil / disabled TTL
+	// means ExitForSession falls straight through to account affinity.
+	sessions *SessionExitCache
+
 	path string
 	pool *proxypool.Pool
 	log  *slog.Logger
@@ -83,6 +87,14 @@ func New(path string, pool *proxypool.Pool, log *slog.Logger) *Registry {
 		pool:     pool,
 		log:      log,
 	}
+}
+
+// SetSessionExitCache installs the session→exit sticky table. Safe to call
+// once at startup; a nil cache disables session stickiness.
+func (r *Registry) SetSessionExitCache(c *SessionExitCache) {
+	r.mu.Lock()
+	r.sessions = c
+	r.mu.Unlock()
 }
 
 // Load reads the state file. A missing file is not an error: the config's
@@ -490,7 +502,15 @@ func (r *Registry) exitServesModel(exitID, model string) bool {
 	if r.pool == nil || strings.TrimSpace(model) == "" {
 		return true
 	}
-	return !r.pool.RegionBlocked(exitID, model)
+	if r.pool.RegionBlocked(exitID, model) {
+		return false
+	}
+	// Free-tier blocks are exit-scoped (same envelope, different IP). Keeping a
+	// binding on a blocked exit made every rotation rediscover the same 403.
+	if r.pool.FreeTierBlocked(exitID) {
+		return false
+	}
+	return true
 }
 
 // BoundExit reports which exit an account is currently bound to, without

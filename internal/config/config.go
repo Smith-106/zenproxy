@@ -158,6 +158,12 @@ type Policy struct {
 	// extended with every upstream hostname. Leave it empty only when the
 	// listener is bound to loopback.
 	AllowedHosts []string `yaml:"allowed_hosts"`
+	// SessionExitTTL is the CPA-style sticky TTL for session→exit bindings.
+	// Explicit conversation keys (session_id / prompt_cache_key /
+	// x-opencode-session) pin an account onto one resin exit for this long.
+	// Zero disables session→exit stickiness and keeps the legacy account→exit
+	// binding only. Default 1h matches CLIProxyAPI's SessionAffinitySelector.
+	SessionExitTTL time.Duration `yaml:"session_exit_ttl"`
 }
 
 // FreeTier configures the official-client envelope that lets a request which
@@ -222,6 +228,7 @@ func Default() Config {
 			MaxBodyBytes:      32 << 20,
 			StreamIdleTimeout: 5 * time.Minute,
 			UpstreamTimeout:   10 * time.Minute,
+			SessionExitTTL:    time.Hour,
 		},
 		StateFile: "./data/state.json",
 		FreeTier: FreeTier{
@@ -316,6 +323,14 @@ func (c *Config) normalize() {
 	}
 	if p.UpstreamTimeout == 0 {
 		p.UpstreamTimeout = dp.UpstreamTimeout
+	}
+	if p.SessionExitTTL == 0 {
+		// Absent key → CPA-like 1h sticky. Explicit disable is session_exit_ttl
+		// set to a negative duration in YAML (e.g. -1s), normalized below.
+		p.SessionExitTTL = dp.SessionExitTTL
+	}
+	if p.SessionExitTTL < 0 {
+		p.SessionExitTTL = 0
 	}
 	if c.StateFile == "" {
 		c.StateFile = d.StateFile

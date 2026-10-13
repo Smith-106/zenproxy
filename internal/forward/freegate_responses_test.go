@@ -96,8 +96,8 @@ func TestPrepareResponsesInjectsToolsWithoutTouchingInstructions(t *testing.T) {
 	}
 }
 
-// Client tools stay in front; missing gate names are appended in the flat shape;
-// tool_choice is forced to auto even if the client sent something else.
+// Gate tools are pinned first for prompt-cache stability; the client's tools
+// follow. tool_choice is forced to auto even if the client sent something else.
 func TestPrepareResponsesTopsUpFlatToolsAndForcesAuto(t *testing.T) {
 	raw := body(t, map[string]any{
 		"model":       "big-pickle",
@@ -112,24 +112,8 @@ func TestPrepareResponsesTopsUpFlatToolsAndForcesAuto(t *testing.T) {
 	}
 	obj := decode(t, plan.Body)
 	names := flatToolNames(t, obj)
-	if names[0] != "custom_search" {
-		t.Errorf("the caller's own tool must stay in front, got %q", names[0])
-	}
-	hits := 0
-	seen := map[string]bool{}
-	for _, n := range names {
-		seen[n] = true
-		for _, g := range gateToolNames {
-			if n == g {
-				hits++
-			}
-		}
-	}
-	if hits < gateMinToolNames {
-		t.Errorf("only %d official tool names present, want >= %d", hits, gateMinToolNames)
-	}
-	if !seen["bash"] || !seen["read"] {
-		t.Error("bash and read must be present after top-up")
+	if len(names) < 3 || names[0] != "bash" || names[1] != "read" || names[2] != "custom_search" {
+		t.Errorf("tools = %v, want [bash read custom_search…]", names)
 	}
 	var choice string
 	if err := json.Unmarshal(obj["tool_choice"], &choice); err != nil || choice != "auto" {

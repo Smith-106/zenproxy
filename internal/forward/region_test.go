@@ -330,10 +330,10 @@ func TestARegionRefusalIsClassifiedAndRotatable(t *testing.T) {
 	if !model.ClassRegion.Retryable() {
 		t.Fatal("a region refusal must be retryable elsewhere")
 	}
-	// The gate must stay non-attributable: it is decided by the request's client
-	// identity and burning exits on it wastes the pool.
-	if model.ClassTierGate.IPAttributable() {
-		t.Fatal("the tier gate became IP-attributable")
+	// Auth stays non-attributable; tier_gate is rotatable after the envelope
+	// (see TestTierGateRotatesAfterEnvelope).
+	if !model.ClassTierGate.IPAttributable() {
+		t.Fatal("the tier gate must be IP-attributable so enveloped FreeTierError can rotate")
 	}
 	if model.ClassAuth.IPAttributable() {
 		t.Fatal("a plain 403 became IP-attributable")

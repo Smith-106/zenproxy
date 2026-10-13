@@ -137,8 +137,8 @@ func TestPrepareRaisesTinyMaxTokens(t *testing.T) {
 	}
 }
 
-// A request that already carries tools must keep them in front, gain any
-// missing gate names, and leave the client's tool_choice alone.
+// A request that already carries tools must keep them, gain any missing gate
+// names at the front (prompt-cache stable prefix), and leave tool_choice alone.
 func TestPreparePreservesClientToolsAndToolChoice(t *testing.T) {
 	raw := body(t, map[string]any{
 		"model":  "big-pickle",
@@ -159,19 +159,8 @@ func TestPreparePreservesClientToolsAndToolChoice(t *testing.T) {
 	}
 	obj := decode(t, plan.Body)
 	names := nestedToolNames(t, obj)
-	if names[0] != "get_weather" {
-		t.Errorf("the caller's own tool must stay in front, got %q", names[0])
-	}
-	hits := 0
-	for _, n := range names {
-		for _, g := range gateToolNames {
-			if n == g {
-				hits++
-			}
-		}
-	}
-	if hits < gateMinToolNames {
-		t.Errorf("only %d of the gate tool names present; want >= %d", hits, gateMinToolNames)
+	if len(names) < 3 || names[0] != "bash" || names[1] != "read" || names[2] != "get_weather" {
+		t.Errorf("tools = %v, want [bash read get_weather…]", names)
 	}
 	// Client tool_choice must survive untouched.
 	var choice map[string]any
@@ -186,6 +175,33 @@ func TestPreparePreservesClientToolsAndToolChoice(t *testing.T) {
 	msgs := msgsOf(t, obj)
 	if len(msgs) != 1 || msgs[0].Content != "hi" {
 		t.Errorf("messages were disturbed: %+v", msgs)
+	}
+}
+
+func TestTopUpToolNamesPinsGatePairFirst(t *testing.T) {
+	client, _ := json.Marshal(map[string]any{
+		"type": "function", "function": map[string]any{"name": "get_weather"},
+	})
+	read, _ := json.Marshal(map[string]any{
+		"type": "function", "function": map[string]any{"name": "read", "description": "client-read"},
+	})
+	raw, err := topUpToolNames([]json.RawMessage{client, read}, toolShapeNested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools []json.RawMessage
+	if err := json.Unmarshal(raw, &tools); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("len=%d want 3 (bash stub + client read + weather)", len(tools))
+	}
+	if toolNameOf(tools[0]) != "bash" || toolNameOf(tools[1]) != "read" || toolNameOf(tools[2]) != "get_weather" {
+		t.Fatalf("order = %q %q %q", toolNameOf(tools[0]), toolNameOf(tools[1]), toolNameOf(tools[2]))
+	}
+	// Client's own read entry must be reused, not replaced by the stub.
+	if !strings.Contains(string(tools[1]), "client-read") {
+		t.Fatalf("client read definition lost: %s", tools[1])
 	}
 }
 
@@ -339,6 +355,38 @@ func TestApplyHeadersMintsClientShapedIDs(t *testing.T) {
 	}
 	if hdrs.Get("x-opencode-request") == hdrs.Get("x-opencode-session") {
 		t.Error("request and session ids must differ")
+	}
+}
+
+// An inbound conversation key must pin the upstream session across turns.
+// Minting a fresh ses_* every attempt is what was wiping prompt-cache hits.
+func TestApplyHeadersReusesInboundSession(t *testing.T) {
+	seed := "pfx_24397c586d40f4f9272eaaaaaaaaaaaa"
+	want := deriveClientSessionID(seed)
+
+	hdrs := http.Header{}
+	hdrs.Set("session_id", seed)
+	testFreeTier(t).ApplyHeaders(hdrs)
+	if got := hdrs.Get("x-opencode-session"); got != want {
+		t.Fatalf("x-opencode-session = %q, want derived %q", got, want)
+	}
+	if got := hdrs.Get("x-opencode-session-id"); got != want {
+		t.Fatalf("x-opencode-session-id = %q, want derived %q", got, want)
+	}
+
+	again := http.Header{}
+	again.Set("session_id", seed)
+	testFreeTier(t).ApplyHeaders(again)
+	if again.Get("x-opencode-session") != want {
+		t.Fatalf("same seed must map to the same ses_* across turns")
+	}
+
+	shaped := want
+	keep := http.Header{}
+	keep.Set("x-opencode-session", shaped)
+	testFreeTier(t).ApplyHeaders(keep)
+	if keep.Get("x-opencode-session") != shaped {
+		t.Fatalf("already-shaped ses_* must be kept verbatim, got %q", keep.Get("x-opencode-session"))
 	}
 }
 

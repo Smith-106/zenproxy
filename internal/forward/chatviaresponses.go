@@ -72,6 +72,28 @@ func chatToResponsesBody(raw []byte) (out []byte, clientStream bool, err error) 
 			dst[k] = v
 		}
 	}
+	// Prompt-cache identity must survive the rewrite. session-sticky (and
+	// OpenAI clients) put the stable conversation key on prompt_cache_key;
+	// dropping it here made every muse turn look like a cold prefix to the
+	// upstream even when account+exit+ses_* were already sticky — which is
+	// exactly the "cache_read stuck at ~3–4k" pattern measured in production.
+	for _, k := range []string{"prompt_cache_key", "prompt_cache_retention", "include"} {
+		if v, ok := src[k]; ok && len(bytes.TrimSpace(v)) > 0 && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+			dst[k] = v
+		}
+	}
+	// Chat clients (OpenCode / sub2api) send reasoning_effort; Responses wants
+	// a `reasoning` object. Dropping either is exactly "丢失思考度": the
+	// upstream falls back to a shallow default and OpenCode's thinking pane
+	// stays empty because no summary was requested.
+	attachReasoningForResponses(dst, src)
+	// CPA lists muse free models with thinking.levels=["xhigh"], but OpenCode's
+	// "auto" UI often sends no reasoning_effort at all (usage shows empty while
+	// the console prints auto). Default the bridge to xhigh+summary so those
+	// turns actually get the configured thinking depth and a foldable trace.
+	if _, has := dst["reasoning"]; !has && needsChatViaResponses(model) {
+		dst["reasoning"] = map[string]any{"effort": "xhigh", "summary": "auto"}
+	}
 	// Tools stay if present; prepareResponses will top them up and force flat shape.
 	if v, ok := src["tools"]; ok && len(bytes.TrimSpace(v)) > 0 && !bytes.Equal(bytes.TrimSpace(v), []byte("null")) && !bytes.Equal(bytes.TrimSpace(v), []byte("[]")) {
 		dst["tools"] = flattenChatTools(v)
@@ -79,6 +101,40 @@ func chatToResponsesBody(raw []byte) (out []byte, clientStream bool, err error) 
 
 	out, err = json.Marshal(dst)
 	return out, clientStream, err
+}
+
+func rawPresent(v json.RawMessage) bool {
+	v = bytes.TrimSpace(v)
+	return len(v) > 0 && !bytes.Equal(v, []byte("null"))
+}
+
+// attachReasoningForResponses maps chat-shaped reasoning knobs onto the
+// Responses `reasoning` object. summary=auto is filled in when absent so the
+// upstream actually returns reasoning items we can fold back into
+// reasoning_content for OpenCode.
+func attachReasoningForResponses(dst map[string]any, src map[string]json.RawMessage) {
+	if v, ok := src["reasoning"]; ok && rawPresent(v) {
+		var obj map[string]any
+		if err := json.Unmarshal(v, &obj); err == nil && obj != nil {
+			if _, has := obj["summary"]; !has {
+				obj["summary"] = "auto"
+			}
+			dst["reasoning"] = obj
+			return
+		}
+		dst["reasoning"] = v
+		return
+	}
+	if v, ok := src["reasoning_effort"]; ok && rawPresent(v) {
+		var effort string
+		if err := json.Unmarshal(v, &effort); err != nil || strings.TrimSpace(effort) == "" {
+			return
+		}
+		dst["reasoning"] = map[string]any{
+			"effort":  strings.TrimSpace(effort),
+			"summary": "auto",
+		}
+	}
 }
 
 func splitChatMessages(raw json.RawMessage) (instructions string, input any, ok bool) {
@@ -113,10 +169,11 @@ func splitChatMessages(raw json.RawMessage) (instructions string, input any, ok 
 		return "", nil, false
 	}
 	instructions = strings.Join(sys, "\n\n")
-	// One plain user turn → string input (matches how we probe muse-spark).
-	if len(rest) == 1 && strings.EqualFold(fmt.Sprint(rest[0]["role"]), "user") {
-		return instructions, rest[0]["content"], true
-	}
+	// Always emit input as a message array, even for a single user turn.
+	// A bare string is accepted by /responses and was convenient for probes,
+	// but the second turn of a conversation then switches to an array: the
+	// upstream prompt-cache prefix cannot grow across that shape change, so
+	// cache_read stuck at the instructions+tools size (~3–4k) forever.
 	return instructions, rest, true
 }
 
@@ -216,37 +273,47 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 				Type string `json:"type"`
 				Text string `json:"text"`
 			} `json:"content"`
+			Summary []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"summary"`
 		} `json:"output"`
 		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, err
 	}
-	var text strings.Builder
+	var text, reasoning strings.Builder
 	for _, item := range resp.Output {
-		if item.Type != "" && item.Type != "message" {
-			continue
-		}
-		for _, c := range item.Content {
-			if c.Type == "output_text" || c.Type == "text" || c.Type == "" {
-				text.WriteString(c.Text)
+		switch item.Type {
+		case "reasoning":
+			for _, s := range item.Summary {
+				reasoning.WriteString(s.Text)
+			}
+			for _, c := range item.Content {
+				if c.Type == "reasoning_text" || c.Type == "output_text" || c.Type == "text" || c.Type == "" {
+					reasoning.WriteString(c.Text)
+				}
+			}
+		case "message", "":
+			for _, c := range item.Content {
+				if c.Type == "output_text" || c.Type == "text" || c.Type == "" {
+					text.WriteString(c.Text)
+				}
 			}
 		}
-	}
-	created := resp.CreatedAt
-	if created == 0 {
-		created = 0
 	}
 	out := foldedCompletion{
 		ID:      resp.ID,
 		Object:  "chat.completion",
-		Created: created,
+		Created: resp.CreatedAt,
 		Model:   resp.Model,
 		Choices: []foldedChoice{{
 			Index: 0,
 			Message: foldedMessage{
-				Role:    "assistant",
-				Content: text.String(),
+				Role:             "assistant",
+				Content:          text.String(),
+				ReasoningContent: reasoning.String(),
 			},
 			FinishReason: "stop",
 		}},
@@ -266,40 +333,49 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 	if len(obj.Choices) > 0 {
 		content = obj.Choices[0].Message.Content
 	}
+	type deltaBody struct {
+		Role             string `json:"role,omitempty"`
+		Content          string `json:"content,omitempty"`
+		ReasoningContent string `json:"reasoning_content,omitempty"`
+	}
 	type chunk struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`
 		Created int64  `json:"created"`
 		Model   string `json:"model"`
 		Choices []struct {
-			Index int `json:"index"`
-			Delta struct {
-				Role    string `json:"role,omitempty"`
-				Content string `json:"content,omitempty"`
-			} `json:"delta"`
-			FinishReason *string `json:"finish_reason"`
+			Index        int       `json:"index"`
+			Delta        deltaBody `json:"delta"`
+			FinishReason *string   `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	var buf bytes.Buffer
 	role := chunk{ID: obj.ID, Object: "chat.completion.chunk", Created: obj.Created, Model: obj.Model}
 	role.Choices = []struct {
-		Index int `json:"index"`
-		Delta struct {
-			Role    string `json:"role,omitempty"`
-			Content string `json:"content,omitempty"`
-		} `json:"delta"`
-		FinishReason *string `json:"finish_reason"`
-	}{{Index: 0}}
-	role.Choices[0].Delta.Role = "assistant"
+		Index        int       `json:"index"`
+		Delta        deltaBody `json:"delta"`
+		FinishReason *string   `json:"finish_reason"`
+	}{{Index: 0, Delta: deltaBody{Role: "assistant"}}}
 	enc, _ := json.Marshal(role)
 	buf.WriteString("data: ")
 	buf.Write(enc)
 	buf.WriteString("\n\n")
 
+	reasoning := ""
+	if len(obj.Choices) > 0 {
+		reasoning = obj.Choices[0].Message.ReasoningContent
+	}
+	if reasoning != "" {
+		delta := role
+		delta.Choices[0].Delta = deltaBody{ReasoningContent: reasoning}
+		enc, _ = json.Marshal(delta)
+		buf.WriteString("data: ")
+		buf.Write(enc)
+		buf.WriteString("\n\n")
+	}
 	if content != "" {
 		delta := role
-		delta.Choices[0].Delta.Role = ""
-		delta.Choices[0].Delta.Content = content
+		delta.Choices[0].Delta = deltaBody{Content: content}
 		enc, _ = json.Marshal(delta)
 		buf.WriteString("data: ")
 		buf.Write(enc)
@@ -307,10 +383,7 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 	}
 	stop := "stop"
 	final := role
-	final.Choices[0].Delta = struct {
-		Role    string `json:"role,omitempty"`
-		Content string `json:"content,omitempty"`
-	}{}
+	final.Choices[0].Delta = deltaBody{}
 	final.Choices[0].FinishReason = &stop
 	enc, _ = json.Marshal(final)
 	buf.WriteString("data: ")
