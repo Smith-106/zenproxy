@@ -383,7 +383,7 @@ func TestSpecsFromConfigExpandsResin(t *testing.T) {
 // every upstream path down at once: its URL carries no host, and both the
 // HTTP transport and the raw-tunnel dial behave like a plain local client.
 func TestDirectExitServesLikeALocalClient(t *testing.T) {
-	var hitRawConn bool
+	rawConn := make(chan struct{}, 1)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -395,7 +395,7 @@ func TestDirectExitServesLikeALocalClient(t *testing.T) {
 			if err != nil {
 				return
 			}
-			hitRawConn = true
+			rawConn <- struct{}{}
 			conn.Close()
 		}
 	}()
@@ -430,7 +430,9 @@ func TestDirectExitServesLikeALocalClient(t *testing.T) {
 	if _, err := dx.DialContext(context.Background(), "tcp", ln.Addr().String()); err != nil {
 		t.Fatalf("direct DialContext: %v", err)
 	}
-	if !hitRawConn {
+	select {
+	case <-rawConn:
+	case <-time.After(2 * time.Second):
 		t.Fatal("DialContext never reached the target listener")
 	}
 }
@@ -605,6 +607,41 @@ func TestPoisonTLSRetiresFasterThanOrdinaryFailures(t *testing.T) {
 	pool.MarkFailure("a", "tls: failed to verify certificate")
 	if h := healthOf(t, pool, "a"); !h.Retired {
 		t.Fatalf("not retired after %d poison TLS failures: %+v", poisonRetireAfter, h)
+	}
+}
+
+// The provider-side MITM corruption measured on the 3129 family: the tunnel
+// lands on an edge that relays raw HTTP/2 SETTINGS bytes where an HTTP/1.1
+// response belongs. Same fast family as a bad certificate — one strike
+// quarantines, two consecutive retire. Two semantics are pinned here:
+//   - two garbage strikes with NO successful real traffic retire the slot;
+//   - one real-traffic success between strikes wipes the poison streak (the
+//     round trip proved the edge clean), mirroring the x509 family — the
+//     accumulator for flappy edges is the PROBE path, which never clears
+//     poison strikes (see TestPoisonStreakSurvivesProbeClear).
+func TestMalformedH2GarbageIsPoison(t *testing.T) {
+	pool := retirePool(t, 3, 20)
+	garbage := `Post "https://opencode.ai/inference/v1/responses": net/http: HTTP/1.x transport connection broken: malformed HTTP response "\x00\x00\x12\x04\x00"`
+	pool.MarkFailure("a", garbage)
+	if ok, _ := pool.Healthy("a"); ok {
+		t.Fatal("a malformed-response leak must quarantine on the first strike")
+	}
+	pool.MarkFailure("a", garbage)
+	if h := healthOf(t, pool, "a"); !h.Retired {
+		t.Fatalf("not retired after 2 consecutive garbage strikes: %+v", h)
+	}
+
+	// A real success clears the poison streak by design.
+	pool.MarkFailure("b", garbage)
+	pool.MarkSuccess("b", time.Millisecond)
+	if h := healthOf(t, pool, "b"); h.Retired {
+		t.Fatalf("success between strikes must wipe the poison streak: %+v", h)
+	}
+	// Probe-style clearing keeps the strike: failing a probe round with
+	// garbage adds to the standing strike instead of resetting it.
+	pool.MarkFailure("b", "unreachable: "+garbage)
+	if h := healthOf(t, pool, "b"); h.Retired {
+		t.Fatalf("unexpected retire: %+v", h)
 	}
 }
 

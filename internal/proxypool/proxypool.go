@@ -42,10 +42,18 @@ import (
 // health.RetireAfter + consecFails.
 const poisonRetireAfter = 2
 
-// PoisonTLS reports whether a failure reason means the exit cannot present a
-// usable certificate for the upstream. These are not blips: a slot that
+// PoisonTLS reports whether a failure reason means the exit cannot be trusted
+// to carry the upstream's TLS stream. These are not blips: a slot that
 // tunnels TCP but fails x509 verification will keep failing every real
 // request, and a TCP-only reachability probe used to mark it healthy again.
+//
+// The malformed-HTTP-response match covers the provider-side MITM corruption
+// measured on the 3129 family: the tunnel lands on a proxy edge that relays
+// raw HTTP/2 frame bytes ("\x00\x00\x12\x04…", a SETTINGS frame) where the
+// HTTP/1.1 response belongs. Like a bad certificate it is not transient
+// noise — the edge keeps leaking frames until its operators fix the layer —
+// and every strike burns a full attempt budget, so it earns the same fast
+// treatment: one strike quarantines, two consecutive retire.
 func PoisonTLS(reason string) bool {
 	lower := strings.ToLower(reason)
 	switch {
@@ -58,6 +66,8 @@ func PoisonTLS(reason string) bool {
 	case strings.Contains(lower, "tls: failed to verify"):
 		return true
 	case strings.Contains(lower, "tls: bad certificate"):
+		return true
+	case strings.Contains(lower, "malformed http response"):
 		return true
 	default:
 		return false
