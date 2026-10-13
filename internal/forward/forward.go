@@ -284,6 +284,13 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// (even for its own /v1/responses clients), so without a rewrite those
 	// models are unreachable. Convert once here; free-tier prepare then sees a
 	// Responses path/body and builds the matching envelope.
+	//
+	// The scope stays the measured muse family: 2026-10-13 evening the upstream
+	// began refusing zen chat for free keys even from a residential IP while
+	// the CLI failed over to the inference responses endpoint — but whether the
+	// other free models refuse chat there is not yet measured, and bridging
+	// everything would be speculation that costs every refusal-retry its chat
+	// surface. Re-visit after a live window measurement.
 	viaChatToResponses := false
 	clientWantedStream := false
 	preparePath := cur.target.Path
@@ -579,6 +586,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 // FreeTier exposes the envelope writer for the dashboard, which reports which
 // models were discovered by refusal.
 func (e *Engine) FreeTier() *FreeTier { return e.free }
+
 // freeAttemptHeaderTimeout caps how long an enveloped free-tier attempt may
 // take to produce response headers. The envelope always streams upstream, so
 // a live slot answers in well under a second and a stuck one is dead weight;

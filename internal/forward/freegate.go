@@ -70,10 +70,12 @@ import (
 )
 
 // defaultClientUA mirrors the User-Agent of the client that is allowed through.
-// OpenCode 1.19+ ships Bun with `--user-agent=opencode/<ver>` and also sends
-// the short `opencode/<ver>` form from several fetch sites; the older
-// `ai-sdk/… runtime/bun/…` suffix is no longer what the binary emits.
-const defaultClientUA = "opencode/1.19.0"
+// Re-captured 2026-10-13 evening from opencode 1.19.0 itself (mitm capture):
+// the CLI stamps its requests with the ai-sdk / runtime suffixes on the wire —
+// `/responses` carries ai-sdk/provider-utils/4.0.40, and the short form only
+// shows up in places like the models fetch. Keep in sync with the envelope
+// spec docs (docs/FREE-TIER.md).
+const defaultClientUA = "opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
 
 // FreeTier turns an inbound request into the envelope the free tier accepts.
 type FreeTier struct {

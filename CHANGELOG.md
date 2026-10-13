@@ -7,6 +7,22 @@
 
 ### 变更
 
+- **免费上游端点迁移：`zen/v1` → `inference/v1`（mitm 抓包实测）。** 用真实 opencode
+  1.19.0 CLI 抓包（本机住宅 IP + mitmproxy）：CLI 对 muse 的完整时序是
+  `zen/v1/responses` 402（标题生成的付费小调用，Insufficient account funds）→
+  `zen/v1/chat/completions` **403 FreeTierError ×6** → failover
+  **`inference/v1/responses` 200**。即 zen 面 chat 对免费 key 已关闭、CLI 靠内置
+  failover 活在 inference 面。zenproxy 上游 `zen.base_url` 随之切换到
+  `https://opencode.ai/inference/v1`，muse 族的 chat→responses 桥保持不变。
+- **免费门行为学更新（本机连续实验 20+ 次）。** 同一 (key×IP×body×UA) 组合在
+  几分钟内 200 → 之后 13+ 连 403；urllib / bun fetch / curl_cffi chrome 指纹 /
+  mitmproxy 转发 / 服务器端三个「今晨幸存」slot 全部 403 —— **排除静态指纹门**，
+  结论是小时级批次窗（窗内放行一小批身份，窗外统一 FreeTierError）。此前
+  「403=IP 信誉门」的结论要加上时间维度：同一 IP 会随批次翻面。
+- **信封 UA 更新为 CLI 真值。** 抓包显示 CLI 实际发送
+  `opencode/1.19.0 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14`
+  （/responses 面；短形式只在 models 拉取等处）。`default_client_ua` 与之一致，
+  config 仍可覆盖。
 - **出口健康状态持久化（`exits-state.json`）。** 此前 quarantine / free-tier 封锁 /
   quota 冷却 / retire 判决全部只活在内存里，`docker restart` 等于给全池「大赦」：
   同一批已知死 IP 重启后重新吃满 attempt 预算（账面上游调用 34 万+，失败 29 万+，
