@@ -14,12 +14,19 @@ opencode 的 `*-free` 模型对"客户端身份"有门禁：
 > 实测通过的最小信封是：**官方 UA + `x-opencode-*` 身份头 + `"stream": true` + 工具名
 > `bash` + `read`**。旧的 title/agent prompt 注入会污染弱模型（如 `step-5-preview-free`
 > 回答 `Greeting` / `Short joke request`），因此已从 zenproxy 中移除。
+>
+> **2026-10-13 更新（出口 IP 维度）**：门禁**并非只看信封**。同一封完美信封在同一秒内，
+> 机房 IP 直连 100% `403 FreeTierError`（4 个账号、4 种 UA 全试），而经免费代理池的出口
+> 上同一封信封能 200。判定：这是**出口信誉门**——`*-free` 额度实际只在"看起来像真实
+> OpenCode 用户"的 IP 组合下放行。因此命中 403 FreeTierError 后：
+> ① 换出口重试是有意义的（同一信封、换出口）；
+> ② 单一出口的命中率 ≈ 0.1%（免费代理池实测），zenproxy 用 15 分钟出口封锁 + 轮换来收敛。
 
 ---
 
 ## 一、门禁到底看什么
 
-门禁只看**请求信封**，不看 TLS 指纹、不看出口 IP。四项要求缺一不可：
+门禁看**请求信封**与**出口 IP 信誉**，不看 TLS 指纹。信封四项要求缺一不可：
 
 | # | 要求 | 实测边界 | zenproxy |
 | :--- | :--- | :--- | :--- |
@@ -55,6 +62,25 @@ bash + read + 自建  → 200（自建工具排在前面，调用照常）
 | :--- | :--- | :--- |
 | `/chat/completions` | 客户端**没有**自带工具 → 设 `"none"`，避免模型去调注入的 stub；客户端**已有**工具 → 保留其 `tool_choice` | `"none"` / 指定函数 / 省略均可 200 |
 | `/responses` | 有 tools 时**只接受** `"auto"`；`"none"` 或指定函数 → HTTP 400 | 信封无条件写成 `"auto"` |
+
+### 1.2b 出口 IP 信誉门（2026-10-13 实测）
+
+同一封已通过结构门的请求（官方 UA `opencode/1.19.0` + 全部身份头 + `bash`/`read` +
+`stream:true`）：
+
+```
+服务器本机 IP（Oracle 机房）直连    → 403 FreeTierError（4 账号 × 多 UA，100% 复现，0.4-0.7s）
+住宅/免费代理出口 A                → 200
+同一时刻免费代理出口 B              → 403 FreeTierError
+同一出口稍后重试                    → 概率性翻转
+```
+
+结论：**门在 IP 维度上放行的是"好信誉"出口**，机房 IP 整体拒绝；免费代理里只有小部分
+IP 当前在信誉白名单上。所以：
+
+- 换出口对 FreeTierError **有效**（zenproxy 已把 `ClassTierGate` 归为可轮换；
+  命中后该出口封锁 15 分钟，到期或真实 200 才解封）；
+- 命中率是瓶颈，不是信封形状。池子越大、信誉越杂，收敛越快。
 
 ### 1.3 为什么不再注入 prompt
 
@@ -206,7 +232,8 @@ sudo docker restart zenproxy
 | :--- | :--- | :--- |
 | 410 `ModelDeprecated` | 上游已下线 | 从名单删掉 |
 | 400 `ModelProtocolUnsupported` | **这个端点**不接这个模型 —— 换端点再试 | 见下 |
-| 429 `FreeUsageLimitError` / `Endpoint is unavailable` | 通了门禁，额度或上游瞬时不可用 | 换出口 / 等待 |
+| 429 `FreeUsageLimitError` / `Endpoint is unavailable` | 通了门禁，该出口额度用尽（UTC 0 点重置） | 换出口 / 等待 |
+| 403 `FreeTierError`（已套壳仍报） | **这个出口**的 IP 不在信誉白名单 | 换出口（zenproxy 自动：封锁 15 分钟 + 轮换） |
 | 403 `RegionError` | 出口 IP 所在国家被限制 | 换国家出口 |
 | 402 `server_error` | 付费模型，账号没额度 | 充值 |
 

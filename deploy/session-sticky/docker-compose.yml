@@ -1,0 +1,20 @@
+name: session-sticky
+
+services:
+  session-sticky:
+    image: python:3.12-alpine
+    container_name: session-sticky
+    restart: always
+    command: ["python", "-u", "/app/sticky.py"]
+    environment:
+      UPSTREAM: http://sub2api:8080
+      LISTEN: 0.0.0.0:8091
+    volumes:
+      - ./sticky.py:/app/sticky.py:ro
+    networks:
+      - llm-internal
+
+networks:
+  llm-internal:
+    external: true
+    name: llm-internal

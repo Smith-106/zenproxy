@@ -125,20 +125,27 @@ health:
   retire_after: 20
 
   # 上一轮探活耗时超过这个值的出口会被降为「备用」：仍在池子里、仍算健康，
-  # 但不再被优先选中。实测这类池子里"能用"的出口常常要 20 秒才回，建议开。
-  # 未测量过的出口（latency 为 0）永远算合格，新加的成员不会被饿死。
-  max_latency: 1s
+  # 但不再被优先选中。未测量过的出口（latency 为 0）永远算合格。
+  # Opencode free 不要压到 1s：优先出口会只剩三五条，额度打在同一小撮 IP 上，
+  # 轮换和缓存都会变差。3s 更均衡；仍嫌慢的出口继续降为备用。
+  max_latency: 3s
 
 policy:
-  max_attempts: 3
+  # 免费池出口常有「单 IP 日额度 / 区域×模型 403」。3 太容易在耗尽出口上耗完；
+  # Opencode free 实测建议 8：多换几个未冷却出口再向客户端认输。
+  max_attempts: 8
   # 出现这些状态码就换出口重试。407 是代理自身鉴权失败（这个出口死了）。
   # 反代模式（渠道填 Base URL）下上游响应是明文，这些码都看得到；
   # 正向代理模式（渠道填「代理」）下 https 目标只有一条密文隧道，看不到，只能靠连接失败换。
   rotate_on_status: [403, 407, 429, 500, 502, 503, 504, 520, 522, 524]
   rotate_on_transport: true                       # 连不上/超时也换出口
   max_body_bytes: 33554432                        # 32 MiB
-  stream_idle_timeout: 300s                       # 流式响应 5 分钟没有新字节就断
-  upstream_timeout: 600s                          # 单次上游请求硬上限
+  stream_idle_timeout: 1800s                      # 流式响应 30 分钟没有新字节就断（muse xhigh）
+  upstream_timeout: 3600s                         # 单次上游请求硬上限（对齐 CPA openresty 1h）
+  # CPA 风格会话→出口粘性：入站 session_id / prompt_cache_key / x-opencode-session
+  # 把「当前账号」钉在同一个 resin 出口上，TTL 内命中复用；出口坏了才换绑。
+  # 默认 1h（与 CLIProxyAPI SessionAffinitySelector 一致）。设为 -1s 关闭。
+  session_exit_ttl: 1h
 
   # 正向代理模式的目标白名单。留空 = 不设白名单（放行任何目标），
   # 只有监听到回环时才可以留空 —— 这里监听的正是 0.0.0.0，所以必须写。

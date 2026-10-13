@@ -497,6 +497,46 @@ func TestPoisonTLSRetiresFasterThanOrdinaryFailures(t *testing.T) {
 	}
 }
 
+// A probe (or any path that only clears consecFails) must not wipe poison
+// strikes — that is what kept intermittent MITM resin slots immortal.
+func TestPoisonStreakSurvivesProbeClear(t *testing.T) {
+	pool := retirePool(t, 2, 20)
+	pool.MarkFailure("a", "x509: certificate is not valid for any names")
+	if h := healthOf(t, pool, "a"); h.Retired {
+		t.Fatal("first poison strike must not retire yet")
+	}
+	// Simulate what probe success does: healthy again, consecFails wiped,
+	// poisonConsec kept. We reach into MarkSuccess? No — MarkSuccess clears
+	// poison. Mimic the probe path directly.
+	pool.mu.RLock()
+	m := pool.byID["a"]
+	pool.mu.RUnlock()
+	m.mu.Lock()
+	m.healthy = true
+	m.consecFails = 0
+	m.quarantineUntil = time.Time{}
+	m.mu.Unlock()
+	if ok, _ := pool.Healthy("a"); !ok {
+		t.Fatal("precondition: probe clear should make Healthy true")
+	}
+	pool.MarkFailure("a", "tls: failed to verify certificate")
+	if h := healthOf(t, pool, "a"); !h.Retired {
+		t.Fatalf("second poison strike after probe clear must retire: %+v", h)
+	}
+}
+
+func TestRealSuccessClearsPoisonStreak(t *testing.T) {
+	pool := retirePool(t, 2, 20)
+	pool.MarkFailure("a", "x509: certificate is not valid for any names")
+	pool.MarkSuccess("a", time.Millisecond)
+	for i := 0; i < poisonRetireAfter-1; i++ {
+		pool.MarkFailure("a", "tls: failed to verify certificate")
+		if h := healthOf(t, pool, "a"); h.Retired {
+			t.Fatalf("retired early after real success reset, strike %d: %+v", i+1, h)
+		}
+	}
+}
+
 func TestPoisonTLSDetector(t *testing.T) {
 	cases := map[string]bool{
 		"x509: certificate is not valid for any names":     true,

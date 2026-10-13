@@ -616,6 +616,97 @@ sub2api**（或走管理面保存）。
 
 客户端用该分组的 API Key 调 `http://<host>:8082/v1/...` 即可。
 
+**陷阱：上游抖动被当成「账号坏了」→ 临时不可调度。**
+sub2api `0.2.x` 把 `connection refused` 等 transport 错硬编码成 durable fault
+（`openai_upstream_transport_error.go`），封禁 **10 分钟**；账号上的
+`temp_unschedulable_enabled=false` **挡不住**。zen 三号共一个 zenproxy，上游
+只是不稳定时也会整组摘调度。策略：**请求级 failover 保留，账号级 10 分钟封禁禁止。**
+主机 `clear-zen-transport-unsched.timer`（每 10s）无条件清掉 zen-01/02/03 上任何
+活跃的 `temp_unschedulable_*`。脚本：`deploy/scripts/clear_zen_transport_unsched.py`。
+
+**别把 `session_binding_enabled` 当成账号粘性。** 那是登录态 IP/UA 防盗绑定，
+不是上游账号 sticky。OpenAI/opencode 路径的粘性靠请求里的 `session_id` /
+`conversation_id` / `prompt_cache_key`；CPA 若不带这些头，三号会继续均分，
+前缀缓存命中率上不去。
+
+**`health.max_latency` 别压太死。** `1s` 时优先出口常常只剩 3–5 条，免费额度
+会打在同一小撮 IP 上，轮换暴涨、缓存更差。Opencode free 实测更合适 **3s**
+（慢的仍降为备用，但不至于把池子挤干）。
+
+**免费线路的会话粘性在 CPA 和 sub2api 之间补。** `session-sticky`（`deploy/session-sticky/`）
+只挂在 CPA → `sub2api:8080` 这一条上。请求里没有 `session_id` /
+`prompt_cache_key` 时，用**第一条 user 消息的前 1500 字**做稳定键，写入
+`session_id`、`conversation_id`、`x-opencode-session` 和 `prompt_cache_key`。
+同一段对话因此钉在同一个 zen 账号上；别的供应商不经过这个代理。
+
+**zenproxy freegate 不得每轮新造 `ses_*`。** `ApplyHeaders` 以前每次都
+`newClientID("ses_")`，上游把每一跳都当成新会话，账号粘住了缓存仍接近 0。
+现在复用入站 session / conversation 键（必要时归一成 `ses_*` 形状）；
+`x-opencode-request` 仍可每跳新造。
+
+**会话 → 出口粘性对齐 CPA。** CPA 的 `SessionAffinitySelector` 是
+`provider::session::model → auth`：显式 session 优先，命中复用，凭证不可用才
+换绑（见 [CLIProxyAPI#3613](https://github.com/router-for-me/CLIProxyAPI/issues/3613)）。
+zenproxy 对应做 `account::session::model → exit`（`policy.session_exit_ttl`，
+默认 1h）。入站 `session_id` / `prompt_cache_key` / `x-opencode-session` 钉住
+当前账号的 resin 出口；出口坏了才 `RotateForSession` 换绑。无 session 时仍走
+原来的账号→出口亲和。
+
+**muse 的 chat→responses 不得打散前缀缓存。** 两处实测坑：
+1. 重写后丢掉 `prompt_cache_key`（session-sticky 白写）；
+2. 单轮 `input` 用字符串、多轮改成数组 —— 形状一切换，上游
+   `cache_read` 就卡在 instructions+tools 的 ~3–4k。现在始终发 message 数组，
+   并透传 `prompt_cache_key` / `prompt_cache_retention`。
+
+**gate tools 前置。** `bash`/`read` 固定排在 `tools` 数组最前（客户端已有则前移
+复用，缺则补 stub）。免费门闸不看顺序，但 agent 客户端常抖工具列表；把稳定门闸
+对钉在前头，至少能保住 instructions + bash/read 这一段前缀。
+
+**TLS 毒槽加速退休。** MITM resin 口（x509 名不对）用独立的 `poisonConsec`
+计数，**探针成功不归零**；满 2 次就 `retired`。以前靠 `consecFails`，探针偶发
+握手成功会清零，slot-11/22 一类槽位反复隔离又回流，打散 session→exit。
+
+**muse「丢失思考度」。** chat→responses 曾丢掉 `reasoning_effort`，也不请求
+`reasoning.summary`；折回 chat 时又跳过 `output[].type=reasoning`。结果是
+OpenCode 选了 xhigh 也像没开思考，思考面板空白。现在：`reasoning_effort` →
+`reasoning.effort` + `summary=auto`；CPA/OpenCode 的 `auto` 常常**不带**
+effort 字段（用量里是空的），桥接层按 CPA 模型配置默认补 `xhigh`；折回时写入
+`reasoning_content` 并在 SSE 里带上。
+
+**cache_read 钉在 ~3441 不一定是故障。** 抓包可见一类流量只有
+`[system, user]` 两轮，且首条 user 前 1500 字不变、后半段每轮替换——`pfx_*`
+账号粘性正确，但上游前缀无法在「对话历史」上增长，只能命中
+instructions+gate tools 信封。真多轮（带 assistant/tool 历史）或自带
+`prompt_cache_key`（`01a…`）的会话 cache 可长到数万～20 万。CPA 已开
+`passthrough-headers: true`，有客户端 session 头时优先用真键。
+
+**HTTP 499 + ~100s / ~5min。** 多半是**客户端先断开**（OpenCode≈100s，
+Pi `httpIdleTimeoutMs` 默认 300000≈5min），不是 zenproxy 主动失败。muse 默认
+xhigh + chat→responses 折叠期间原先对客户端静默，更容易被掐。现已：
+CPA openresty `proxy_read/send_timeout=3600s`，zenproxy
+`upstream_timeout=3600s` / `stream_idle_timeout=1800s`，sticky `urlopen=3600s`；
+ReplyAsChat 流式折叠时每 15s 刷 SSE `: keepalive`。Pi 建议
+`httpIdleTimeoutMs: 1800000`（30min）。
+
+**全员 FreeUsageLimitError / 429。** resin 出口配额耗尽会冷却到 UTC 次日
+00:00。以前 zenproxy 仍会轮询 maxAttempts，客户端空等到 timeout。现在若
+没有任何未冷却出口，立刻 `429 + Retry-After`，不再空转。
+
+**429 空等 2–3 分钟。** 来自 CPA `request-retry` × sub2api
+`same_account_retry_limit=10`（配置键对本版本无效）。已：CPA
+`request-retry: 0`；session-sticky 对长 `Retry-After` 熔断（默认最多 hold
+10 分钟再探测），后续请求秒级 429，不再拖到 Pi 499。
+
+**加删账号不要 `docker compose ... --force-recreate`。** 重建空窗里 sub2api 会打到
+`connection refused`，三号一起被标成 10 分钟 `temp_unschedulable`，CPA 侧就是
+十几毫秒的 HTTP 503。正确路径：
+
+- 增改：`POST /admin/api/accounts`（或 `/opt/zenproxy/scripts/upsert_zen_account.sh`）
+- 删除：`DELETE /admin/api/accounts/{id}`（或 `delete_zen_account.sh`）
+- 同步改 `config.yaml` / `.env` 只为重启后还能恢复；**运行期以 admin API 为准**
+- 只有换 compose 注入的环境变量名等不得不换进程时，才显式
+  `recreate-zenproxy.sh recreate`（会有短暂空窗；靠 2s 看门狗尽快解封）
+
 **兜底：** 即便仍有路径把 muse-spark 打成 chat，zenproxy 反向入口也有
 chat→responses 桥；但主配置应走 sub2api 自己的 adaptive 协议分流。
 
