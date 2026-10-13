@@ -25,7 +25,7 @@ func TestWriteFoldedReportsAFailedFoldAsBadGateway(t *testing.T) {
 	for _, s := range []surface{surfaceChat, surfaceResponses} {
 		rec := httptest.NewRecorder()
 		resp := &http.Response{Body: io.NopCloser(strings.NewReader("<html>502 from a gateway</html>"))}
-		e.writeFolded(rec, resp, &GatePlan{Surface: s})
+		e.writeFolded(rec, resp, &GatePlan{Surface: s}, "", "", "")
 
 		if rec.Code != http.StatusBadGateway {
 			t.Errorf("surface %d: status = %d, want %d; body = %s",
@@ -52,7 +52,7 @@ func TestWriteFoldedStillAnswersTwoHundredOnSuccess(t *testing.T) {
 	e := &Engine{pol: config.Policy{MaxBodyBytes: 1 << 20}}
 	rec := httptest.NewRecorder()
 	resp := &http.Response{Body: io.NopCloser(strings.NewReader(sampleStream))}
-	e.writeFolded(rec, resp, &GatePlan{Surface: surfaceChat})
+	e.writeFolded(rec, resp, &GatePlan{Surface: surfaceChat}, "", "", "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())

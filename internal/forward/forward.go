@@ -6,6 +6,8 @@ package forward
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -374,10 +376,27 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		writeJSONError(w, http.StatusForbidden, "OpenCode free tier: no eligible egress exit right now; retry shortly")
 		return
 	}
-	// CPA-style explicit session identity. Prefer headers (session-sticky and
-	// OpenCode clients already stamp them); fall back to prompt_cache_key in
-	// the body so a body-only sticky seed still pins the exit.
+	// Conversation-less traffic is the cache killer: relays like new-api pass
+	// bodies with no session headers at all, and the free-tier envelope used
+	// to mint a FRESH ses_* per request — the upstream saw a new conversation
+	// identity every turn, and cache_read plateaued at the static prefix.
+	// Synthesize a stable key from the conversation-stable parts of the body
+	// (system prefix + tools + first user turn) exactly where the retired
+	// session-sticky bridge used to stand, then reuse it for the exit binding,
+	// the ses_* header and the body prompt_cache_key.
 	sessionID := inboundSessionID(r.Header, body)
+	if sessionID == "" && !truncated {
+		if seed, ok := synthesizeConversationSeed(body); ok {
+			sessionID = deriveClientSessionID("cnv:" + seed)
+			// Stamp it as if the client had sent it, so the envelope's
+			// stableClientSessionID adopts the memoized sticky id verbatim
+			// instead of minting a random one per request.
+			r.Header.Set("x-opencode-session", sessionID)
+			body = injectPromptCacheKey(body, "pfx_"+seed)
+			e.log.Info("cache-affinity: synthesized conversation key",
+				"account", cur.ent.ID, "key", sessionID)
+		}
+	}
 
 	maxAttempts := ch.budget()
 	if maxAttempts < 1 {
@@ -517,7 +536,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				// synthetic chat SSE built from the folded Responses object,
 				// because translating every Responses event live is a larger
 				// contract than this bridge needs.
-				e.writeFolded(w, resp, plan)
+				e.writeFolded(w, resp, plan, ent.ID, exitID, sessionID)
 				cancel()
 				return
 			}
@@ -831,7 +850,7 @@ func (e *Engine) writeStream(w http.ResponseWriter, resp *http.Response) {
 // upstream Responses stream is still being folded. Without them, muse xhigh
 // turns stay silent for minutes and the client (X-Stainless-Timeout / OpenCode)
 // aborts with HTTP 499 long before any chat chunk arrives.
-func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *GatePlan) {
+func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *GatePlan, accountID, exitID, sessionID string) {
 	wantChatStream := plan != nil && plan.ReplyAsChat && plan.Stream
 	var (
 		flusher http.Flusher
@@ -940,6 +959,10 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 		}
 		out = chatJSON
 	}
+	// One cache-accounting line per completion: the folded/converted body
+	// always carries the usage object, so the cached-prefix share is logged
+	// where it is measured — per account, per exit, per conversation.
+	e.logCacheUsage(out, accountID, exitID, sessionID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
 	w.Header().Del("Transfer-Encoding")
@@ -1351,4 +1374,173 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 // WriteError emits the JSON error envelope shared by every ingress.
 func WriteError(w http.ResponseWriter, status int, msg string) {
 	writeJSONError(w, status, msg)
+}
+
+// synthesizeConversationSeed derives a stable per-conversation seed from a
+// request body that carries no explicit identity. Only the parts that are
+// IDENTICAL on every turn of the same conversation are hashed — the system/
+// developer prefix, the tools list, and the FIRST user turn; later turns are
+// excluded because they grow, and a seed that changes per turn pins nothing.
+// Distinct conversations differ in the first user turn; the same conversation
+// shares everything hashed here. This is the seam the retired session-sticky
+// bridge used to fill for the sub2 chain, now built in so relays like new-api
+// (which pass bodies through untouched) stop looking like a new conversation
+// identity per request.
+//
+// Supported shapes: chat bodies ("messages" array), Responses bodies
+// ("instructions" + "input" array or "input" string). Returns 32 hex chars.
+func synthesizeConversationSeed(body []byte) (string, bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return "", false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &top); err != nil {
+		return "", false
+	}
+	h := sha256.New()
+	parts := 0
+	add := func(label string, text string) {
+		const cap = 8 << 10
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return
+		}
+		if len(text) > cap {
+			text = text[:cap]
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00", label, len(text))
+		h.Write([]byte(text))
+		parts++
+	}
+	add("system", messageText(top["instructions"]))
+	if v, ok := top["messages"]; ok && rawPresent(v) {
+		instructions, input, ok := splitChatMessages(v)
+		if ok {
+			add("system", instructions)
+			if arr, ok := input.([]map[string]any); ok && len(arr) > 0 {
+				role, _ := arr[0]["role"].(string)
+				text, _ := arr[0]["content"].(string)
+				add("first:"+role, text)
+			}
+		}
+	} else if v, ok := top["input"]; ok && rawPresent(v) {
+		var inStr string
+		var items []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if err := json.Unmarshal(v, &inStr); err == nil {
+			add("first:user", inStr)
+		} else if err := json.Unmarshal(v, &items); err == nil {
+			for _, it := range items {
+				if strings.EqualFold(it.Role, "user") {
+					add("first:user", messageText(it.Content))
+					break
+				}
+			}
+		}
+	}
+	if v, ok := top["tools"]; ok && rawPresent(v) {
+		add("tools", string(bytes.TrimSpace(v)))
+	}
+	if parts == 0 {
+		return "", false
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32], true
+}
+
+// injectPromptCacheKey sets prompt_cache_key=key on a chat or Responses body,
+// never overwriting a key the caller already supplied. The JSON is re-marshaled
+// once; bodies are already in memory at this point (oversized ones never take
+// this path), so the cost is bounded by the buffer.
+func injectPromptCacheKey(body []byte, key string) []byte {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(body), &top); err != nil {
+		return body
+	}
+	if _, has := top["prompt_cache_key"]; has {
+		return body
+	}
+	raw, err := json.Marshal(key)
+	if err != nil {
+		return body
+	}
+	top["prompt_cache_key"] = raw
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// usageCacheTokens best-effort extracts the cached-prefix accounting from a
+// completion usage object. OpenAI chat shapes carry it on
+// prompt_tokens_details.cached_tokens; Responses on
+// input_tokens_details.cached_tokens.
+func usageCacheTokens(raw json.RawMessage) (cached, total int64) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0, 0
+	}
+	var u struct {
+		PromptTokens        int64 `json:"prompt_tokens"`
+		InputTokens         int64 `json:"input_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		InputTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return 0, 0
+	}
+	if u.PromptTokensDetails != nil {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	if u.InputTokensDetails != nil {
+		cached = u.InputTokensDetails.CachedTokens
+	}
+	total = u.PromptTokens
+	if total == 0 {
+		total = u.InputTokens
+	}
+	return cached, total
+}
+
+// logCacheUsage emits the per-completion cache accounting line the cache-hit
+// work is measured against: one line per folded or converted completion, with
+// the conversation identity when one is known.
+func (e *Engine) logCacheUsage(out []byte, accountID, exitID, sessionID string) {
+	if e.log == nil {
+		return
+	}
+	var obj struct {
+		Model string          `json:"model"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(out, &obj); err != nil || obj.Usage == nil {
+		return
+	}
+	cached, total := usageCacheTokens(obj.Usage)
+	if total <= 0 {
+		return
+	}
+	pct := int64(0)
+	if total > 0 {
+		pct = cached * 100 / total
+	}
+	if sessionID == "" {
+		sessionID = "-"
+	}
+	if accountID == "" {
+		accountID = "-"
+	}
+	if exitID == "" {
+		exitID = "-"
+	}
+	e.log.Info("upstream cache usage",
+		"account", accountID, "exit", exitID, "model", obj.Model,
+		"cached_tokens", cached, "prompt_tokens", total, "hit_pct", pct,
+		"session", truncate([]byte(sessionID), 24))
 }
