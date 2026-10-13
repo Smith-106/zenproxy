@@ -397,6 +397,18 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// drops upstream prompt-cache affinity for the rest of the conversation;
 	// a second failure still rotates. Certificate poison never uses this path.
 	sameExitTransientRetry := false
+	// stormFallbackLogged: the direct-exit fallback below is loud once per
+	// request, not once per attempt.
+	stormFallbackLogged := false
+	// transportFails counts transport-class failures this request. When the
+	// provider's edges flap pool-wide (measured 2026-10-14: 860 strikes across
+	// 325 exits on all five POPs within an hour), rotation keeps serving the
+	// same broken layer attempt after attempt. The direct pseudo-exit dials
+	// from the host with no proxy at all, so after two straight transport
+	// failures every further attempt goes through it while it is healthy —
+	// measured: a direct dial reached the upstream while the shared 3129
+	// family could not complete a single CONNECT.
+	transportFails := 0
 	// Requests are counted per account actually used, so a pool that had to
 	// switch accounts does not credit the one that failed.
 	counted := ""
@@ -416,6 +428,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		proxy := e.reg.ExitForSession(ent.ID, sessionID, askedModel)
 		if proxy != nil {
 			exitID = proxy.ID
+		}
+		if fp := e.stormFallbackExit(transportFails); fp != nil && exitID != "direct" {
+			proxy = fp
+			exitID = fp.ID
+			if !stormFallbackLogged {
+				stormFallbackLogged = true
+				e.log.Info("transport storm: falling back to direct exit",
+					"account", ent.ID, "attempt", attempt, "transport_failures", transportFails)
+			}
 		}
 
 		sent := body
@@ -443,6 +464,12 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		if err != nil {
 			cancel()
 			class := classifyTransport(err)
+			if class == model.ClassTransport || class == model.ClassProxyAuth {
+				// Both mean the proxy ROUTE is sick (transport noise or the
+				// provider refusing another CONNECT) — exactly the shape the
+				// direct pseudo-exit can bypass.
+				transportFails++
+			}
 			e.reg.Record(ent.ID, class, err)
 			lastMsg = err.Error()
 			if exitID != "" {
@@ -581,6 +608,33 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	e.reg.Record(cur.ent.ID, model.ClassTransport, errors.New(lastMsg))
 	writeJSONError(w, http.StatusBadGateway,
 		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", maxAttempts, cur.ent.ID, lastMsg))
+}
+
+// stormFallbackThreshold is how many straight transport-class failures within
+// ONE request before the remaining attempts bypass the proxy layer entirely.
+// Two: the first may be noise (the sticky-exit retry eats one), the second
+// proves the route, and every further attempt on the same broken layer is
+// waste — measured 2026-10-14, a flare struck 325 distinct exits across all
+// five POP families while direct dials kept reaching the upstream.
+const stormFallbackThreshold = 2
+
+// stormFallbackExit returns the direct pseudo-exit when this request has
+// accumulated enough transport failures to prove the proxy layer is flapping
+// and the direct member is currently serving. A nil result means normal
+// rotation continues — no direct exit configured, direct itself sick, or the
+// request has not burned enough attempts yet.
+func (e *Engine) stormFallbackExit(transportFails int) *proxypool.Proxy {
+	if transportFails < stormFallbackThreshold {
+		return nil
+	}
+	p, ok := e.pool.Get("direct")
+	if !ok {
+		return nil
+	}
+	if h, _ := e.pool.Healthy("direct"); !h {
+		return nil
+	}
+	return p
 }
 
 // FreeTier exposes the envelope writer for the dashboard, which reports which
