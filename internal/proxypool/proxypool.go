@@ -29,12 +29,18 @@ import (
 	"zenproxy/internal/model"
 )
 
-// poisonRetireAfter is how many consecutive TLS/certificate failures it takes
-// to retire an exit for good. Quarantine already happens on the first such
+// poisonRetireAfter is how many TLS/certificate poison strikes it takes to
+// retire an exit for good. Quarantine already happens on the first such
 // failure (see MarkFailure); retirement is the door that stops the probe loop
-// from re-admitting a MITM slot every quarantine window. Ordinary transport
-// noise still uses health.RetireAfter.
-const poisonRetireAfter = 3
+// from re-admitting a MITM slot every quarantine window.
+//
+// These strikes live on member.poisonConsec and are deliberately NOT cleared
+// by a successful reachability probe: intermittent MITM slots often pass TLS
+// to the probe host between real-request failures, which used to reset
+// consecFails and keep the slot immortal. Only a real MarkSuccess (forwarded
+// traffic) clears the poison streak. Ordinary transport noise still uses
+// health.RetireAfter + consecFails.
+const poisonRetireAfter = 2
 
 // PoisonTLS reports whether a failure reason means the exit cannot present a
 // usable certificate for the upstream. These are not blips: a slot that
@@ -120,7 +126,13 @@ func (p *Proxy) newTransport() *http.Transport {
 		// SOCKS5 needs a custom dialer; there is no stdlib support.
 		remote := p.Scheme == "socks5h"
 		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return p.dialSOCKS5(ctx, network, addr, remote)
+			// A dead socks slot used to hang the whole forward attempt for the
+			// remaining request ctx (minutes). Dial+handshake through a live
+			// resin slot measures 0.5-3s, so cap the tunnel setup and turn
+			// dead slots into fast rotation fuel.
+			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			return p.dialSOCKS5(dialCtx, network, addr, remote)
 		}
 		t.ForceAttemptHTTP2 = true
 	}
@@ -344,13 +356,16 @@ func (c *bufferedConn) Read(b []byte) (int, error) { return c.r.Read(b) }
 type member struct {
 	*Proxy
 
-	mu              sync.Mutex
-	healthy         bool
-	exitIP          string
-	latencyMS       int64
-	failures        int64
-	softFails       int64
-	consecFails     int
+	mu          sync.Mutex
+	healthy     bool
+	exitIP      string
+	latencyMS   int64
+	failures    int64
+	softFails   int64
+	consecFails int
+	// poisonConsec counts TLS/certificate poison strikes. Unlike consecFails,
+	// probe success does not reset it — see poisonRetireAfter.
+	poisonConsec    int
 	quarantineUntil time.Time
 	lastErr         string
 	lastCheck       time.Time
@@ -380,6 +395,16 @@ type member struct {
 	quotaUntil  time.Time
 	quotaReason string
 	quotaHits   int
+
+	// freeTierUntil is a third axis: the exit answered an already-enveloped
+	// FreeTierError. Like quotaUntil it must NOT be cleared by a successful
+	// probe (probes never speak the free-tier gate), and like quarantineUntil
+	// it expires on a clock so a later residential-looking IP reuse can be
+	// tried again. Measured 2026-10: free-proxy slots flip between 403 and 200
+	// for the same envelope, so parking them briefly is what makes rotation
+	// converge instead of rediscovering the same refusals every minute.
+	freeTierUntil  time.Time
+	freeTierReason string
 
 	// regionBlocked records, per model name, that this exit's country is refused
 	// for that model — and it is keyed by model because that is what the
@@ -412,6 +437,11 @@ type Pool struct {
 	health  config.Health
 	log     *slog.Logger
 
+	// statePath persists the members' liveness slice across restarts
+	// (see persist.go). Empty disables persistence.
+	statePath string
+	dirty     atomic.Bool
+
 	rr atomic.Uint64
 }
 
@@ -424,8 +454,16 @@ type Spec struct {
 // NewPool builds the pool and marks everything healthy-but-unprobed, so the
 // daemon serves traffic immediately instead of waiting for the first probe
 // round.
-func NewPool(specs []Spec, hc config.Health, log *slog.Logger) (*Pool, error) {
+//
+// An optional trailing statePath turns on exit-health persistence (persist.go):
+// the pool replays quarantines, verdicts and failure streaks recorded by the
+// previous process at startup, and flushes its own changes debounced while it
+// runs. Omit it for stateless operation (tests).
+func NewPool(specs []Spec, hc config.Health, log *slog.Logger, statePath ...string) (*Pool, error) {
 	p := &Pool{byID: make(map[string]*member, len(specs)), health: hc, log: log}
+	if len(statePath) > 0 {
+		p.statePath = statePath[0]
+	}
 	for _, s := range specs {
 		px, err := New(s.ID, s.URL)
 		if err != nil {
@@ -442,6 +480,7 @@ func NewPool(specs []Spec, hc config.Health, log *slog.Logger) (*Pool, error) {
 		p.members = append(p.members, m)
 		p.byID[s.ID] = m
 	}
+	p.loadState()
 	return p, nil
 }
 
@@ -550,6 +589,7 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 		m.mu.Lock()
 		q := now.Before(m.quarantineUntil)
 		_, _, cool := p.quotaCooledLocked(m, now)
+		ft := p.freeTierBlockedLocked(m, now)
 		reg := p.regionBlockedLocked(m, model, now)
 		h := m.healthy
 		ret := m.retired
@@ -586,7 +626,9 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 			// is the worse of the two, and quarantine is the signal that lasts
 			// until proven otherwise.
 			quarantined = append(quarantined, m)
-		case cool:
+		case cool, ft:
+			// Quota-cooled and free-tier-blocked are both "working exit, wrong
+			// moment": demote together so Pick still prefers unblocked IPs.
 			cooled = append(cooled, m)
 		case reg:
 			region = append(region, m)
@@ -705,12 +747,14 @@ func (p *Pool) MarkSuccess(id string, latency time.Duration) {
 	defer m.mu.Unlock()
 	m.healthy = true
 	m.consecFails = 0
+	m.poisonConsec = 0 // real traffic proved the cert path; wipe the poison streak
 	m.quarantineUntil = time.Time{}
 	m.lastErr = ""
 	if latency > 0 {
 		m.latencyMS = latency.Milliseconds()
 	}
 	m.lastCheck = time.Now()
+	p.markDirty()
 }
 
 // MarkFailure records a bad round trip and quarantines the exit once the
@@ -741,6 +785,7 @@ func (p *Pool) MarkFailure(id, reason string) {
 	poison := PoisonTLS(reason)
 	if poison {
 		threshold = 1
+		m.poisonConsec++
 	}
 	if m.consecFails >= threshold {
 		m.healthy = false
@@ -754,26 +799,38 @@ func (p *Pool) MarkFailure(id, reason string) {
 		m.quarantineUntil = time.Now().Add(backoff)
 		p.log.Warn("egress quarantined",
 			"exit", id, "failures", m.failures, "consecutive", m.consecFails,
+			"poison_consec", m.poisonConsec,
 			"for", backoff.String(), "reason", reason, "poison_tls", poison)
 	}
-	// Quarantine is a nap; retirement is the door. An exit that has failed
-	// RetireAfter times running, with no success in between to reset the
-	// counter, is not going to come back — and re-probing it every 30 minutes
-	// forever is exactly the noise this is meant to stop.
-	retireAfter := p.health.RetireAfter
-	if poison && retireAfter > 0 && poisonRetireAfter < retireAfter {
-		retireAfter = poisonRetireAfter
+	// Quarantine is a nap; retirement is the door. Ordinary exits use
+	// consecFails vs RetireAfter. Poison TLS uses poisonConsec vs
+	// poisonRetireAfter so a lucky probe between MITM blips cannot wipe the
+	// streak (probe success clears consecFails but not poisonConsec).
+	if !m.retired {
+		if poison && poisonRetireAfter > 0 && m.poisonConsec >= poisonRetireAfter {
+			m.retired = true
+			m.retiredAt = time.Now()
+			m.retiredReason = fmt.Sprintf("%d TLS poison strikes (probe success does not reset); last: %s",
+				m.poisonConsec, reason)
+			p.log.Warn("egress retired for good",
+				"exit", id, "poison_consec", m.poisonConsec, "retire_after", poisonRetireAfter,
+				"reason", reason, "poison_tls", true,
+				"undo", "POST /admin/api/proxies/"+id+"/revive")
+		} else if !poison {
+			retireAfter := p.health.RetireAfter
+			if retireAfter > 0 && m.consecFails >= retireAfter {
+				m.retired = true
+				m.retiredAt = time.Now()
+				m.retiredReason = fmt.Sprintf("%d consecutive failures with no success in between; last: %s",
+					m.consecFails, reason)
+				p.log.Warn("egress retired for good",
+					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
+					"reason", reason, "poison_tls", false,
+					"undo", "POST /admin/api/proxies/"+id+"/revive")
+			}
+		}
 	}
-	if retireAfter > 0 && !m.retired && m.consecFails >= retireAfter {
-		m.retired = true
-		m.retiredAt = time.Now()
-		m.retiredReason = fmt.Sprintf("%d consecutive failures with no success in between; last: %s",
-			m.consecFails, reason)
-		p.log.Warn("egress retired for good",
-			"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
-			"reason", reason, "poison_tls", poison,
-			"undo", "POST /admin/api/proxies/"+id+"/revive")
-	}
+	p.markDirty()
 }
 
 // MarkSoftFailure records an observation that says something about the
@@ -794,6 +851,118 @@ func (p *Pool) MarkSoftFailure(id, reason string) {
 	m.softFails++
 	m.lastErr = reason
 	m.mu.Unlock()
+	p.markDirty()
+}
+
+// Quarantine parks an exit for d without counting toward retirement.
+// Prefer BlockFreeTier for FreeTierError — probes clear quarantineUntil.
+func (p *Pool) Quarantine(id string, d time.Duration, reason string) bool {
+	if id == "" {
+		return false
+	}
+	if d <= 0 {
+		d = p.health.Quarantine
+		if d <= 0 {
+			d = 5 * time.Minute
+		}
+	}
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	until := time.Now().Add(d)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retired {
+		return false
+	}
+	if until.After(m.quarantineUntil) {
+		m.quarantineUntil = until
+		m.lastErr = reason
+		m.lastCheck = time.Now()
+		p.log.Info("egress quarantined",
+			"exit", id, "for", d.String(), "reason", reason)
+		p.markDirty()
+		return true
+	}
+	return false
+}
+
+// BlockFreeTier parks an exit against free-tier traffic until a deadline.
+//
+// Unlike Quarantine / MarkFailure, a successful health probe does NOT clear
+// this — probes never exercise the OpenCode free-tier gate, so "ipify works"
+// is not evidence the exit will pass FreeTierError. The clock is the only
+// clearer, same as quotaUntil.
+func (p *Pool) BlockFreeTier(id string, d time.Duration, reason string) bool {
+	if id == "" {
+		return false
+	}
+	if d <= 0 {
+		d = 30 * time.Minute
+	}
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	until := time.Now().Add(d)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retired {
+		return false
+	}
+	if until.After(m.freeTierUntil) {
+		m.freeTierUntil = until
+		m.freeTierReason = reason
+		m.lastErr = reason
+		m.lastCheck = time.Now()
+		p.log.Info("egress blocked for free-tier refusal",
+			"exit", id, "for", d.String(), "until", until.Format(time.RFC3339), "reason", reason)
+		p.markDirty()
+		return true
+	}
+	return false
+}
+
+func (p *Pool) freeTierBlockedLocked(m *member, now time.Time) bool {
+	return !m.freeTierUntil.IsZero() && now.Before(m.freeTierUntil)
+}
+
+// FreeTierBlocked reports whether an exit is parked against free-tier traffic.
+func (p *Pool) FreeTierBlocked(id string) bool {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return p.freeTierBlockedLocked(m, time.Now())
+}
+
+// ClearFreeTier drops a free-tier block after a real upstream 2xx. Do not call
+// this from MarkSuccess: that helper currently runs for every HTTP response,
+// including FreeTier 403s, and would race the block just being recorded.
+func (p *Pool) ClearFreeTier(id string) {
+	if id == "" {
+		return
+	}
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	m.freeTierUntil = time.Time{}
+	m.freeTierReason = ""
+	m.mu.Unlock()
+	p.markDirty()
 }
 
 // CoolForQuota records that an upstream has refused this exit until a stated
@@ -824,6 +993,7 @@ func (p *Pool) CoolForQuota(id string, until time.Time, reason string) bool {
 		m.quotaUntil = until
 		m.quotaReason = reason
 		m.quotaHits++
+		p.markDirty()
 	}
 	return true
 }
@@ -867,6 +1037,34 @@ func (p *Pool) ClearQuotaCool(id string) bool {
 	m.quotaUntil = time.Time{}
 	m.quotaReason = ""
 	return had
+}
+
+// HasUncooledExit reports whether any non-retired, non-quarantined, healthy
+// exit is currently outside a quota cooldown and not region-blocked for model.
+// When this is false, every send will burn a 429 rotation; callers should fail
+// fast with Retry-After instead of looping maxAttempts.
+func (p *Pool) HasUncooledExit(model string) bool {
+	now := time.Now()
+	model = strings.TrimSpace(model)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, m := range p.members {
+		m.mu.Lock()
+		ret := m.retired
+		q := now.Before(m.quarantineUntil)
+		_, _, cool := p.quotaCooledLocked(m, now)
+		ft := p.freeTierBlockedLocked(m, now)
+		reg := p.regionBlockedLocked(m, model, now)
+		m.mu.Unlock()
+		// Degraded (unhealthy/slow) still counts: PickFor would use them before
+		// falling back to cooled exits. Only retired/quarantined/cooled/
+		// free-tier/region blocks are true dead ends.
+		if ret || q || cool || ft || reg {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // QuotaCooledIDs lists every exit currently inside a cooldown, soonest to
@@ -1178,6 +1376,7 @@ func (p *Pool) Retire(id, reason string) error {
 	m.retiredAt = time.Now()
 	m.retiredReason = reason
 	p.log.Warn("egress retired by hand", "exit", id, "reason", reason)
+	p.markDirty()
 	return nil
 }
 
@@ -1196,10 +1395,12 @@ func (p *Pool) Revive(id string) error {
 	m.retiredReason = ""
 	m.retiredAt = time.Time{}
 	m.consecFails = 0
+	m.poisonConsec = 0
 	m.quarantineUntil = time.Time{}
 	m.healthy = true
 	m.lastErr = ""
 	p.log.Info("egress revived", "exit", id)
+	p.markDirty()
 	return nil
 }
 
@@ -1239,6 +1440,7 @@ func (p *Pool) Prune(reason string) model.PruneReport {
 	if len(rep.Retired) > 0 {
 		p.log.Warn("pruned unusable exits", "retired", len(rep.Retired),
 			"still_usable", usable, "pool_empty", rep.PoolEmpty)
+		p.markDirty()
 	}
 	return rep
 }
@@ -1290,16 +1492,22 @@ func (p *Pool) Healthy(id string) (bool, bool) {
 }
 
 // Run probes every exit on the configured interval until ctx is cancelled.
+// It also runs the debounced exit-state flusher (persist.go) on the same
+// lifecycle.
 func (p *Pool) Run(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = time.Minute
 	}
+	saveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.saveLoop(saveCtx, 30*time.Second)
 	p.ProbeAll(ctx)
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			cancel() // final flush of any dirty state
 			return
 		case <-t.C:
 			p.ProbeAll(ctx)
@@ -1405,6 +1613,8 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	m.latencyMS = latency.Milliseconds()
 	m.healthy = true
 	m.consecFails = 0
+	// Keep poisonConsec: a probe that happens to pass TLS must not wipe the
+	// MITM strike count, or intermittent poison slots never reach retirement.
 	m.quarantineUntil = time.Time{}
 	if exitIP != "" {
 		m.lastErr = ""

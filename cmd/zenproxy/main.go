@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,15 @@ func main() {
 	}
 }
 
+// poolStatePath puts the exit-health sidecar file next to the registry's
+// state.json so both share the same persistence volume without sharing a file.
+func poolStatePath(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(stateFile), "exits-state.json")
+}
+
 func run() error {
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
 	flag.Parse()
@@ -53,7 +63,7 @@ func run() error {
 		return err
 	}
 
-	pool, err := proxypool.NewPool(proxypool.SpecsFromConfig(cfg.Proxies), cfg.Health, logger)
+	pool, err := proxypool.NewPool(proxypool.SpecsFromConfig(cfg.Proxies), cfg.Health, logger, poolStatePath(cfg.StateFile))
 	if err != nil {
 		return err
 	}
@@ -61,6 +71,10 @@ func run() error {
 	reg := registry.New(cfg.StateFile, pool, logger)
 	if err := reg.Load(); err != nil {
 		return err
+	}
+	if cfg.Policy.SessionExitTTL > 0 {
+		reg.SetSessionExitCache(registry.NewSessionExitCache(cfg.Policy.SessionExitTTL, 4096))
+		logger.Info("session→exit stickiness enabled", "ttl", cfg.Policy.SessionExitTTL)
 	}
 	if n := reg.Seed(cfg.Accounts); n > 0 {
 		logger.Info("seeded accounts from config", "count", n)
