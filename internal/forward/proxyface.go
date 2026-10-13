@@ -266,4 +266,3 @@ func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *re
 	writeJSONError(w, http.StatusBadGateway,
 		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", attempts, ent.ID, lastMsg))
 }
-

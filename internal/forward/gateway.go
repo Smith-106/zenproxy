@@ -405,4 +405,3 @@ func (e *Engine) upstreamURLFor(pool, rest string) (*url.URL, bool) {
 	}
 	return target, true
 }
-
