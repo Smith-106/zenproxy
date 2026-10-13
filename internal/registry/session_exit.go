@@ -169,7 +169,7 @@ func (r *Registry) ExitForSession(accountID, sessionID, model string) *proxypool
 				r.setBinding(accountID, bound)
 				r.pool.Bind(bound, accountID)
 				if r.log != nil {
-					r.log.Info("session-exit: cache hit",
+					r.log.Debug("session-exit: cache hit",
 						"account", accountID, "session", truncateSession(sessionID), "exit", bound, "model", model)
 				}
 				return px

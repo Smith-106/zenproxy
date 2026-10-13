@@ -393,7 +393,10 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// instead of minting a random one per request.
 			r.Header.Set("x-opencode-session", sessionID)
 			body = injectPromptCacheKey(body, "pfx_"+seed)
-			e.log.Info("cache-affinity: synthesized conversation key",
+			// Debug, not Info: this fires on EVERY session-less request (any
+			// relay that passes bodies through), so at Info it is the loudest
+			// line in the log while saying nothing new after the first time.
+			e.log.Debug("cache-affinity: synthesized conversation key",
 				"account", cur.ent.ID, "key", sessionID)
 		}
 	}
@@ -529,14 +532,47 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if stormFallbackLogged && exitID == "direct" {
 				e.reg.BindSession(ent.ID, sessionID, askedModel, exitID)
 			}
-			if plan != nil && (!plan.Stream || plan.ReplyAsChat) {
-				// The client asked for a single response and the free tier only
-				// answers streams, so the stream is folded back here.
-				// ReplyAsChat also folds: even a streaming chat client gets a
-				// synthetic chat SSE built from the folded Responses object,
-				// because translating every Responses event live is a larger
-				// contract than this bridge needs.
+			if plan != nil && plan.ReplyAsChat && plan.Stream {
+				// Streaming chat clients get a synthetic chat SSE built from the
+				// folded Responses object; translating every Responses event live
+				// is a larger contract than this bridge needs. The SSE headers go
+				// out BEFORE the fold finishes, with keepalive comments during
+				// muse's silent minutes — committed headers mean no rotation is
+				// possible afterwards, so a dead stream here is reported in-band.
 				e.writeFolded(w, resp, plan, ent.ID, exitID, sessionID)
+				cancel()
+				return
+			}
+			if plan != nil && !plan.Stream {
+				// Plain completion reply: fold BEFORE committing any bytes. A
+				// fold failure — a truncated tunnel, an edge that reaped the
+				// stream, relay garbage — is then just another upstream error:
+				// the exit takes the strike and the request re-rolls on a
+				// healthy exit, instead of the client eating a 502 that the
+				// very next exit would have served. (Measured: this stream-death
+				// class is the residual 502 family after every other defense.)
+				out, foldErr := e.foldCompletion(resp, plan)
+				if foldErr != "" {
+					if exitID != "" && e.pool != nil {
+						e.pool.MarkFailure(exitID, "fold: "+foldErr)
+					}
+					e.log.Info("upstream stream died before completion; re-rolling on another exit",
+						"account", ent.ID, "exit", exitID, "class", "fold", "err", foldErr)
+					if attempt < maxAttempts && e.shouldRotate(http.StatusBadGateway, model.ClassServer) {
+						if nextCand, ok := ch.next(ent, model.ClassServer, exitID, askedModel, sessionID); ok {
+							cur = nextCand
+							cancel()
+							continue
+						}
+					}
+					writeJSONError(w, http.StatusBadGateway, foldErr)
+					cancel()
+					return
+				}
+				// One cache-accounting line per completion, logged where the
+				// usage object is in hand (same shape as writeFolded's).
+				e.logCacheUsage(out, ent.ID, exitID, sessionID)
+				writeCompleted(w, out)
 				cancel()
 				return
 			}
@@ -972,6 +1008,54 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 	// always carries the usage object, so the cached-prefix share is logged
 	// where it is measured — per account, per exit, per conversation.
 	e.logCacheUsage(out, accountID, exitID, sessionID)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Del("Content-Length")
+	w.Header().Del("Transfer-Encoding")
+	w.Header().Del("Content-Encoding")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(out)
+}
+
+// foldCompletion reads a 2xx upstream stream to the end and folds it into the
+// single completion object the surface expects, converting muse Replies for
+// chat clients. Unlike writeFolded it commits NOTHING to the client: no early
+// SSE headers, no writes. That is the property the plain-completion path in
+// ServeForward relies on — a fold failure leaves the entire rotation budget
+// untouched, so the request re-rolls on a healthy exit instead of surfacing a
+// 502. Only the non-stream fold case may use this; the ReplyAsChat streaming
+// bridge must commit its SSE headers early (muse stays silent for minutes) and
+// therefore cannot re-roll.
+func (e *Engine) foldCompletion(resp *http.Response, plan *GatePlan) (out []byte, foldErr string) {
+	raw, err := readAllKeepalive(resp.Body, e.pol.MaxBodyBytes, 0, nil)
+	resp.Body.Close()
+	if err != nil {
+		return nil, "failed to read the upstream stream: " + err.Error()
+	}
+	s := surfaceChat
+	if plan != nil {
+		s = plan.Surface
+	}
+	out, foldErr = foldStream(raw)
+	if s == surfaceResponses {
+		out, foldErr = foldResponsesStream(raw)
+	}
+	if foldErr != "" {
+		return nil, foldErr
+	}
+	if plan != nil && plan.ReplyAsChat {
+		chatJSON, convErr := responsesToChatCompletion(out)
+		if convErr != nil {
+			return nil, "failed to convert responses reply to chat: " + convErr.Error()
+		}
+		out = chatJSON
+	}
+	return out, ""
+}
+
+// writeCompleted answers a successfully folded completion with the header
+// hygiene every folded path shares: identity content encoding gone (the fold
+// already decompressed the stream), lengths recomputed.
+func writeCompleted(w http.ResponseWriter, out []byte) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
 	w.Header().Del("Transfer-Encoding")
