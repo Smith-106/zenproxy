@@ -193,6 +193,27 @@ func (r *Registry) ExitForSession(accountID, sessionID, model string) *proxypool
 	return px
 }
 
+// BindSession pins a session to a specific exit, bypassing rotation
+// selection. The storm fallback uses this after a direct-exit success so the
+// next request of the same conversation starts on the exit that already
+// proved usable, instead of re-burning attempts on the flapping proxy layer.
+// The pinned entry lives in the same TTL table as any normal binding, and the
+// cache-hit path still checks pool health on every hit, so when direct turns
+// sick (or its natural TTL lapses) the session flows back to rotation with
+// no extra machinery.
+func (r *Registry) BindSession(accountID, sessionID, model, exitID string) bool {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || r.sessions == nil || !r.sessions.Enabled() || exitID == "" {
+		return false
+	}
+	r.sessions.Set(accountID, sessionID, model, exitID)
+	if r.log != nil {
+		r.log.Info("session-exit: pinned after storm fallback",
+			"account", accountID, "session", truncateSession(sessionID), "exit", exitID, "model", model)
+	}
+	return true
+}
+
 // RotateForSession moves off excludeExit and rebinds the session to the
 // replacement, mirroring CPA's "sticky auth failed → reselect + rebind".
 func (r *Registry) RotateForSession(accountID, sessionID, excludeExit, model string) *proxypool.Proxy {

@@ -34,6 +34,40 @@ func TestExitForSessionStickyAcrossTurns(t *testing.T) {
 	}
 }
 
+// BindSession pins a session to a named exit (the storm fallback's way of
+// keeping a conversation on the direct exit that just worked). The pin obeys
+// the same TTL table and the same health re-check as any binding: while the
+// exit serves, hits return it; once it turns sick the next lookup reselects.
+func TestBindSessionPinsThenSelfHeals(t *testing.T) {
+	pool := poolOf(t, "a", "b", "direct")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	if !r.BindSession("zen-01", "pfx_pinned_conversation", "muse-spark", "direct") {
+		t.Fatal("BindSession refused an eligible pin")
+	}
+	for i := 0; i < 5; i++ {
+		px := r.ExitForSession("zen-01", "pfx_pinned_conversation", "muse-spark")
+		if px == nil || px.ID != "direct" {
+			t.Fatalf("turn %d did not honor the pin: got %+v", i, px)
+		}
+	}
+	// Empty session or unknown exit is a no-op, not an error.
+	if r.BindSession("zen-01", "", "muse-spark", "direct") {
+		t.Fatal("empty session must not be pinnable")
+	}
+
+	// When the pinned exit turns sick the binding self-heals: the cache-hit
+	// path checks health and falls through to a fresh selection.
+	pool.MarkFailure("direct", "dial: refused")
+	px := r.ExitForSession("zen-01", "pfx_pinned_conversation", "muse-spark")
+	if px == nil || px.ID == "direct" {
+		t.Fatalf("sick pinned exit must reselect, got %+v", px)
+	}
+}
+
 func TestExitForSessionReselectsUnusableExit(t *testing.T) {
 	pool := poolOf(t, "a", "b")
 	r := New("", pool, testLogger())

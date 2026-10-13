@@ -499,7 +499,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			e.reg.Record(ent.ID, model.ClassOK, nil)
 			if exitID != "" {
+				e.pool.MarkSuccess(exitID, time.Since(start))
 				e.pool.ClearFreeTier(exitID)
+			}
+			// Pin the conversation to the exit that just proved usable: when
+			// the storm fallback landed here over direct, the next request
+			// would otherwise re-burn attempts on the flapping proxy layer
+			// before falling back again. The TTL binding self-heals — the
+			// cache-hit path re-checks pool health on every hit.
+			if stormFallbackLogged && exitID == "direct" {
+				e.reg.BindSession(ent.ID, sessionID, askedModel, exitID)
 			}
 			if plan != nil && (!plan.Stream || plan.ReplyAsChat) {
 				// The client asked for a single response and the free tier only

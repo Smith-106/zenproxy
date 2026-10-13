@@ -159,6 +159,20 @@ func (p *Proxy) newTransport() *http.Transport {
 	if p.Scheme == "http" || p.Scheme == "https" {
 		// net/http handles CONNECT and Proxy-Authorization for us.
 		t.Proxy = http.ProxyURL(p.url)
+		// Without a DialContext a dead POP relies on nobody: the default
+		// dialer has no timeout and the CONNECT dial hung on OS patience.
+		// Cap it like the SOCKS path — live POPs dial in well under a
+		// second, a dead one becomes fast rotation fuel instead of a
+		// minutes-long slot holder. ForceAttemptHTTP2 keeps the TLS-over-
+		// CONNECT path on h2: a custom DialContext alone would silently
+		// downgrade every proxied upstream stream to HTTP/1.1.
+		t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dialCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			var d net.Dialer
+			return d.DialContext(dialCtx, network, addr)
+		}
+		t.ForceAttemptHTTP2 = true
 	} else {
 		// SOCKS5 needs a custom dialer; there is no stdlib support.
 		remote := p.Scheme == "socks5h"
