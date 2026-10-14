@@ -152,29 +152,43 @@ func TestChatToResponsesBodyMapsReasoningEffort(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesBodyDefaultsMuseToXHigh(t *testing.T) {
+func TestChatToResponsesBodyDefaultsMuseEffort(t *testing.T) {
 	raw := []byte(`{
 		"model":"muse-spark-1.3-contributor-free",
 		"stream":false,
 		"messages":[{"role":"user","content":"plan carefully"}]
 	}`)
-	out, _, err := chatToResponsesBody(raw)
-	if err != nil {
-		t.Fatal(err)
+	parse := func(t *testing.T) (string, string) {
+		t.Helper()
+		out, _, err := chatToResponsesBody(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(out, &obj); err != nil {
+			t.Fatal(err)
+		}
+		var reasoning struct {
+			Effort  string `json:"effort"`
+			Summary string `json:"summary"`
+		}
+		if err := json.Unmarshal(obj["reasoning"], &reasoning); err != nil {
+			t.Fatalf("reasoning missing: %s", obj["reasoning"])
+		}
+		return reasoning.Effort, reasoning.Summary
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(out, &obj); err != nil {
-		t.Fatal(err)
+	// Default: low — the effort whose turns finish inside the streaming
+	// client's ~220s ceiling. Muse xhigh turns (190-240s) were aborted by the
+	// client seconds before completion, surfacing as error bursts.
+	effort, summary := parse(t)
+	if effort != "low" || summary != "auto" {
+		t.Fatalf("default reasoning = %s/%s, want low/auto", effort, summary)
 	}
-	var reasoning struct {
-		Effort  string `json:"effort"`
-		Summary string `json:"summary"`
-	}
-	if err := json.Unmarshal(obj["reasoning"], &reasoning); err != nil {
-		t.Fatalf("reasoning missing: %s", obj["reasoning"])
-	}
-	if reasoning.Effort != "xhigh" || reasoning.Summary != "auto" {
-		t.Fatalf("default reasoning = %+v, want xhigh/auto", reasoning)
+	// The environment restores any depth explicitly.
+	t.Setenv("ZEN_REASONING_EFFORT", "xhigh")
+	effort, _ = parse(t)
+	if effort != "xhigh" {
+		t.Fatalf("override reasoning effort = %s, want xhigh", effort)
 	}
 }
 
