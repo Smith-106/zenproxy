@@ -314,6 +314,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// rewrite happens once, before the first attempt, and every retry reuses it.
 	// An oversized body that had to be streamed through unreplayed cannot be
 	// rewritten at all, because it never lands in memory as a whole.
+	body = e.sanitizeResponsesInput(body, cur.ent.ID)
 	var plan *GatePlan
 	// Real free-tier enveloping (as opposed to a synthesized chat→responses
 	// rewrite, which is not a gate matter). Only envelope-gated requests may
