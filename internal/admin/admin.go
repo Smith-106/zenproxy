@@ -56,6 +56,7 @@ func New(reg *registry.Registry, pool *proxypool.Pool, cfg config.Config, free F
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/api/status", s.auth(s.handleStatus))
+	mux.HandleFunc("POST /admin/api/preflight", s.auth(s.handlePreflight))
 	mux.HandleFunc("GET /admin/api/accounts", s.auth(s.handleListAccounts))
 	mux.HandleFunc("POST /admin/api/accounts", s.auth(s.handleUpsertAccount))
 	mux.HandleFunc("DELETE /admin/api/accounts/{id}", s.auth(s.handleDeleteAccount))
