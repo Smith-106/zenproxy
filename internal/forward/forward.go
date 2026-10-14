@@ -415,6 +415,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 	var lastMsg string
 	gateRetried := false
+	// policyRewinds: the muse abuse-gate 403 ("repeated policy violations") is
+	// a PRE-generation refusal — the turn never ran, so replaying it on a
+	// different exit costs nothing upstream. Burning the caller's attempt
+	// budget on it is pure waste during a flag window, several exits wide
+	// (measured: the flag moved across exits for 25+ minutes while untouched
+	// exits kept 200-ing). Rewind the attempt counter for this class — but cap
+	// the free replays so an "every exit flagged" window still terminates with
+	// the upstream's own refusal instead of spinning.
+	policyRewinds := 0
+	policyRewindMax := 8
 	// sameExitTransientRetry: one free retry on the bound exit after a
 	// transient transport blip (EOF / reset). Rotating on the first blip
 	// drops upstream prompt-cache affinity for the rest of the conversation;
@@ -696,6 +706,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// this request does not ride the flagged slot again.
 			if class == model.ClassPolicyGate && exitID != "" {
 				e.pool.MarkFailure(exitID, "upstream policy gate: 403 restricted")
+				// The refusal is pre-generation: replaying on another exit is
+				// free upstream, so it must not eat the caller's attempt
+				// budget. Capped so an "everything flagged" window still
+				// terminates with the upstream's own refusal.
+				if policyRewinds < policyRewindMax {
+					policyRewinds++
+					e.log.Info("policy-gate 403 rewound the attempt budget during a flag window",
+						"account", ent.ID, "exit", exitID, "rewind", policyRewinds)
+					attempt--
+				}
 			}
 			// The chooser owns what "switch" means here: another IP for the same
 			// account, or another account entirely.
