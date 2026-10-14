@@ -172,10 +172,15 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 			c.Detail = "200 without choices"
 		} else if usage, ok := parsed["usage"].(map[string]any); !ok {
 			c.Detail = "200 without usage"
-		} else if _, ok := usage["input_tokens"]; !ok {
-			c.Detail = "usage missing input_tokens (fold shape regression)"
-		} else if _, ok := usage["input_tokens_details"].(map[string]any); !ok {
-			c.Detail = "usage missing input_tokens_details (cache accounting regression)"
+		} else if usage["prompt_tokens"] == nil && usage["input_tokens"] == nil {
+			c.Detail = "usage missing prompt_tokens (chat shape) / input_tokens (responses shape)"
+		} else if _, pd := usage["prompt_tokens_details"].(map[string]any); !pd {
+			if _, id := usage["input_tokens_details"].(map[string]any); !id {
+				c.Detail = "usage missing prompt_tokens_details (cache accounting regression)"
+			} else {
+				c.Pass = true
+				c.Detail = "usage intact (responses shape)"
+			}
 		} else {
 			c.Pass = true
 			c.Detail = "usage intact"
@@ -256,8 +261,12 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	c = check("cache: repeat rides warm prefix", true, "")
 	if st == 200 {
 		if usage, ok := parsed["usage"].(map[string]any); ok {
-			if d, ok := usage["input_tokens_details"].(map[string]any); ok {
-				if cached, ok := d["cached_tokens"].(float64); ok && cached > 0 {
+			details, _ := usage["prompt_tokens_details"].(map[string]any)
+			if details == nil {
+				details, _ = usage["input_tokens_details"].(map[string]any)
+			}
+			if details != nil {
+				if cached, ok := details["cached_tokens"].(float64); ok && cached > 0 {
 					c.Detail = fmt.Sprintf("cached_tokens=%.0f warm", cached)
 				} else {
 					c.Soft = true
