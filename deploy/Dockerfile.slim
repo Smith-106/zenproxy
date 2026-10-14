@@ -1,0 +1,40 @@
+# zenproxy 极简生产镜像 —— 不在服务器上编译 Go
+#
+# 背景（2026-10-14 实测）：多阶段 Dockerfile 在服务器上跑 go 编译会把宿主 CPU
+# 打满（实测 92.4% > 90%），触发 new-api 内建的 system_cpu_overloaded 守卫，
+# 全量请求 503；叠加容器重建空窗的 connection refused，pi 侧表现为
+# auth_unavailable。本镜像只做"打包"：二进制在开发机上交叉编译（纯 Go，
+# CGO_ENABLED=0），scp 上传，镜像构建秒级完成、CPU 占用可忽略。
+#
+# 构建流程（仓库根目录）：
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+#     -tags netgo,osusergo -ldflags="-s -w" -o out/zenproxy-linux ./cmd/zenproxy
+#   scp out/zenproxy-linux server:/home/ubuntu/zenproxy-src/out/
+#   docker build -q -f deploy/Dockerfile.slim -t zenproxy:latest .
+#
+# 运行时形状与 Dockerfile 保持一致：alpine 3.21 + ca-certificates + tzdata，
+# 非 root，HEALTHCHECK 同参数。镜像层差异只有"谁编译的二进制"。
+
+FROM alpine:3.21 AS runtime
+
+RUN apk add --no-cache ca-certificates tzdata
+
+RUN addgroup -g 10001 -S zenproxy && \
+    adduser -u 10001 -S -G zenproxy -h /app -s /sbin/nologin zenproxy
+
+WORKDIR /app
+
+COPY out/zenproxy-linux /usr/local/bin/zenproxy
+
+RUN mkdir -p /app /data && chown -R 10001:10001 /app /data && \
+    chmod +x /usr/local/bin/zenproxy
+
+USER zenproxy
+
+EXPOSE 9000
+
+ENTRYPOINT ["/usr/local/bin/zenproxy"]
+CMD ["-config", "/app/config.yaml"]
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -T 4 -O /dev/null http://127.0.0.1:9000/healthz || exit 1
