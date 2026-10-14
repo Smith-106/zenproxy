@@ -111,6 +111,7 @@ const (
 	// exit-health signal, the flagged slot kept serving more 403s. It is now
 	// its own class: rotate away (and after a strike or two the ordinary
 	// quarantine machinery benches the slot until it cools down).
+	ClassPolicyGate ErrorClass = "policy_gate"
 	// ClassTierGate is FreeTierError. Historically this was treated as a pure
 	// client-identity refusal (UA / x-opencode-* / tools / stream). Measured
 	// 2026-10 against free-proxy egress: the same enveloped request can 403 on
