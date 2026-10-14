@@ -201,8 +201,10 @@ func splitChatMessages(raw json.RawMessage) (instructions string, input any, ok 
 		return "", nil, false
 	}
 	var msgs []struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role       string          `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		ToolCalls  json.RawMessage `json:"tool_calls"`
+		ToolCallID string          `json:"tool_call_id"`
 	}
 	if err := json.Unmarshal(raw, &msgs); err != nil || len(msgs) == 0 {
 		return "", nil, false
@@ -210,18 +212,66 @@ func splitChatMessages(raw json.RawMessage) (instructions string, input any, ok 
 	var sys []string
 	var rest []map[string]any
 	for _, m := range msgs {
-		text := messageText(m.Content)
-		switch strings.ToLower(m.Role) {
+		role := strings.ToLower(m.Role)
+		switch role {
 		case "system", "developer":
-			if text != "" {
+			if text := messageText(m.Content); text != "" {
 				sys = append(sys, text)
 			}
-		default:
-			rest = append(rest, map[string]any{
-				"role":    m.Role,
-				"content": text,
-			})
+			continue
+		case "tool":
+			// A tool result is function_call_output in Responses, paired by
+			// call_id. Emitting the real item instead of a flat "[tool
+			// result]" string keeps the agent loop readable for the upstream
+			// AND pairable when the sanitizer validates the transcript.
+			text := messageText(m.Content)
+			if m.ToolCallID != "" && text != "" {
+				rest = append(rest, map[string]any{
+					"type":    "function_call_output",
+					"call_id": m.ToolCallID,
+					"output":  text,
+				})
+			} else {
+				rest = append(rest, map[string]any{"role": role, "content": text})
+			}
+			continue
 		}
+		text := messageText(m.Content)
+		if role == "assistant" && rawPresent(m.ToolCalls) {
+			// An assistant turn that called tools: its narration (if any)
+			// plus one function_call item per call, then the tool results
+			// follow as their own items. The pair key is the client's id,
+			// which is exactly what the upstream validates on.
+			var calls []struct {
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			}
+			if err := json.Unmarshal(m.ToolCalls, &calls); err == nil && len(calls) > 0 {
+				if text != "" {
+					rest = append(rest, map[string]any{"role": "assistant", "content": text})
+				}
+				for _, c := range calls {
+					callID := c.ID
+					if strings.TrimSpace(callID) == "" {
+						callID = "call_" + fmt.Sprintf("%d", len(rest))
+					}
+					rest = append(rest, map[string]any{
+						"type":      "function_call",
+						"call_id":   callID,
+						"name":      c.Function.Name,
+						"arguments": c.Function.Arguments,
+					})
+				}
+				continue
+			}
+		}
+		rest = append(rest, map[string]any{
+			"role":    m.Role,
+			"content": text,
+		})
 	}
 	if len(rest) == 0 {
 		return "", nil, false
@@ -327,6 +377,9 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 		Output    []struct {
 			Type    string `json:"type"`
 			Role    string `json:"role"`
+			CallID  string `json:"call_id"`
+			Name    string `json:"name"`
+			Args    string `json:"arguments"`
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
@@ -342,6 +395,7 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 		return nil, err
 	}
 	var text, reasoning strings.Builder
+	var toolCalls []foldedToolCall
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "reasoning":
@@ -353,6 +407,15 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 					reasoning.WriteString(c.Text)
 				}
 			}
+		case "function_call":
+			// The model acted as an agent. Dropping this item (the old
+			// behavior) turned "call bash now" into an empty assistant text
+			// with finish_reason=stop, which the harness reads as "model is
+			// idling" — the exact pi nudge-loop measured in production.
+			tc := foldedToolCall{Index: len(toolCalls), ID: item.CallID, Type: "function"}
+			tc.Function.Name = item.Name
+			tc.Function.Arguments = item.Args
+			toolCalls = append(toolCalls, tc)
 		case "message", "":
 			for _, c := range item.Content {
 				if c.Type == "output_text" || c.Type == "text" || c.Type == "" {
@@ -360,6 +423,10 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 				}
 			}
 		}
+	}
+	finish := "stop"
+	if len(toolCalls) > 0 {
+		finish = "tool_calls"
 	}
 	out := foldedCompletion{
 		ID:      resp.ID,
@@ -372,8 +439,9 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 				Role:             "assistant",
 				Content:          text.String(),
 				ReasoningContent: reasoning.String(),
+				ToolCalls:        toolCalls,
 			},
-			FinishReason: "stop",
+			FinishReason: finish,
 		}},
 		Usage: resp.Usage,
 	}
@@ -388,13 +456,22 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 		return nil, err
 	}
 	content := ""
+	reasoning := ""
+	var toolCalls []foldedToolCall
+	finish := "stop"
 	if len(obj.Choices) > 0 {
 		content = obj.Choices[0].Message.Content
+		reasoning = obj.Choices[0].Message.ReasoningContent
+		toolCalls = obj.Choices[0].Message.ToolCalls
+		if obj.Choices[0].FinishReason != "" {
+			finish = obj.Choices[0].FinishReason
+		}
 	}
 	type deltaBody struct {
-		Role             string `json:"role,omitempty"`
-		Content          string `json:"content,omitempty"`
-		ReasoningContent string `json:"reasoning_content,omitempty"`
+		Role             string           `json:"role,omitempty"`
+		Content          string           `json:"content,omitempty"`
+		ReasoningContent string           `json:"reasoning_content,omitempty"`
+		ToolCalls        []foldedToolCall `json:"tool_calls,omitempty"`
 	}
 	type chunk struct {
 		ID      string `json:"id"`
@@ -419,10 +496,6 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 	buf.Write(enc)
 	buf.WriteString("\n\n")
 
-	reasoning := ""
-	if len(obj.Choices) > 0 {
-		reasoning = obj.Choices[0].Message.ReasoningContent
-	}
 	if reasoning != "" {
 		delta := role
 		delta.Choices[0].Delta = deltaBody{ReasoningContent: reasoning}
@@ -434,15 +507,24 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 	if content != "" {
 		delta := role
 		delta.Choices[0].Delta = deltaBody{Content: content}
-		enc, _ = json.Marshal(delta)
+		enc, _ := json.Marshal(delta)
 		buf.WriteString("data: ")
 		buf.Write(enc)
 		buf.WriteString("\n\n")
 	}
-	stop := "stop"
+	if len(toolCalls) > 0 {
+		// One coherent tool_calls delta; OpenAI-shaped harnesses assemble the
+		// call from it exactly as they do from native streams.
+		delta := role
+		delta.Choices[0].Delta = deltaBody{ToolCalls: toolCalls}
+		enc, _ := json.Marshal(delta)
+		buf.WriteString("data: ")
+		buf.Write(enc)
+		buf.WriteString("\n\n")
+	}
 	final := role
 	final.Choices[0].Delta = deltaBody{}
-	final.Choices[0].FinishReason = &stop
+	final.Choices[0].FinishReason = &finish
 	enc, _ = json.Marshal(final)
 	buf.WriteString("data: ")
 	buf.Write(enc)
