@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -223,5 +224,56 @@ func TestResponsesToChatCompletionKeepsReasoningSummary(t *testing.T) {
 	}
 	if !strings.Contains(string(sse), `"reasoning_content":"step one; step two"`) {
 		t.Fatalf("sse missing reasoning: %s", sse)
+	}
+}
+
+func TestChatUsageFromResponsesCarriesCachedTokens(t *testing.T) {
+	in := json.RawMessage(`{"input_tokens":1000,"output_tokens":50,"total_tokens":1050,"input_tokens_details":{"cached_tokens":800}}`)
+	out := chatUsageFromResponses(in)
+	var u struct {
+		PromptTokens     int64 `json:"prompt_tokens"`
+		CompletionTokens int64 `json:"completion_tokens"`
+		TotalTokens      int64 `json:"total_tokens"`
+		Details          *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if err := json.Unmarshal(out, &u); err != nil {
+		t.Fatal(err)
+	}
+	if u.PromptTokens != 1000 || u.CompletionTokens != 50 || u.TotalTokens != 1050 {
+		t.Fatalf("converted usage = %+v", u)
+	}
+	if u.Details == nil || u.Details.CachedTokens != 800 {
+		t.Fatalf("cached_tokens lost in conversion: %+v", u)
+	}
+	// Chat-shaped input passes through untouched.
+	chat := json.RawMessage(`{"prompt_tokens":3,"prompt_tokens_details":{"cached_tokens":2}}`)
+	if !bytes.Equal(chatUsageFromResponses(chat), chat) {
+		t.Fatalf("chat-shaped usage must pass through byte-exact: %s", chatUsageFromResponses(chat))
+	}
+}
+
+func TestChatCompletionToSSECarriesUsageTail(t *testing.T) {
+	raw := []byte(`{
+		"id":"resp_u1","model":"muse-spark-1.3-contributor-free","created_at":1,
+		"status":"completed",
+		"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi"}]}],
+		"usage":{"input_tokens":9531,"output_tokens":42,"total_tokens":9573,
+			"input_tokens_details":{"cached_tokens":4209}}
+	}`)
+	chat, err := responsesToChatCompletion(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sse, err := chatCompletionToSSE(chat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(sse)
+	for _, want := range []string{`"usage"`, "4209", "prompt_tokens_details", "[DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("SSE body missing %s:\n%.400s", want, body)
+		}
 	}
 }

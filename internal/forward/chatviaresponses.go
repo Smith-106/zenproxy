@@ -455,9 +455,55 @@ func responsesToChatCompletion(raw []byte) ([]byte, error) {
 			},
 			FinishReason: finish,
 		}},
-		Usage: resp.Usage,
+		Usage: chatUsageFromResponses(resp.Usage),
 	}
 	return json.Marshal(out)
+}
+
+// chatUsageFromResponses converts the Responses-shaped usage object into the
+// chat-completions shape the downstream accounting reads. muse reports
+// input_tokens / output_tokens / input_tokens_details.cached_tokens; chat
+// clients and new-api's cache panel read prompt_tokens /
+// prompt_tokens_details.cached_tokens. Passing the object through verbatim
+// left every billing row at cache_tokens=0 while the bridge log measured
+// 52-68% — a cache that worked but reported as dead.
+func chatUsageFromResponses(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return raw
+	}
+	var u struct {
+		// Responses shape (muse).
+		InputTokens        int64 `json:"input_tokens"`
+		OutputTokens       int64 `json:"output_tokens"`
+		InputTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"input_tokens_details"`
+		// Chat shape — present means already converted; pass through byte-exact.
+		PromptTokens        int64 `json:"prompt_tokens"`
+		CompletionTokens    int64 `json:"completion_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return raw
+	}
+	if u.PromptTokens > 0 || u.PromptTokensDetails != nil || u.InputTokens == 0 {
+		return raw
+	}
+	out := map[string]any{
+		"prompt_tokens":     u.InputTokens,
+		"completion_tokens": u.OutputTokens,
+		"total_tokens":      u.InputTokens + u.OutputTokens,
+	}
+	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
+		out["prompt_tokens_details"] = map[string]any{"cached_tokens": u.InputTokensDetails.CachedTokens}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return b
 }
 
 // chatCompletionToSSE emits a minimal chat-completions SSE stream from a
@@ -495,6 +541,7 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 			Delta        deltaBody `json:"delta"`
 			FinishReason *string   `json:"finish_reason"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage,omitempty"`
 	}
 	var buf bytes.Buffer
 	role := chunk{ID: obj.ID, Object: "chat.completion.chunk", Created: obj.Created, Model: obj.Model}
@@ -541,6 +588,21 @@ func chatCompletionToSSE(chatJSON []byte) ([]byte, error) {
 	buf.WriteString("data: ")
 	buf.Write(enc)
 	buf.WriteString("\n\n")
+	// The usage tail: the whole folded stream otherwise reports no usage at
+	// all, so the downstream cache/billing accounting (new-api) fell back to
+	// local estimation and every row read cache_tokens=0 while the upstream
+	// cache was measurably warm. An empty-choices chunk is the streaming
+	// convention for "usage lives here".
+	if u := chatUsageFromResponses(obj.Usage); len(u) > 0 {
+		tail := map[string]any{
+			"id": obj.ID, "object": "chat.completion.chunk", "created": obj.Created,
+			"model": obj.Model, "choices": []any{}, "usage": json.RawMessage(u),
+		}
+		enc, _ = json.Marshal(tail)
+		buf.WriteString("data: ")
+		buf.Write(enc)
+		buf.WriteString("\n\n")
+	}
 	buf.WriteString("data: [DONE]\n\n")
 	return buf.Bytes(), nil
 }
