@@ -196,14 +196,33 @@ func TestTopUpToolNamesPinsGatePairFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(tools) != 3 {
-		t.Fatalf("len=%d want 3 (bash stub + client read + weather)", len(tools))
+		t.Fatalf("len=%d want 3 (verbatim bash + verbatim read + weather)", len(tools))
 	}
 	if toolNameOf(tools[0]) != "bash" || toolNameOf(tools[1]) != "read" || toolNameOf(tools[2]) != "get_weather" {
 		t.Fatalf("order = %q %q %q", toolNameOf(tools[0]), toolNameOf(tools[1]), toolNameOf(tools[2]))
 	}
-	// Client's own read entry must be reused, not replaced by the stub.
-	if !strings.Contains(string(tools[1]), "client-read") {
-		t.Fatalf("client read definition lost: %s", tools[1])
+	// The gate pair must be the captured verbatim definitions: the 2026-10-14
+	// matcher hashes the description/parameters, so a client-shaped read (here
+	// "client-read") that used to be reused now must be REPLACED — reusing it
+	// would fail the whole request with FreeTierError.
+	var readDef struct {
+		Function map[string]any `json:"function"`
+	}
+	if err := json.Unmarshal(tools[1], &readDef); err != nil {
+		t.Fatal(err)
+	}
+	desc, _ := readDef.Function["description"].(string)
+	if !strings.Contains(desc, "Read a file or directory from the local filesystem") {
+		t.Fatalf("gate read definition is not the verbatim capture: %.80s", desc)
+	}
+	var clientReadGone bool
+	for _, raw := range tools[2:] {
+		if strings.Contains(string(raw), "client-read") {
+			clientReadGone = true
+		}
+	}
+	if clientReadGone {
+		t.Fatalf("a client-shaped gate-name entry survived: %s", tools[1])
 	}
 }
 
@@ -460,5 +479,46 @@ func TestGateToolNamesAreTheMeasuredPair(t *testing.T) {
 	}
 	if gateMinToolNames != 2 {
 		t.Errorf("gateMinToolNames = %d, want 2", gateMinToolNames)
+	}
+}
+
+// The stamped gate pair must be the 2026-10-14 verbatim captures, in both
+// surface shapes, because the matcher hashes the definition content itself.
+func TestGateToolDefsAreTheCapturedFingerprint(t *testing.T) {
+	const bashHead = "Executes a given bash command in a persistent shell session"
+	const readHead = "Read a file or directory from the local filesystem"
+	for _, name := range gateToolNames {
+		def, ok := gateToolDefs[name]
+		if !ok {
+			t.Fatalf("no verbatim definition registered for %q", name)
+		}
+		check := func(raw json.RawMessage, shape string) {
+			var obj map[string]any
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				t.Fatalf("%s definition does not parse: %v", shape, err)
+			}
+			var body map[string]any
+			if shape == "nested" {
+				body, _ = obj["function"].(map[string]any)
+				if body == nil {
+					t.Fatalf("nested %s entry lost its function object: %s", name, raw)
+				}
+			} else {
+				body = obj
+			}
+			desc, _ := body["description"].(string)
+			want := bashHead
+			if name == "read" {
+				want = readHead
+			}
+			if !strings.HasPrefix(desc, want) {
+				t.Fatalf("%s %s description is not the capture: %.60s", shape, name, desc)
+			}
+			if _, ok := body["parameters"]; !ok {
+				t.Fatalf("%s %s lost its parameters schema", shape, name)
+			}
+		}
+		check(def.flat, "flat")
+		check(def.nested, "nested")
 	}
 }

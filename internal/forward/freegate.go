@@ -20,13 +20,16 @@
 //  3. `"stream": true` in the body. A non-streaming request is refused even
 //     with a perfect header set, which is why the engine asks the upstream for
 //     a stream and folds the answer back for a non-streaming client.
-//  4. The request must advertise the tool names `bash` and `read`. Schemas,
-//     descriptions and extra client tools are ignored — only the names matter.
-//     Two is enough. Order is also ignored by the gate, but zenproxy pins
-//     bash+read at the front of `tools` so prompt-cache prefixes survive
-//     client tool-list churn. Prompt injection is deliberately NOT used: the
-//     old title/agent chunks polluted weaker free models into answering as a
-//     title generator ("Greeting", "Short joke request").
+//  4. The tool definitions for `bash` and `read` must match the official
+//     client's verbatim — description and parameter schema. This is new as of
+//     2026-10-14: the matcher used to accept the names alone, and minimal
+//     stub synonyms passed for months; the tightened build now hashes the
+//     checked shapes, so the envelope stamps the captured definitions
+//     (freetier_tools.go) in place of anything a client sent under those
+//     names. Extra client tools are still ignored by the gate and may ride
+//     along after the pinned pair. Prompt injection is deliberately NOT used:
+//     the old title/agent chunks polluted weaker free models into answering as
+//     a title generator ("Greeting", "Short joke request").
 //
 // Tool-choice policy differs by surface:
 //
@@ -215,7 +218,7 @@ func (f *FreeTier) prepareChat(body []byte, forced bool) *GatePlan {
 	hadClientTools := len(clientTools) > 0
 	// Chat always uses the nested tool shape. When the client already sent
 	// tools, detectToolShape preserves whatever they used; when they sent
-	// none, default to nested so the stubs match this surface.
+	// none, default to nested so the stamped gate pair matches this surface.
 	shape := toolShapeNested
 	if hadClientTools {
 		shape = detectToolShape(clientTools)
@@ -393,25 +396,41 @@ func stableClientSessionID(h http.Header) string {
 	return newSessionID()
 }
 
-// looksLikeClientSessionID reports whether s already has the measured
-// `ses_` + 12 lowercase hex + 14 base62 shape.
+// looksLikeClientSessionID reports whether s already has a session shape the
+// gate accepts. Two are now in the wild: the pre-1.19 `ses_` + 12 hex + 14
+// base62 short id, and the 1.19-erа affinity id — `ses_` + 64 lowercase hex
+// (re-read 2026-10-14 from the official client's request builder: the gate
+// validates the session VALUE, and the real client stamps x-opencode-session
+// with this 64-hex affinity — a short legacy id got refused the moment the new
+// build shipped, taking every exit down with it).
 func looksLikeClientSessionID(s string) bool {
 	const prefix = "ses_"
-	if !strings.HasPrefix(s, prefix) || len(s) != len(prefix)+26 {
+	if !strings.HasPrefix(s, prefix) {
 		return false
 	}
-	mid := s[len(prefix) : len(prefix)+12]
-	for _, r := range mid {
-		if !strings.ContainsRune("0123456789abcdef", r) {
-			return false
+	switch rest := s[len(prefix):]; {
+	case len(rest) == 64:
+		for _, r := range rest {
+			if !strings.ContainsRune("0123456789abcdef", r) {
+				return false
+			}
 		}
-	}
-	for _, r := range s[len(prefix)+12:] {
-		if !strings.ContainsRune(idAlphabet, r) {
-			return false
+		return true
+	case len(rest) == 26:
+		mid := rest[:12]
+		for _, r := range mid {
+			if !strings.ContainsRune("0123456789abcdef", r) {
+				return false
+			}
 		}
+		for _, r := range rest[12:] {
+			if !strings.ContainsRune(idAlphabet, r) {
+				return false
+			}
+		}
+		return true
 	}
-	return true
+	return false
 }
 
 // deriveClientSessionID maps an arbitrary inbound conversation key onto a
@@ -599,48 +618,51 @@ func ensureMinTokenBudget(obj map[string]json.RawMessage, field string, floor in
 	obj[field] = bumped
 }
 
-// toolTopUpStub is the wording of the tools this proxy adds purely to satisfy
-// the name check. It says so, because the model reads these descriptions.
-const toolTopUpStub = "Reserved by the proxied runtime. Do not call this tool."
+// gateToolDefs maps each gate tool name to its verbatim definition, captured
+// from the official client (freetier_tools.go). The 2026-10-14 gate validates
+// the two definitions themselves — description and parameter schema — so a
+// client that advertises its own bash/read under a different shape must still
+// be presented with the official pair: the client's entries are replaced, not
+// reused. Anything the client genuinely uses keeps working because the model
+// calls the pinned pair by name and the client executes its own tool.
 
-// topUpToolNames guarantees the request advertises bash and read, and puts
-// those gate tools first.
+// topUpToolNames guarantees the request advertises the official bash+read
+// definitions, pinned first.
 //
-// Order used to keep the caller's tools in front and append stubs at the end.
-// That is friendly to tool-calling demos but hostile to prompt cache: agent
-// clients churn their own tool list every few turns, and a changing first tool
-// entry busts the entire tools prefix. The free-tier matcher only cares about
-// names, not order, so the stable gate pair is pinned at the front; the
-// caller's remaining tools follow. When the client already sent bash/read,
-// those entries are moved forward (first occurrence kept) instead of being
-// duplicated.
+// Order keeps the caller's tools after the stable gate pair for prompt-cache
+// stability: agent clients churn their own tool list every few turns, and a
+// changing first tool entry busts the entire tools prefix. The 2026-10-14
+// matcher validates the gate pair's definitions verbatim, so client-supplied
+// bash/read entries (whose schemas differ) are dropped in favour of the
+// captured pair — a client entry that merely carried the name used to pass the
+// old name-only matcher and would now poison the whole request. The gate
+// definitions are rendered in the surface's own shape (chat nests the fields
+// under "function", Responses keeps them flat); the checked content is
+// identical either way.
 func topUpToolNames(tools []json.RawMessage, shape toolShape) ([]byte, error) {
 	if tools == nil {
 		tools = []json.RawMessage{}
 	}
-	gateIdx := make(map[string]json.RawMessage, len(gateToolNames))
 	rest := make([]json.RawMessage, 0, len(tools))
 	for _, raw := range tools {
-		name := toolNameOf(raw)
-		if isGateToolName(name) {
-			if _, exists := gateIdx[name]; !exists {
-				gateIdx[name] = raw
-			}
+		if isGateToolName(toolNameOf(raw)) {
+			// Dropped: the gate pair is re-stamped below verbatim.
 			continue
 		}
 		rest = append(rest, raw)
 	}
 	out := make([]json.RawMessage, 0, len(gateToolNames)+len(rest))
 	for _, name := range gateToolNames {
-		if raw, ok := gateIdx[name]; ok {
-			out = append(out, raw)
-			continue
+		def, ok := gateToolDefs[name]
+		if !ok {
+			// Unreachable while gateToolNames and gateToolDefs agree.
+			return nil, fmt.Errorf("no verbatim definition for gate tool %q", name)
 		}
-		stub, err := marshalGateToolStub(name, shape)
+		entry, err := def.render(shape)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, stub)
+		out = append(out, entry)
 	}
 	out = append(out, rest...)
 	return json.Marshal(out)
@@ -653,22 +675,6 @@ func isGateToolName(name string) bool {
 		}
 	}
 	return false
-}
-
-func marshalGateToolStub(name string, shape toolShape) (json.RawMessage, error) {
-	params := map[string]any{"type": "object", "properties": map[string]any{}}
-	entry := map[string]any{"type": "function", "description": toolTopUpStub, "parameters": params, "name": name}
-	if shape == toolShapeNested {
-		entry = map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        name,
-				"description": toolTopUpStub,
-				"parameters":  params,
-			},
-		}
-	}
-	return json.Marshal(entry)
 }
 
 // idAlphabet is the character set the client draws its random id suffix from.

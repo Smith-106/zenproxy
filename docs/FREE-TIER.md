@@ -10,6 +10,17 @@ opencode 的 `*-free` 模型对"客户端身份"有门禁：
 本文记录**白盒实测**出来的判据（逐项剔除，每次只改一个变量），以及 zenproxy 的实现。
 判据全部来自抓包 + 逐项重放，不是猜的；每一项都有"只差这一项就 403"的对照实验。
 
+> **2026-10-14 更新（工具指纹门）**：当天午后起，门在四项之外**加验 `bash`/`read` 的
+> 工具定义本体**——`description` 与 `parameters` schema 必须与官方客户端逐字一致；
+> 仅凭工具名的极简存根（旧实现在用）全部 `403 FreeTierError`，现网 40 分钟 991 条全灭。
+> 对照实验（本机直连 + 探针）：官方 12 工具逐字 → 200；bash+read 逐字 → 200；bash 逐字
+> + read 存根 → 403；stub bash + 逐字 read → 403；12 个名字 + 极简 schema → 403；
+> bash+read 逐字 + 客户端自建工具随行 → 200。zenproxy 已把捕获的逐字定义铸进
+> `internal/forward/freetier_tools.go`，信封在任何面上都盖上这对定义（客户端自带的
+> bash/read 条目会被替换——形状不同会毒整条请求）。时钟 ID 门（`ses_` 的 12 位 hex
+> 必须能解码成合法的倒序墙钟＋[0,63] 计数）依旧在，zenproxy 铸 ID 的方式天然合规，
+> 但**探针自造随机 hex 会被拒**，做实验时务必用官方时钟算法铸 ID。
+>
 > **2026 更新（结构门）**：上游免费门已不再要求逐字复述客户端 system prompt。
 > 实测通过的最小信封是：**官方 UA + `x-opencode-*` 身份头 + `"stream": true` + 工具名
 > `bash` + `read`**。旧的 title/agent prompt 注入会污染弱模型（如 `step-5-preview-free`
@@ -33,7 +44,7 @@ opencode 的 `*-free` 模型对"客户端身份"有门禁：
 | 1 | `User-Agent` 必须是官方客户端的 | 去掉即 403；`opencode/1.18.35 … runtime/bun/1.3.14` | 原样镜像 |
 | 2 | 需要 `x-opencode-client: cli` 与请求/会话 ID | ID **只校验形状**，不校验状态：`msg_`/`ses_` + 12 位小写 hex + 14 位 base62，共 26 字符。新铸的 ID 一样通过 | 每个请求现场铸 |
 | 3 | body 里必须有 `"stream": true` | 去掉即 403（头再完美也没用） | 强制置 true，见 §3.2 |
-| 4 | 必须携带工具名 `bash` 与 `read` | 仅这两个名字即可 200；schema、描述、顺序、额外客户端工具都不看 | 缺谁补谁，见 §3.3 |
+| 4 | 必须携带官方客户端的 `bash` 与 `read` **定义本体**（2026-10-14 加严：名字 + `description` + `parameters` 逐字一致） | 仅名字即可 200 的旧判据已死；极简 schema 403；逐字定义 + 任意客户端自建工具随行 200 | 逐字定义铸造盖章，见 §3.3 |
 
 第 1–3 条**所有端点共用**；第 4 条每个端点各表述一遍，因为**工具字段形状不一样**：
 chat 把名字嵌在 `function.name` 下，`/responses` 放在顶层 `name`。
@@ -43,18 +54,23 @@ chat 把名字嵌在 `function.name` 下，`/responses` 放在顶层 `name`。
 以及——**任何 system / instructions prompt 注入**。无工具但带完美身份头的请求会 403；
 补上 `bash`+`read` 后即使 `messages`/`instructions` 完全是调用方原文也 200。
 
-### 1.1 工具名阈值（结构门）
+### 1.1 工具定义阈值（结构门，2026-10-14 版）
 
 ```
-无 tools            → 403 FreeTierError
-仅 bash             → 403
-仅 read             → 403
-bash + read         → 200
-bash + read + 自建  → 200（自建工具排在前面，调用照常）
+无 tools                        → 403 FreeTierError
+仅 bash                         → 403
+仅 read                         → 403
+bash + read（极简 schema）      → 200（旧门）→ 403（2026-10-14 新门）
+bash + read（逐字官方定义）     → 200
+bash 逐字 + read 极简           → 403
+bash 极简 + read 逐字           → 403
+逐字对 + 客户端自建工具随行     → 200
+12 个官方名字 + 极简 schema     → 403（名字不够，定义才算数）
 ```
 
-旧文档里"至少 5/6 个官方工具名 + 逐字 prompt"是早期观测；当前上游只认 `bash`/`read`
-这两个名字。实现里 `gateToolNames = ["bash","read"]`，`gateMinToolNames = 2`。
+旧文档里"至少 5/6 个官方工具名"是更早期观测；2026-10-13 之前只认 `bash`/`read` 两个
+**名字**；2026-10-14 起认**定义本体**。实现里 `gateToolNames = ["bash","read"]`，
+`gateMinToolNames = 2`，逐字定义在 `internal/forward/freetier_tools.go`。
 
 ### 1.2 tool_choice 按端点分流
 
@@ -148,17 +164,22 @@ chat 是 `choices[].delta`，Responses 是 `response.output_text.delta` 和
 
 `stream` 字段的语义按 OpenAI 默认：**不写 = 非流式**，所以不写就会被折叠成 JSON。
 
-### 3.3 工具名补齐
+### 3.3 工具定义盖章（2026-10-14 起）
 
-调用方自己的 tools **原样排在前面**（工具调用照常工作），后面按需补 `bash` / `read`
-占位定义，把命中数抬到 2。**补齐的条目形状跟着端点走**：
+调用方自己的 tools 排在**盖过章的门禁对之后**（工具调用照常工作：模型按名调用，
+客户端执行自己的实现）。门禁对 `bash`/`read` 一律用**捕获自官方客户端 v1.19.0 的
+逐字定义**（`internal/forward/freetier_tools.go`，`description`+`parameters`+`strict` 原文），
+形状跟着端点走：
 
-- chat：嵌套 `{"type":"function","function":{"name":…}}`
-- Responses：扁平 `{"type":"function","name":…}`
+- chat：嵌套 `{"type":"function","function":{…逐字内容…}}`
+- Responses：扁平 `{"type":"function",…逐字内容…}`
 
 一个数组里不混两种形状。读取名字时两种都认。
 
-占位定义的描述写着 `Reserved by the proxied runtime. Do not call this tool.`。
+**客户端自带的 `bash`/`read` 条目会被替换成逐字对**（不再保留）：2026-10-14 门加验
+定义本体后，形状不同的客户端同名条目会毒整条请求。若客户端真发的工具语义与官方一致
+（pi 即如此），模型调用名不变，客户端照常执行。
+旧占位描述 `Reserved by the proxied runtime. Do not call this tool.` 已停用。
 chat 在客户端无自带工具时额外设 `tool_choice: "none"`，进一步降低误调概率；
 Responses 只能设 `"auto"`（上游硬限制）。
 
