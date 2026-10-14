@@ -7,10 +7,15 @@
 # CGO_ENABLED=0），scp 上传，镜像构建秒级完成、CPU 占用可忽略。
 #
 # 构建流程（仓库根目录）：
-#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+#   CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
 #     -tags netgo,osusergo -ldflags="-s -w" -o out/zenproxy-linux ./cmd/zenproxy
 #   scp out/zenproxy-linux server:/home/ubuntu/zenproxy-src/out/
 #   docker build -q -f deploy/Dockerfile.slim -t zenproxy:latest .
+#
+# ★ GOARCH 必须是 arm64：目标机是 Oracle Ampere（aarch64）。GOARCH=amd64 的
+#   二进制在 ARM 宿主上落进 qemu-binfmt 模拟执行（实测每副本 ~147% CPU、
+#   延迟抖动），这是"越修越不稳"时期的隐藏元凶之一。上传前用
+#   `uname -m` 核对目标机；arm64 名字里的 "-linux" 只是历史文件名。
 #
 # 运行时形状与 Dockerfile 保持一致：alpine 3.21 + ca-certificates + tzdata，
 # 非 root，HEALTHCHECK 同参数。镜像层差异只有"谁编译的二进制"。
