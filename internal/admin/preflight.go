@@ -147,6 +147,11 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	}
 	prompt := "Rate how well this reads: 'docs: fix typo recieve->receive'. Score 0-10."
 
+	// Effort is pinned low for every probe: accepted on both surfaces
+	// (measured), and a ~3s shallow think beats a ~10-25s xhigh one when the
+	// suite has to fit inside a curl's patience budget.
+	effort := map[string]any{"effort": "low", "summary": "auto"}
+
 	results := []PreflightCheck{}
 
 	// 1) The chain answers at all, and the fold's usage accounting survived.
@@ -155,6 +160,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 		"model":      model,
 		"stream":     false,
 		"max_tokens": 512,
+		"reasoning":  effort,
 		"messages":   []map[string]any{{"role": "user", "content": "Reply with exactly: PREFLIGHT_OK"}},
 	})
 	c := PreflightCheck{Name: "chat completes + usage"}
@@ -180,7 +186,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	// 2) Strict json_schema honored end to end (bridge + upstream enforcement).
 	t0 = time.Now()
 	st, parsed, raw = post("/v1/chat/completions", map[string]any{
-		"model": model, "stream": false, "max_tokens": 512,
+		"model": model, "stream": false, "max_tokens": 512, "reasoning": effort,
 		"messages": []map[string]any{{"role": "user", "content": prompt}},
 		"response_format": map[string]any{
 			"type": "json_schema",
@@ -194,7 +200,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	// 3) json_object honored.
 	t0 = time.Now()
 	st, parsed, raw = post("/v1/chat/completions", map[string]any{
-		"model": model, "stream": false, "max_tokens": 512,
+		"model": model, "stream": false, "max_tokens": 512, "reasoning": effort,
 		"messages":        []map[string]any{{"role": "user", "content": prompt}},
 		"response_format": map[string]any{"type": "json_object"},
 	})
@@ -204,6 +210,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	t0 = time.Now()
 	st, parsed, raw = post("/v1/responses", map[string]any{
 		"model": model, "stream": false, "max_output_tokens": 512,
+		"reasoning": effort,
 		"input": []any{
 			map[string]any{"role": "user", "content": "ping"},
 			map[string]any{"role": "assistant", "content": "ack"},
@@ -221,6 +228,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	t0 = time.Now()
 	st, parsed, raw = post("/v1/responses", map[string]any{
 		"model": model, "stream": false, "max_output_tokens": 512,
+		"reasoning": effort,
 		"input": []any{
 			map[string]any{"role": "user", "content": "ping"},
 			map[string]any{"type": "weird_thing", "x": 1},
@@ -239,6 +247,7 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 		"model":      model,
 		"stream":     false,
 		"max_tokens": 512,
+		"reasoning":  effort,
 		"messages":   []map[string]any{{"role": "user", "content": "Reply with exactly: PREFLIGHT_OK"}},
 	})
 	c = check("cache: repeat rides warm prefix", true, "")
@@ -256,7 +265,6 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 	} else {
 		c.Soft = true
 		c.Detail = fmt.Sprintf("status=%d (soft)", st)
-		_ = raw
 	}
 	c.Ms = time.Since(t0).Milliseconds()
 	results = append(results, c)
