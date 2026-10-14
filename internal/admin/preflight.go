@@ -90,6 +90,9 @@ func (s *Server) runPreflight(ctx context.Context) PreflightReport {
 	}
 	report.Checks = s.probeAccount(ctx, client, base, ids[0], model)
 
+	// Zero-value trap: Pass must START true and only a hard (non-soft) probe
+	// failure flips it — an all-green run must report pass, not absence.
+	report.Pass = len(report.Checks) > 0
 	for _, c := range report.Checks {
 		if !c.Pass && !c.Soft {
 			report.Pass = false
