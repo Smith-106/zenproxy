@@ -1,6 +1,11 @@
 package registry
 
 import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +22,22 @@ import (
 // still usable; a miss or an unusable bound exit falls through to the normal
 // account affinity, then rebinds the session. Failover rewrites the mapping
 // instead of pinning a dead exit.
+//
+// ---------------------------------------------------------------------------
+// Cross-replica sync. The table is per-process memory; running two replicas
+// behind one DNS name means each replica sees only half the traffic and would
+// rebind every session it has never heard of — breaking exit affinity, and
+// with it the upstream cache warmth (measured: 60% warm turns on a single
+// replica collapsed to 1.2% after the replicas split the table). The table
+// therefore syncs through a small JSON file beside the registry state file:
+// every interval each replica atomically saves its full table (tmp+rename, so
+// concurrent writers can never tear the file) and merges whatever any other
+// replica has written. The merge is a union with newer-wins on expiry, so
+// both replicas converge to the same union within two intervals with no
+// coordination protocol. A replica that invalidates a binding (failover) may
+// see it resurrect from the other replica's snapshot until its TTL lapses —
+// harmless, because every cache hit re-checks pool health and falls through
+// to a reselect the moment the bound exit is unusable.
 type SessionExitCache struct {
 	mu      sync.Mutex
 	ttl     time.Duration
@@ -237,4 +258,119 @@ func truncateSession(id string) string {
 		return id
 	}
 	return id[:24]
+}
+
+// ---------------------------------------------------------------------------
+// File sync (see the cross-replica note at the top of this file).
+
+type sessionFile struct {
+	Version int                         `json:"version"`
+	Entries map[string]sessionFileEntry `json:"entries"`
+}
+
+type sessionFileEntry struct {
+	Exit      string `json:"exit"`
+	ExpiresAt string `json:"expires_at"` // RFC3339, UTC
+}
+
+// SyncOnce merges any entries another replica has written to path, THEN saves
+// the full table (atomic tmp+rename). The order matters: save-first would
+// clobber the shared file with a possibly-empty table and destroy the union;
+// merge-first means a cold boot adopts the union before it ever writes.
+func (c *SessionExitCache) SyncOnce(path string) error {
+	if c == nil || !c.Enabled() || path == "" {
+		return nil
+	}
+	if err := c.mergeFile(path); err != nil {
+		return fmt.Errorf("session-sync: merge %s: %w", path, err)
+	}
+	if err := c.saveSnapshot(path); err != nil {
+		return fmt.Errorf("session-sync: save %s: %w", path, err)
+	}
+	return nil
+}
+
+// WarmFromDisk adopts the shared table without writing — the boot-time path.
+func (c *SessionExitCache) WarmFromDisk(path string) error {
+	if c == nil || !c.Enabled() || path == "" {
+		return nil
+	}
+	return c.mergeFile(path)
+}
+
+// StartFileSync keeps the table shared across replicas and returns for tests;
+// the loop dies with the process. It warms the cache from disk before serving.
+func (c *SessionExitCache) StartFileSync(path string, interval time.Duration, log *slog.Logger) {
+	if c == nil || !c.Enabled() || path == "" || interval <= 0 {
+		return
+	}
+	// Warm start: adopt whatever a previous or sibling replica saved.
+	if err := c.WarmFromDisk(path); err != nil && log != nil {
+		log.Warn("session-sync: initial merge failed", "path", path, "err", err)
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for range t.C {
+			if err := c.SyncOnce(path); err != nil && log != nil {
+				log.Warn("session-sync step failed", "path", path, "err", err)
+			}
+		}
+	}()
+}
+
+func (c *SessionExitCache) saveSnapshot(path string) error {
+	c.mu.Lock()
+	now := time.Now()
+	f := sessionFile{Version: 1, Entries: make(map[string]sessionFileEntry, len(c.entries))}
+	for k, ent := range c.entries {
+		if now.After(ent.expiresAt) {
+			continue
+		}
+		f.Entries[k] = sessionFileEntry{Exit: ent.exit, ExpiresAt: ent.expiresAt.UTC().Format(time.RFC3339)}
+	}
+	c.mu.Unlock()
+
+	body, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (c *SessionExitCache) mergeFile(path string) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // first boot: nothing to adopt
+		}
+		return err
+	}
+	var f sessionFile
+	if err := json.Unmarshal(body, &f); err != nil {
+		return fmt.Errorf("session-sync: parse %s: %w", path, err)
+	}
+	now := time.Now()
+	c.mu.Lock()
+	for k, ent := range f.Entries {
+		expires, err := time.Parse(time.RFC3339, ent.ExpiresAt)
+		if err != nil || ent.Exit == "" || now.After(expires) {
+			continue
+		}
+		// Union with newer-wins: a live TTL extension from the sibling beats
+		// our stale copy; entries only we hold stay (the sibling merges them
+		// on its next cycle).
+		if local, ok := c.entries[k]; !ok || expires.After(local.expiresAt) {
+			c.entries[k] = sessionExitEntry{exit: ent.Exit, expiresAt: expires}
+		}
+	}
+	c.mu.Unlock()
+	return nil
 }

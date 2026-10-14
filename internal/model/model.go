@@ -102,6 +102,15 @@ const (
 	ClassRateLimit ErrorClass = "rate_limit" // 429: quota or IP throttling
 	ClassServer    ErrorClass = "server"     // 5xx / 520-524: retry elsewhere
 	ClassAuth      ErrorClass = "auth"       // 401/403 with a credential-shaped body
+	// ClassPolicyGate is the upstream's abuse throttle: 403 "Your access has
+	// been restricted due to repeated policy violations." Measured 2026-10-14:
+	// all four zen accounts collected these transiently while turns on other
+	// exits kept succeeding at the same moment — the flag rides the requesting
+	// IP, not the credential, and it fades (later turns through the same
+	// account 200 again). As ClassAuth it was untouchable: no rotation, no
+	// exit-health signal, the flagged slot kept serving more 403s. It is now
+	// its own class: rotate away (and after a strike or two the ordinary
+	// quarantine machinery benches the slot until it cools down).
 	// ClassTierGate is FreeTierError. Historically this was treated as a pure
 	// client-identity refusal (UA / x-opencode-* / tools / stream). Measured
 	// 2026-10 against free-proxy egress: the same enveloped request can 403 on
@@ -126,7 +135,7 @@ const (
 // any chance of turning this failure into a success.
 func (c ErrorClass) Retryable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate, ClassUnknown:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate, ClassPolicyGate, ClassUnknown:
 		return true
 	default:
 		return false
@@ -148,7 +157,7 @@ func (c ErrorClass) Retryable() bool {
 // another exit refused for the same model.
 func (c ErrorClass) IPAttributable() bool {
 	switch c {
-	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate:
+	case ClassTransport, ClassProxyAuth, ClassRateLimit, ClassServer, ClassRegion, ClassTierGate, ClassPolicyGate:
 		return true
 	default:
 		return false

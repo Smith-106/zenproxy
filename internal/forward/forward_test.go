@@ -76,6 +76,7 @@ func TestClassifyStatusSeparatesTierGateFromAuth(t *testing.T) {
 	}{
 		{403, `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}`, model.ClassTierGate},
 		{403, "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode", model.ClassTierGate},
+		{403, "Your access has been restricted due to repeated policy violations.", model.ClassPolicyGate},
 		{403, `{"error":"invalid api key"}`, model.ClassAuth},
 		{401, `{"error":"unauthorized"}`, model.ClassAuth},
 		{429, `{"error":"rate limited"}`, model.ClassRateLimit},

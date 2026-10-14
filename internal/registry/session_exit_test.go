@@ -1,11 +1,74 @@
 package registry
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
 	"zenproxy/internal/model"
 )
+
+// TestSessionFileSyncSharesPinsAcrossReplicas is the contract that keeps the
+// dual-replica deploy from shredding exit affinity: both replicas must have
+// the union of the sticky table within a couple of sync cycles, and a replica
+// that boots late must warm up from disk.
+func TestSessionFileSyncSharesPinsAcrossReplicas(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	a := NewSessionExitCache(time.Hour, 64)
+	b := NewSessionExitCache(time.Hour, 64)
+
+	// Replica a binds a live conversation, then shares it.
+	a.Set("zen-01", "sessA", "muse", "direct")
+	if err := a.SyncOnce(path); err != nil {
+		t.Fatal(err)
+	}
+	// Replica b warms from disk and serves the same conversation with the
+	// same egress — no rebind, no exit hop.
+	if err := b.SyncOnce(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := b.GetAndRefresh("zen-01", "sessA", "muse"); !ok || got != "direct" {
+		t.Fatalf("b did not adopt a's pin: got %v ok=%v", got, ok)
+	}
+
+	// b learns its own conversation; after its next sync, a adopts it too.
+	b.Set("zen-02", "sessB", "muse", "socks-5")
+	if err := b.SyncOnce(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SyncOnce(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := a.GetAndRefresh("zen-02", "sessB", "muse"); !ok || got != "socks-5" {
+		t.Fatalf("a did not adopt b's pin: got %v ok=%v", got, ok)
+	}
+	if got, ok := a.GetAndRefresh("zen-01", "sessA", "muse"); !ok || got != "direct" {
+		t.Fatalf("a lost its own pin during merge: got %v ok=%v", got, ok)
+	}
+
+	// A fresh replica boots fully warm from the shared file.
+	c := NewSessionExitCache(time.Hour, 64)
+	if err := c.WarmFromDisk(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := c.GetAndRefresh("zen-01", "sessA", "muse"); !ok || got != "direct" {
+		t.Fatalf("late boot did not warm from disk: got %v ok=%v", got, ok)
+	}
+
+	// A cache that has never written must not clobber the shared file when it
+	// syncs (merge-first ordering, not save-first).
+	d := NewSessionExitCache(time.Hour, 64)
+	if err := d.SyncOnce(path); err != nil {
+		t.Fatal(err)
+	}
+	e := NewSessionExitCache(time.Hour, 64)
+	if err := e.WarmFromDisk(path); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := e.GetAndRefresh("zen-01", "sessA", "muse"); !ok || got != "direct" {
+		t.Fatalf("empty replica destroyed the shared table: got %v ok=%v", got, ok)
+	}
+}
 
 func TestExitForSessionStickyAcrossTurns(t *testing.T) {
 	pool := poolOf(t, "a", "b", "c")

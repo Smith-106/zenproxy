@@ -338,6 +338,14 @@ func TestARegionRefusalIsClassifiedAndRotatable(t *testing.T) {
 	if model.ClassAuth.IPAttributable() {
 		t.Fatal("a plain 403 became IP-attributable")
 	}
+	// The policy gate is the third 403 family: measured IP-scoped (same
+	// instant, other exits 200), so it must rotate and strike the exit.
+	if got := classifyStatus(http.StatusForbidden, http.Header{}, []byte("Your access has been restricted due to repeated policy violations.")); got != model.ClassPolicyGate {
+		t.Fatalf("classifyStatus = %q, want %q", got, model.ClassPolicyGate)
+	}
+	if !model.ClassPolicyGate.IPAttributable() || !model.ClassPolicyGate.Retryable() {
+		t.Fatal("the policy gate must be IP-attributable and retryable")
+	}
 	// A Cloudflare challenge is a 403 too, and it is a server-side wall that a
 	// different IP may well get past — but it must not be mistaken for geography.
 	blocked := http.Header{}

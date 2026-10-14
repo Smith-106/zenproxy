@@ -51,6 +51,15 @@ func poolStatePath(stateFile string) string {
 	return filepath.Join(filepath.Dir(stateFile), "exits-state.json")
 }
 
+// sessionFileSyncPath is the shared sticky-table file: a sibling of the
+// registry state file, in the same writable bind mount.
+func sessionFileSyncPath(stateFile string) string {
+	if stateFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(stateFile), "sessions.json")
+}
+
 func run() error {
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
 	flag.Parse()
@@ -73,8 +82,13 @@ func run() error {
 		return err
 	}
 	if cfg.Policy.SessionExitTTL > 0 {
-		reg.SetSessionExitCache(registry.NewSessionExitCache(cfg.Policy.SessionExitTTL, 4096))
-		logger.Info("session→exit stickiness enabled", "ttl", cfg.Policy.SessionExitTTL)
+		c := registry.NewSessionExitCache(cfg.Policy.SessionExitTTL, 4096)
+		reg.SetSessionExitCache(c)
+		// Two replicas share one DNS name; without this file the session→exit
+		// pins stay per-replica, every conversation hops exits every other
+		// turn, and the upstream cache warmth collapses (measured 60% → 1.2%).
+		c.StartFileSync(sessionFileSyncPath(cfg.StateFile), 5*time.Second, logger)
+		logger.Info("session→exit stickiness enabled", "ttl", cfg.Policy.SessionExitTTL, "sync", sessionFileSyncPath(cfg.StateFile))
 	}
 	if n := reg.Seed(cfg.Accounts); n > 0 {
 		logger.Info("seeded accounts from config", "count", n)

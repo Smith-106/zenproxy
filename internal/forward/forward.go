@@ -689,6 +689,14 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		if attempt < maxAttempts && e.shouldRotate(resp.StatusCode, class) {
 			e.log.Info("rotating egress after upstream error",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode, "class", class)
+			// A policy-gate strike is exit-domain evidence — the slot's IP is
+			// currently flagged by the upstream. Give the health machinery the
+			// strike (quarantine needs consecutives; a lone strike is a soft
+			// penalty that a later success wipes) and rotate immediately so
+			// this request does not ride the flagged slot again.
+			if class == model.ClassPolicyGate && exitID != "" {
+				e.pool.MarkFailure(exitID, "upstream policy gate: 403 restricted")
+			}
 			// The chooser owns what "switch" means here: another IP for the same
 			// account, or another account entirely.
 			nextCand, ok := ch.next(ent, class, exitID, askedModel, sessionID)
@@ -1327,6 +1335,14 @@ func classifyStatus(status int, header http.Header, body []byte) model.ErrorClas
 		// would have served the request.
 		if bytes.Contains(body, []byte("RegionError")) || bytes.Contains(body, []byte("not available in your country")) {
 			return model.ClassRegion
+		}
+		// Muse's abuse throttle ("repeated policy violations") is measured to
+		// ride the exit IP, not the credential: same instant, other exits 200
+		// and later turns through the same account recover. Recognise it before
+		// the auth fallback or it is untouchable — no rotation, no health
+		// signal, and pi would see the raw refusal.
+		if bytes.Contains(bytes.ToLower(body), []byte("policy violations")) {
+			return model.ClassPolicyGate
 		}
 		if marker := header.Get("Cf-Mitigated"); marker != "" {
 			return model.ClassServer
