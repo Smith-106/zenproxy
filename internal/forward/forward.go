@@ -415,6 +415,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 	var lastMsg string
 	gateRetried := false
+	// tierGateFails counts free-tier refusals that arrived AFTER the OpenCode
+	// envelope was already on the request. Measured 2026-10-14: the gate's red
+	// verdict spans every exit type at once for minutes, and each refusal keeps
+	// re-arming it — so rotating a dozen exits across four accounts does not
+	// dodge the flag, it flag-poisons the entire pool (every exit takes a 15m
+	// block) and stretches a 403 into a multi-minute hammer the caller times
+	// out on. Three upstream attempts total: the same-exit flap catch, one
+	// rotation (the 2026-10-13 per-IP behavior), then hand the caller the
+	// upstream's own refusal right away.
+	tierGateFails := 0
 	// policyRewinds: the muse abuse-gate 403 ("repeated policy violations") is
 	// a PRE-generation refusal — the turn never ran, so replaying it on a
 	// different exit costs nothing upstream. Burning the caller's attempt
@@ -687,13 +697,24 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 					continue
 				}
 			}
+			tierGateFails++
 			e.log.Warn("upstream refused this free-tier request after the OpenCode envelope",
 				"account", ent.ID, "exit", exitID, "status", resp.StatusCode,
-				"enveloped", plan != nil, "hint", "see docs/FREE-TIER.md")
+				"enveloped", plan != nil, "refusals", tierGateFails, "hint", "see docs/FREE-TIER.md")
 			// Park on the free-tier axis (probe-proof) so rotation skips known-bad
-			// free proxies instead of rediscovering the same FreeTierError.
-			if plan != nil && exitID != "" {
+			// free proxies instead of rediscovering the same FreeTierError. At
+			// most two exits per request: past that the verdict is request- (not
+			// exit-) shaped and blocking more of the pool is collateral damage
+			// paid by models the gate still serves.
+			if plan != nil && exitID != "" && tierGateFails <= 2 {
 				e.pool.BlockFreeTier(exitID, 15*time.Minute, "enveloped FreeTierError")
+			}
+			if tierGateFails >= 2 {
+				e.log.Info("free-tier red window: fast-failing after capped attempts",
+					"account", ent.ID, "exit", exitID, "refusals", tierGateFails)
+				writeUpstreamResponse(w, resp, errBody)
+				cancel()
+				return
 			}
 		}
 		if attempt < maxAttempts && e.shouldRotate(resp.StatusCode, class) {
