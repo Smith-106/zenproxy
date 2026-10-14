@@ -90,19 +90,20 @@ func chatToResponsesBody(raw []byte) (out []byte, clientStream bool, err error) 
 	attachReasoningForResponses(dst, src)
 	// CPA lists muse free models with thinking.levels=["xhigh"], but OpenCode's
 	// "auto" UI often sends no reasoning_effort at all (usage shows empty while
-	// the console prints auto). The bridge used to default those turns to
-	// xhigh+summary so the thinking pane stayed alive — until the measurement
-	// that killed it: muse xhigh turns stretch to 190-240s, and the streaming
-	// client's own ~220s ceiling aborts the wire seconds before muse answers,
-	// so every deep turn surfaced as an error burst and the retry re-burned
-	// the whole turn (04:03/04:04 broken-pipe family, the only server-side
-	// errors left after every other fix). Default effort now lands at "low"
-	// (measured 2-15s to a complete answer) and ZEN_REASONING_EFFORT restores
-	// any depth explicitly for deployments whose clients can wait.
+	// the console prints auto). Default xhigh+summary so those turns actually
+	// get the configured thinking depth and a foldable trace.
+	//
+	// A brief "low" default was measured and reverted: across 193 real xhigh
+	// turns the median was 12s and p90 41s — barely worse than low — while the
+	// rare 190-240s reasoning tails are what trip the streaming client's ~220s
+	// ceiling, no matter the default. Those tails abort the wire once and the
+	// retry usually completes fast on muse variance (measured: abort at 231s,
+	// the immediate retry finished in 41s). Depth stays; ZEN_REASONING_EFFORT
+	// lowers it for deployments that prefer zero-tail reliability.
 	if _, has := dst["reasoning"]; !has && needsChatViaResponses(model) {
 		effort := strings.TrimSpace(os.Getenv("ZEN_REASONING_EFFORT"))
 		if effort == "" {
-			effort = "low"
+			effort = "xhigh"
 		}
 		dst["reasoning"] = map[string]any{"effort": effort, "summary": "auto"}
 	}

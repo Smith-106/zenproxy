@@ -178,18 +178,18 @@ func TestChatToResponsesBodyDefaultsMuseEffort(t *testing.T) {
 		}
 		return reasoning.Effort, reasoning.Summary
 	}
-	// Default: low — the effort whose turns finish inside the streaming
-	// client's ~220s ceiling. Muse xhigh turns (190-240s) were aborted by the
-	// client seconds before completion, surfacing as error bursts.
+	// Default: xhigh — the configured depth (median 12s / p90 41s across 193
+	// real turns; the rare long reasoning tails are what abort, and the retry
+	// heals them). ZEN_REASONING_EFFORT lowers it explicitly.
 	effort, summary := parse(t)
-	if effort != "low" || summary != "auto" {
-		t.Fatalf("default reasoning = %s/%s, want low/auto", effort, summary)
+	if effort != "xhigh" || summary != "auto" {
+		t.Fatalf("default reasoning = %s/%s, want xhigh/auto", effort, summary)
 	}
-	// The environment restores any depth explicitly.
-	t.Setenv("ZEN_REASONING_EFFORT", "xhigh")
+	// The environment lowers the depth explicitly.
+	t.Setenv("ZEN_REASONING_EFFORT", "low")
 	effort, _ = parse(t)
-	if effort != "xhigh" {
-		t.Fatalf("override reasoning effort = %s, want xhigh", effort)
+	if effort != "low" {
+		t.Fatalf("override reasoning effort = %s, want low", effort)
 	}
 }
 
