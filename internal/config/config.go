@@ -171,6 +171,18 @@ type Health struct {
 	// cleanly killing whatever stayed dead and forgetting what recovered.
 	// 0 defaults to 40; a negative value disables the breaker.
 	OutageThreshold int `yaml:"outage_threshold"`
+	// RateLimitCooldown is the cooldown lent to a 429 that carries no
+	// Retry-After header (so names no schedule of its own). Measured on muse
+	// 2026-10-14: per-key 429 bursts in ~minute waves, every refusal
+	// headerless; with only reactive rotation the struck exit re-entered the
+	// rotation instantly and caught the next wave, resending the full prompt
+	// each time (178 rate_limit rotations in 75 minutes, zero cooldowns) —
+	// which both wasted upstream tokens and flushed the per-exit prompt cache
+	// the affinity machinery exists to protect. 0 defaults to 90s; a negative
+	// value disables the default-cooldown entirely (headerless 429s then only
+	// rotate, as before). A 429 WITH Retry-After always wins: that absolute
+	// deadline is kept instead of this default.
+	RateLimitCooldown time.Duration `yaml:"rate_limit_cooldown"`
 }
 
 // Policy configures retry and rotation behaviour.
@@ -335,6 +347,9 @@ func (c *Config) normalize() {
 	if h.MaxBackoff == 0 {
 		h.MaxBackoff = dh.MaxBackoff
 	}
+	// RateLimitCooldown intentionally keeps its raw value here: 0 means
+	// "default" and a negative means "disabled" — resolved at use time by
+	// Pool.rateLimitCooldown, the same convention as OutageThreshold.
 	p, dp := &c.Policy, d.Policy
 	if p.MaxAttempts == 0 {
 		p.MaxAttempts = dp.MaxAttempts

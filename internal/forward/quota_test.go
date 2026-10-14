@@ -134,11 +134,40 @@ func TestA429WithoutRetryAfterLeavesTheExitAlone(t *testing.T) {
 
 	h.post(t, "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
 
-	// No header means no deadline. Rotation still happens — that path predates
-	// the ledger and must keep working — but nothing may be recorded, because
-	// there is nothing to record.
+	// No header means no trusted deadline — but the proxy now lends a default
+	// cooldown instead of leaving the exit hot (measured: headerless per-key
+	// 429 storms re-struck the same exit within seconds, resending the whole
+	// prompt each time). The lent window is conservative, not invented
+	// precision.
+	until, reason, cool := h.pool.QuotaCooled("live")
+	if !cool {
+		t.Fatal("a headerless 429 lent no cooldown; the exit stays hot and re-struck")
+	}
+	if left := time.Until(until); left < 45*time.Second || left > 91*time.Second {
+		t.Fatalf("lent cooldown is %v away, want about 90s", left.Round(time.Second))
+	}
+	if reason != string(model.ClassRateLimit) {
+		t.Errorf("reason = %q, want %q", reason, model.ClassRateLimit)
+	}
+	// A struck 429 that carries its own Retry-After later must overwrite the
+	// lent one with the upstream's absolute statement.
+	hd := http.Header{}
+	hd.Set("Retry-After", "3600")
+	if until2, ok := quotaDeadline(hd, time.Now()); !ok || until2.Before(until) {
+		t.Fatal("an explicit Retry-After shorter than the lent window would be ignored")
+	}
+}
+
+func TestHeaderless429CooldownCanBeDisabled(t *testing.T) {
+	h := newHarness(t, upstreamAlways(http.StatusTooManyRequests, nil,
+		`{"error":{"type":"FreeUsageLimitError","message":"limit reached"}}`))
+	h.pool.SetRateLimitCooldownDisabled()
+	bindLive(t, h)
+
+	h.post(t, "/v1/chat/completions", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+
 	if _, _, cool := h.pool.QuotaCooled("live"); cool {
-		t.Fatal("a 429 with no Retry-After produced a cooldown out of nothing")
+		t.Fatal("the disabled configuration still lent a cooldown")
 	}
 }
 

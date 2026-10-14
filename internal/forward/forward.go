@@ -1444,8 +1444,9 @@ func isTransientTransport(err error) bool {
 // send, and silently ignoring it would leave those upstreams rotating blind.
 //
 // A missing or unparseable header is not an error: it just means this refusal
-// carried no timing information, and reactive rotation — which existed before
-// the ledger and still works — remains the fallback.
+// carried no timing information. Reactive rotation — which existed before the
+// ledger and still works — is then the fallback, and coolExit's default
+// cooldown (below) keeps a headerless 429 from hot-looping the same exit.
 func quotaDeadline(h http.Header, now time.Time) (time.Time, bool) {
 	raw := strings.TrimSpace(h.Get("Retry-After"))
 	if raw == "" {
@@ -1506,14 +1507,32 @@ func (e *Engine) onSpentExit(accountID, mdl string) bool {
 // A 429 is not evidence that the account, the key or the model is at fault —
 // measured, the same account on the same key succeeds from a different exit
 // within the same second.
+//
+// When the refusal carries Retry-After, that deadline is trusted outright. When
+// it does not — measured 2026-10-14, this upstream's per-key 429s carry no
+// header at all — reactive rotation alone left the exit hot: it re-entered the
+// rotation instantly and caught the next burst of the same storm, sending the
+// full prompt up again and again (75 measured minutes: 178 rate_limit
+// rotations, zero cooldowns). A conservative default-cooldown breaks that loop:
+// short enough to shed the storm window (whose bursts come in ~minute waves),
+// long enough that the same exit is not re-struck within it.
 func (e *Engine) coolExit(exitID string, h http.Header, class model.ErrorClass) (time.Time, bool) {
 	if class != model.ClassRateLimit || e.pool == nil || exitID == "" {
 		return time.Time{}, false
 	}
-	until, ok := quotaDeadline(h, time.Now())
-	if !ok {
+	if until, ok := quotaDeadline(h, time.Now()); ok {
+		if !e.pool.CoolForQuota(exitID, until, string(class)) {
+			return time.Time{}, false
+		}
+		return until, true
+	}
+	// No header: the upstream gave no schedule, so lend it one. A negative
+	// (disabled) configuration returns 0 and skips the cooldown.
+	dl := e.pool.RateLimitCooldown()
+	if dl <= 0 {
 		return time.Time{}, false
 	}
+	until := time.Now().Add(dl)
 	if !e.pool.CoolForQuota(exitID, until, string(class)) {
 		return time.Time{}, false
 	}

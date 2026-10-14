@@ -549,6 +549,35 @@ func (p *Pool) outageLimit() int {
 	}
 }
 
+// defaultRateLimitCooldown is the window lent to a 429 that arrived with no
+// Retry-After of its own. Short enough to shed the burst waves measured on
+// muse (its per-key throttles arrive in roughly minute-scale storms); long
+// enough that the struck exit is not immediately re-picked inside the same
+// wave and fed the full prompt again.
+const defaultRateLimitCooldown = 90 * time.Second
+
+// rateLimitCooldown resolves the configured headerless-429 cooldown. Zero
+// means use the default; negative disables the lending entirely (a headerless
+// 429 then only rotates, exactly as before this existed).
+func (p *Pool) RateLimitCooldown() time.Duration {
+	switch t := p.health.RateLimitCooldown; {
+	case t < 0:
+		return 0
+	case t == 0:
+		return defaultRateLimitCooldown
+	default:
+		return t
+	}
+}
+
+// SetRateLimitCooldownDisabled is a test seam: it forces the
+// headerless-429 lending off without going through config parsing.
+func (p *Pool) SetRateLimitCooldownDisabled() {
+	p.mu.Lock()
+	p.health.RateLimitCooldown = -time.Second
+	p.mu.Unlock()
+}
+
 // noteFailureOutcome feeds the breaker one more failure. It reports whether
 // the breaker is open, in which case callers must not retire.
 func (p *Pool) noteFailureOutcome() bool {
