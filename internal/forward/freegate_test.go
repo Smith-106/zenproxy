@@ -497,6 +497,9 @@ func TestGateToolDefsAreTheCapturedFingerprint(t *testing.T) {
 			if err := json.Unmarshal(raw, &obj); err != nil {
 				t.Fatalf("%s definition does not parse: %v", shape, err)
 			}
+			if obj["type"] != "function" {
+				t.Fatalf("%s %s entry lost type=function: %.80s", shape, name, raw)
+			}
 			var body map[string]any
 			if shape == "nested" {
 				body, _ = obj["function"].(map[string]any)

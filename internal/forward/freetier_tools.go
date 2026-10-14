@@ -122,7 +122,19 @@ func init() {
 		return b
 	}
 	render := func(b gateToolBody) (*gateToolDef, error) {
-		flat, err := json.Marshal(b)
+		flat, err := json.Marshal(struct {
+			Type        string           `json:"type"`
+			Name        string           `json:"name"`
+			Description string           `json:"description"`
+			Parameters  json.RawMessage  `json:"parameters"`
+			Strict      *json.RawMessage `json:"strict,omitempty"`
+		}{
+			Type:        "function",
+			Name:        b.Name,
+			Description: b.Description,
+			Parameters:  b.Parameters,
+			Strict:      b.Strict,
+		})
 		if err != nil {
 			return nil, err
 		}
