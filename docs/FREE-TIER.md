@@ -21,6 +21,23 @@ opencode 的 `*-free` 模型对"客户端身份"有门禁：
 > 必须能解码成合法的倒序墙钟＋[0,63] 计数）依旧在，zenproxy 铸 ID 的方式天然合规，
 > 但**探针自造随机 hex 会被拒**，做实验时务必用官方时钟算法铸 ID。
 >
+> **2026-10-14 傍晚更新（affinity 头禁令 + 工具门全 lane 收紧）**：16/16 交替对照
+> （同一信封、只翻转 `x-session-affinity`）钉死两条新规则：
+> ① **`x-session-affinity` 头携带非空 ses 值 ⇒ 403 FreeTierError**——旧 26 字符形与
+> 1.19 的 64-hex 形皆拒，与 x-opencode-session 同值/异值皆拒，空值或缺席则放行；
+> directory 头无害。zenproxy 信封从不发这个头，但要防下游把入站 affinity 带进来：
+> ApplyHeaders 现在在消费完入站会话键后把**所有原始拼法删除**（x-opencode-session/
+> -id 由盖章值收编，`session_id`/`session-id`/`conversation_id`/`x-session-id`/
+> `x-session-affinity` 一律剥除），否则 buildRequest 逐字上送＝保证 403。
+> ② **逐字工具门已扩到全部 lane 与全部面**：同日 /zen/v1 与 /inference/v1 的
+> chat 与 responses 四象限，stub 定义全灭、逐字对全过（以 429 FreeUsageLimitError=
+> 门放行、403 FreeTierError=身份拒 判读）。第三方案（FishBottle7/opencode2dsh，
+> 154★/36fork）10-11 的"schemas uninspected"+发 affinity 头的配方**已双双过期**，
+> 现网每发必 403；其门禁判据史（09-16 UA→会话形状、09-18 流式+bash/read、
+> 10-09/11 names-only、10-13 #62 时钟位反码、计数 [0,63]、高 36 位不校验）与我们的
+> 实测链条完全互证，可作旁证库。muse 系在其 10-10 矩阵中 RegionError 全灭，同日
+> 我们侧 200——再次证实 region 维度是出口 IP 的事。
+>
 > **2026-10-14 午后观察（红窗与重试自续期）**：逐字定义信封上线当天，同一形状的请求在
 > 分钟级时间里 403 与 200 交替（40 分钟内两次风暴，两次又全绿；919KB 无工具真身
 > 会话在风暴后原样 200）。起初疑为双副本状态分裂，取证后修正：双副本共享

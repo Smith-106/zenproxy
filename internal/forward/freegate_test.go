@@ -472,6 +472,34 @@ func TestApplyHeadersReusesInboundSession(t *testing.T) {
 	}
 }
 
+// 2026-10-14 evening probe (16/16 alternating controls plus a shape matrix on
+// the live gate): any non-empty x-session-affinity value on the upstream
+// request is refused with 403 FreeTierError — legacy and 1.19 shapes alike —
+// while an empty or absent header passes. The inbound spellings are consumed
+// into the stamped session, so the raw inbound headers must be deleted before
+// the request is forwarded; buildRequest otherwise copies them verbatim and
+// every client that happens to send one becomes a guaranteed refusal.
+func TestApplyHeadersStripsInboundSessionSpellings(t *testing.T) {
+	hdrs := http.Header{}
+	hdrs.Set("session_id", "pfx_24397c586d40f4f9272eaaaaaaaaaaaa")
+	hdrs.Set("session-id", "conv-7f3a")
+	hdrs.Set("conversation_id", "conv-9b21")
+	hdrs.Set("x-session-id", "ses_affinitytest")
+	hdrs.Set("x-session-affinity", "ses_affinitytest")
+	testFreeTier(t).ApplyHeaders(hdrs)
+	for _, name := range consumedInboundSessionSpelling {
+		if got := hdrs.Get(name); got != "" {
+			t.Errorf("inbound %s survived ApplyHeaders = %q (the gate refuses any non-empty affinity value)", name, got)
+		}
+	}
+	if hdrs.Get("x-opencode-session") == "" || hdrs.Get("x-opencode-session-id") == "" {
+		t.Errorf("stamped session headers missing: %q / %q", hdrs.Get("x-opencode-session"), hdrs.Get("x-opencode-session-id"))
+	}
+	if hdrs.Get("x-opencode-session") != hdrs.Get("x-opencode-session-id") {
+		t.Errorf("session and session-id must carry the same value: %q vs %q", hdrs.Get("x-opencode-session"), hdrs.Get("x-opencode-session-id"))
+	}
+}
+
 // The gate constants must stay at the measured minimum: bash + read.
 func TestGateToolNamesAreTheMeasuredPair(t *testing.T) {
 	if len(gateToolNames) != 2 || gateToolNames[0] != "bash" || gateToolNames[1] != "read" {

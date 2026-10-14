@@ -365,6 +365,31 @@ func (f *FreeTier) ApplyHeaders(h http.Header) {
 	session := stableClientSessionID(h)
 	h.Set("x-opencode-session", session)
 	h.Set("x-opencode-session-id", session)
+	// 2026-10-14 16:1x UTC probe, 16/16 alternating controls + shape matrix:
+	// the gate refuses EVERY request whose x-session-affinity header carries
+	// a non-empty ses id — legacy 26-char and 1.19 64-hex shapes alike, and a
+	// different value refuses just like a matching one — while an empty value
+	// or an absent header passes. The inbound conversation keys above were
+	// consumed into `session`; the rewritten x-opencode-session / -id carry
+	// the identity upstream, so the raw inbound spellings must not ride along
+	// with the forwarded request. buildRequest copies inbound headers
+	// verbatim, which would otherwise turn any client that happens to send
+	// x-session-affinity into a guaranteed FreeTierError.
+	for _, name := range consumedInboundSessionSpelling {
+		h.Del(name)
+	}
+}
+
+// consumedInboundSessionSpelling are the inbound conversation-key spellings
+// stableClientSessionID reads but ApplyHeaders does not rewrite: they must be
+// deleted before the request leaves, or the gate reads them as an identity
+// mismatch and refuses. (x-opencode-session / -id are rewritten above.)
+var consumedInboundSessionSpelling = []string{
+	"session_id",
+	"session-id",
+	"conversation_id",
+	"x-session-id",
+	"x-session-affinity",
 }
 
 // inboundSessionHeaderNames are the conversation identifiers the gateway and
