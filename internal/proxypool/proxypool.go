@@ -828,14 +828,22 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 			}
 		}
 	}
-	// Round-robin inside a tier spreads load across equally good exits instead
-	// of hammering whichever one happens to measure fastest right now.
+	// Scatter successive picks across the WHOLE member list instead of walking
+	// it from the front. The member order is config order (resin block first,
+	// then every static, then direct), and account bindings are long-lived, so
+	// the pool only makes a handful of picks per day: a front-walking counter
+	// (n % len) kept landing inside the resin prefix forever and left any large
+	// static tail unreached for days — measured 2026-10-14, 3544 static exits
+	// never served a request while their IDs aged out into retirement. The
+	// Knuth multiplicative map (golden-ratio hash) sends consecutive counters
+	// to well-scattered indices over the full list, stays deterministic for
+	// tests, and needs no seed; a list-length change just re-maps.
 	pick := func(list []*member) *member {
 		if len(list) == 0 {
 			return nil
 		}
 		n := p.rr.Add(1)
-		return list[int(n)%len(list)]
+		return list[int((n*0x9E3779B1)%uint64(len(list)))]
 	}
 	// Within a tier, an exit no other account is using comes first. Sharing an
 	// exit means sharing its per-IP allowance and its region refusals, which is
