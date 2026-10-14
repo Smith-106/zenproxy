@@ -536,11 +536,47 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if plan != nil && plan.ReplyAsChat && plan.Stream {
 				// Streaming chat clients get a synthetic chat SSE built from the
 				// folded Responses object; translating every Responses event live
-				// is a larger contract than this bridge needs. The SSE headers go
-				// out BEFORE the fold finishes, with keepalive comments during
-				// muse's silent minutes — committed headers mean no rotation is
-				// possible afterwards, so a dead stream here is reported in-band.
-				e.writeFolded(w, resp, plan, ent.ID, exitID, sessionID)
+				// is a larger contract than this bridge needs. The fold runs
+				// inside a hold window first: a stream that dies during muse's
+				// pre-text warmup (the measured 137k-context death at ~10s)
+				// leaves no committed bytes, so this is a plain pre-commit fold
+				// failure — the exit takes the strike and the request re-rolls
+				// invisibly, instead of the client reading a 20-token fragment
+				// as a "completed" turn and nudging forever. Only after the
+				// hold expires do the SSE headers go out with keepalives, and
+				// from that point rotation is impossible (legacy semantics).
+				chatJSON, foldErr, hdrSent := e.foldChatStreamInteractive(w, resp, plan)
+				if foldErr != "" {
+					if exitID != "" && e.pool != nil {
+						e.pool.MarkFailure(exitID, "fold: "+foldErr)
+					}
+					if hdrSent {
+						payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
+						w.Header().Set("Content-Type", "text/event-stream")
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write([]byte("data: "))
+						_, _ = w.Write(payload)
+						_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+						if f, ok := w.(http.Flusher); ok {
+							f.Flush()
+						}
+						cancel()
+						return
+					}
+					e.log.Info("stream died during warmup; re-rolling invisibly on another exit",
+						"account", ent.ID, "exit", exitID, "class", "fold", "err", foldErr)
+					if attempt < maxAttempts && e.shouldRotate(http.StatusBadGateway, model.ClassServer) {
+						if nextCand, ok := ch.next(ent, model.ClassServer, exitID, askedModel, sessionID); ok {
+							cur = nextCand
+							cancel()
+							continue
+						}
+					}
+					writeJSONError(w, http.StatusBadGateway, foldErr)
+					cancel()
+					return
+				}
+				e.logCacheUsage(chatJSON, ent.ID, exitID, sessionID)
 				cancel()
 				return
 			}
@@ -1063,6 +1099,141 @@ func writeCompleted(w http.ResponseWriter, out []byte) {
 	w.Header().Del("Content-Encoding")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(out)
+}
+
+// streamFoldHoldWindow is how long the streaming-chat fold stays
+// pre-commit. Muse deaths during the xhigh warmup land well inside it
+// (measured ~10s), so those become invisible re-rolls; genuinely long turns
+// past the window fall back to legacy early-commit semantics with
+// keepalives, where rotation is no longer possible.
+const streamFoldHoldWindow = 45 * time.Second
+
+// streamFoldTick is the keepalive cadence once the headers are committed.
+const streamFoldTick = 15 * time.Second
+
+// foldChatStreamInteractive folds a streamed upstream reply into the single
+// chat completion object a ReplyAsChat+stream client receives, with one
+// refinement the plain fold cannot offer: for the first streamFoldHoldWindow
+// of upstream silence NOTHING is committed to the client, so a fold failure
+// inside that window still belongs to the attempt loop — the exit takes the
+// strike and the request re-rolls invisibly. Past the window (a genuinely
+// long muse warmup) the headers go out, ": connected" plus periodic keepalive
+// comments flow, and a failure degrades to the in-band error report.
+//
+// The returned hdrSent tells the caller whether any client byte exists: a
+// foldErr with hdrSent=false must be retried by the caller; a foldErr with
+// hdrSent=true was already reported in-band.
+func (e *Engine) foldChatStreamInteractive(w http.ResponseWriter, resp *http.Response, plan *GatePlan) (chatJSON []byte, foldErr string, hdrSent bool) {
+	surface := surfaceChat
+	if plan != nil {
+		surface = plan.Surface
+	}
+	type foldResult struct {
+		chat       []byte
+		readErr    error
+		foldErr    string
+		convertErr error
+	}
+	resultCh := make(chan foldResult, 1)
+	tickCh := make(chan struct{}, 4)
+	go func() {
+		raw, rerr := readAllKeepalive(resp.Body, e.pol.MaxBodyBytes, streamFoldTick, func() {
+			select {
+			case tickCh <- struct{}{}:
+			default:
+			}
+		})
+		resp.Body.Close()
+		if rerr != nil {
+			resultCh <- foldResult{readErr: rerr}
+			return
+		}
+		out, ferr := foldStream(raw)
+		if surface == surfaceResponses {
+			out, ferr = foldResponsesStream(raw)
+		}
+		if ferr != "" {
+			resultCh <- foldResult{foldErr: ferr}
+			return
+		}
+		chat, cerr := responsesToChatCompletion(out)
+		resultCh <- foldResult{chat: chat, convertErr: cerr}
+	}()
+
+	commit := func() http.Flusher {
+		f, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Del("Content-Length")
+		w.Header().Del("Transfer-Encoding")
+		w.Header().Del("Content-Encoding")
+		w.WriteHeader(http.StatusOK)
+		if f != nil {
+			_, _ = w.Write([]byte(": connected\n\n"))
+			f.Flush()
+		}
+		hdrSent = true
+		return f
+	}
+	emitBody := func(f http.Flusher, chat []byte, doCommit bool) {
+		if doCommit {
+			f = commit()
+		}
+		sse, sseErr := chatCompletionToSSE(chat)
+		if sseErr != nil {
+			payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "failed to stream converted chat reply: " + sseErr.Error(), "type": "api_error"}})
+			_, _ = w.Write([]byte("data: "))
+			_, _ = w.Write(payload)
+			_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+			if f != nil {
+				f.Flush()
+			}
+			return
+		}
+		_, _ = w.Write(sse)
+		if f != nil {
+			f.Flush()
+		}
+	}
+
+	select {
+	case res := <-resultCh:
+		// Landed inside the hold: nothing committed, so a failure here is a
+		// plain pre-commit fold failure for the attempt loop to re-roll.
+		switch {
+		case res.readErr != nil:
+			return nil, "failed to read the upstream stream: " + res.readErr.Error(), false
+		case res.foldErr != "":
+			return nil, res.foldErr, false
+		case res.convertErr != nil:
+			return nil, "failed to convert responses reply to chat: " + res.convertErr.Error(), false
+		}
+		emitBody(nil, res.chat, true)
+		return res.chat, "", true
+	case <-time.After(streamFoldHoldWindow):
+		// The upstream is alive but slow: commit, ping, and wait it out.
+		f := commit()
+		for {
+			select {
+			case <-tickCh:
+				if f != nil {
+					_, _ = w.Write([]byte(": keepalive\n\n"))
+					f.Flush()
+				}
+			case res := <-resultCh:
+				switch {
+				case res.readErr != nil:
+					return nil, "failed to read the upstream stream: " + res.readErr.Error(), true
+				case res.foldErr != "":
+					return nil, res.foldErr, true
+				case res.convertErr != nil:
+					return nil, "failed to convert responses reply to chat: " + res.convertErr.Error(), true
+				}
+				emitBody(f, res.chat, false)
+				return res.chat, "", true
+			}
+		}
+	}
 }
 
 // readAllKeepalive copies r up to limit bytes while invoking onTick on a
