@@ -99,8 +99,66 @@ func chatToResponsesBody(raw []byte) (out []byte, clientStream bool, err error) 
 		dst["tools"] = flattenChatTools(v)
 	}
 
+	// Structured output must survive the rewrite. Chat clients declare the
+	// contract on response_format; Responses declares it on text.format — and
+	// the free-tier upstream DOES enforce the schema (measured: a bad schema
+	// is rejected with the structured-outputs linter's own message). Dropping
+	// the field here left pi's sub-agents with a plain-text muse reply and a
+	// "no structured result" fallback loop, which is exactly why "this model
+	// behaves differently": only the bridge path lost the contract.
+	if v, ok := src["response_format"]; ok && rawPresent(v) {
+		if tf, ok2 := chatResponseFormatToTextFormat(v); ok2 {
+			dst["text"] = tf
+		}
+	}
+
 	out, err = json.Marshal(dst)
 	return out, clientStream, err
+}
+
+// chatResponseFormatToTextFormat maps the chat surface's response_format onto
+// the Responses text.format object. The schema is forwarded verbatim — it is
+// the client's contract, and the upstream lints it far better than we could.
+func chatResponseFormatToTextFormat(v json.RawMessage) (map[string]any, bool) {
+	var rf struct {
+		Type       string          `json:"type"`
+		JSONSchema json.RawMessage `json:"json_schema"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(v), &rf); err != nil {
+		return nil, false
+	}
+	switch rf.Type {
+	case "json_object":
+		return map[string]any{"format": map[string]any{"type": "json_object"}}, true
+	case "json_schema":
+		var js struct {
+			Name        string          `json:"name"`
+			Description json.RawMessage `json:"description"`
+			Schema      json.RawMessage `json:"schema"`
+			Strict      *bool           `json:"strict"`
+		}
+		if err := json.Unmarshal(rf.JSONSchema, &js); err != nil {
+			return nil, false
+		}
+		name := js.Name
+		if strings.TrimSpace(name) == "" {
+			name = "response"
+		}
+		format := map[string]any{"type": "json_schema", "name": name}
+		if js.Schema != nil && rawPresent(js.Schema) {
+			format["schema"] = json.RawMessage(js.Schema)
+		}
+		if js.Description != nil && rawPresent(js.Description) {
+			format["description"] = json.RawMessage(js.Description)
+		}
+		if js.Strict != nil {
+			format["strict"] = *js.Strict
+		}
+		return map[string]any{"format": format}, true
+	default:
+		// "text" and unknown types: no enforcement contract to forward.
+		return nil, false
+	}
 }
 
 func rawPresent(v json.RawMessage) bool {
