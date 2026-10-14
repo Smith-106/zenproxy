@@ -176,7 +176,11 @@ func (s *Server) probeAccount(ctx context.Context, client *http.Client, base, ac
 			c.Detail = "usage missing prompt_tokens (chat shape) / input_tokens (responses shape)"
 		} else if _, pd := usage["prompt_tokens_details"].(map[string]any); !pd {
 			if _, id := usage["input_tokens_details"].(map[string]any); !id {
-				c.Detail = "usage missing prompt_tokens_details (cache accounting regression)"
+				// A cold first turn legitimately carries no details object —
+				// there is nothing cached to report. The warm-path probe
+				// (below) is what asserts cached_tokens>0.
+				c.Pass = true
+				c.Detail = "usage intact (cold turn, no details object)"
 			} else {
 				c.Pass = true
 				c.Detail = "usage intact (responses shape)"
