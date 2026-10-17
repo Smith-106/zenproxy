@@ -54,24 +54,36 @@ free_tier:
   enabled: true                # 关掉 = 完全不改写任何请求
   models:                      # 预期在免费额度里的模型。列表外的模型第一次被上游拒绝后
     - big-pickle               # 会由 zenproxy 自动学会（控制台 status 的 free_tier.learned），
-    - ling-3.1-flash-free      # 之后直接套壳，不再浪费一次 403。
-    - mimo-v2.6-flash-free
-    - space-bunny-free
-    - step-5-preview-free
-    - longcat-2.5-preview-free
+    - mimo-v2.6-flash-free     # 之后直接套壳，不再浪费一次 403。
+    - space-bunny-free         # 以下 10 个是 2026-10-17 两个协议面实测存活的那批
+    - longcat-2.5-preview-free #   长思考模型：单次 "say OK" 也要 30~50s，客户端超时别设太小
     - nemotron-3.5-lightning-free
-    - muse-spark-1.3-contributor-free   # 只在 /responses 上接单：走 chat 会回 400 ModelProtocolUnsupported，看起来像废模型
-    - muse-spark-1.2-contributor-free   # 同上
+    - nemotron-3.5-super-vl-free
+    - deepseek-v4.1-flash-free
+    - glm-5.3-flash-free
+    - beam-free
+    - muse-spark-1.2-contributor-free   # 两个面都接单（chat 与 /responses 均 200）
+    # 已从上表移除、不要再加回来的（实测 400 "Model is unavailable" / 410 ModelDeprecated）：
+    #   ling-3.1-flash-free、step-5-preview-free、muse-spark-1.3-contributor-free、
+    #   muse-spark-1.2-contributor、muse-spark-1.3-contributor、gemini-4-argon-contributor(-free)
+    # 两个面都回 400 ModelProtocolUnsupported 的：jev-1.13-free
+    #   —— 形态上像废模型，其实是协议面不支持：只看 chat 会误判成"该删"。
   user_agent: ""               # 留空 = 镜像抓包得到的官方客户端 UA；
                                # 上游开始拒绝这个版本时才需要覆盖
 #
 # ★ 这个清单会过期。上游会直接换掉模型名（实测 ling-3.0-flash-free → ling-3.1-flash-free、
-#   mimo-v2.5-free → mimo-v2.6-flash-free），旧名字不再返回 403 FreeTierError，而是
-#   400 "Model is unavailable" —— 那种失败学不到东西，只会一直失败。
-#   拿当前清单：
-#     curl -s http://<zenproxy>:<port>/<账号ID>/v1/models | grep -o '"[^"]*-free"'
-#   再逐个验活： scripts/probe-free-models.sh <模型名…>
-#   换清单：    scripts/refresh-free-models.py <模型名…>   （部署机上 sudo 跑）
+#   mimo-v2.5-free → mimo-v2.6-flash-free、2026-10-17 又把整批 *-contributor-free 别名下架），
+#   旧名字不再返回 403 FreeTierError，而是 400 "Model is unavailable" —— 那种失败学不到
+#   东西，只会一直失败。
+#   ★ 而且「模型在不在」和「这个端点收不收」是两个独立维度，只测一个面必然误判：
+#     muse-spark-*-contributor-free 走 /chat 回 400 ModelProtocolUnsupported、走 /responses
+#     才 200。所以复核一律用两个面都打的那个脚本：
+#     探活（两协议面 + 自动从上游目录发现新候选）：
+#       scripts/probe-free-models-both-faces.py --out /tmp/model-probe.json
+#     一键收敛（zenproxy 名单 + new-api 渠道/abilities + redis）：
+#       sudo scripts/converge-free-models.py --models-file /tmp/model-probe.json
+#     只换 zenproxy 名单： scripts/refresh-free-models.py <模型名…>
+#     单面快查（历史脚本，仅 chat）： scripts/probe-free-models.sh <模型名…>
 
 health:
   interval: 60s

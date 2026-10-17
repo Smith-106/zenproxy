@@ -340,6 +340,51 @@
 - `scripts/sweep-stale-credential.py`：轮换凭据后，扫出所有**还留着旧值**的配置文件并替换。
   只报路径和行号、从不打印凭据；`--apply` 会改写并复查，有残留则退出码 1。
 
+### 变更（2026-10-17：免费面复核、静态池工具链、CPA 定价）
+
+- **免费模型面收敛到实测存活的 10 个。** 上游把整批 `*-contributor-free` 别名下架了：
+  `muse-spark-1.3-contributor-free` 直接 410 `ModelDeprecated`，`ling-3.1-flash-free` /
+  `step-5-preview-free` 变 400 `Model is unavailable`，`*-contributor`（无 `-free`）在免费账号下
+  一律 `Model is unavailable`，`jev-1.13-free` 两个协议面都 `ModelProtocolUnsupported`。
+  保留：`big-pickle`、`mimo-v2.6-flash-free`、`space-bunny-free`、`longcat-2.5-preview-free`、
+  `nemotron-3.5-lightning-free`、`nemotron-3.5-super-vl-free`、`deepseek-v4.1-flash-free`、
+  `glm-5.3-flash-free`、`beam-free`、`muse-spark-1.2-contributor-free`。
+  老客户端的 `muse-spark-1.3-contributor-free` 继续可用 —— 靠 new-api 的 `model_mapping`
+  改写到 1.2，响应体的 `model` 字段即改写后的名字。
+- **判据从「只测 chat」升级为「两个协议面都打」。** 只看 `/chat/completions` 必然误判：
+  `muse-spark-*-contributor-free` 在 chat 面上回 400 `ModelProtocolUnsupported`，看起来和废模型
+  完全一样，实际在 `/responses` 上正常 —— 而那正是 pi / opencode 走的面。新脚本
+  `scripts/probe-free-models-both-faces.py` 自动从上游两个目录取候选（含 `-free` /
+  `-contributor` / `big-pickle` / `nano` / `preview` 等命名），逐面判 200，输出机器可读结果。
+- **`scripts/converge-free-models.py`：一处判定、两处落名单。** 只改 zenproxy 的
+  `free_tier.models` 会得到「目录里有、请求打不通」（new-api 缺 `abilities` 行就不进
+  `/v1/models`）；只改 new-api 则免费套壳不生效、白烧一次 403。这个脚本复用
+  `refresh-free-models.py` 改 zenproxy 配置，再一次性更新 `channels.models` + `abilities`
+  并 `FLUSHALL` + 重启 new-api，`--alias` 支持只留在 new-api 的兼容别名。
+- **静态池工具链补齐三段：`vet-proxy-list.py` → `trim-proxy-pool.py` → `inject-static-pool.py`。**
+  之前这套流程只活在部署机的 `/tmp` 里，每次换池都得重敲。
+  `trim` 按国家等比配额 + **同国按延迟升序取**，所以留下的是"最好的 N 个"而不是随机 N 个
+  （实测 4514 存活裁到 1100，p50 从 3731ms 降到 2335ms，池内探活 p50 528ms）；
+  `inject` 把顺序写死成硬约束：**先停两个副本 → 清 `exits-state.json` → 原子替换配置 →
+  一次起一个**。原因是出口 ID 位置式（`static-0`、`static-1`…），运行中的进程会把旧池的
+  健康状态按老编号写回状态文件，新代理就顶着别人的 quarantine / free-tier 封锁标记上场，
+  表现为"注入完还是一堆红的"。脚本会先检查副本是否仍在跑，在跑就打印该执行的命令并退出 2。
+- **新增 `scripts/cpa-model-prices.py`：CPA 价目表可批量落库（含 free 模型）。**
+  CPA 的价目不在 `config.yaml`，而在插件 `cap-token-usage-tracker` 的 bbolt 库里，只能走
+  `POST/PUT /v0/management/plugins/cap-token-usage-tracker/prices{,/sync}`（这两条**没有 GET**，
+  用 GET 探路只会得到 404）。脚本做三件事：从 models.dev 同步、把 free/contributor 模型钉成
+  0 价、把 models.dev 认不出的别名（如 `claude-opus-5-5-{hi,max,med,xhi,xhigh}`）映射到基础
+  模型后整体写回，最后再同步一遍复核"无缺价、free 全 0"。实测 29/29 全覆盖，重启后仍持久。
+  两个坑写进了脚本头注释：**管理请求必须在 CPA 自己的 netns 里发**（宿主机源 IP 会触发管理口
+  的失败计数封禁），以及**绝不要猜鉴权头** —— 失败计数按源 IP 记，而浏览器面板走的是同一条
+  `nginx→CPA` 路径，猜错几次会把运维自己的面板一起 403 封掉 30 分钟；封禁只在内存里，
+  重启容器即解。
+- **`docs/FREE-TIER.md` 新增 1.4 节**记录这次复核的完整矩阵（含"目录里有不代表能用、目录里
+  没有也可能能用"两个反直觉事实），并把端点维度表按实测更新；`config.example.yaml` 的
+  `free_tier.models` 同步为 10 个存活项，并列出**不要再加回来的**名字及原因。
+  另记一条环境特征：换池瞬间会看到零星 `403 OpenCode's free tier can only be used from withi…`，
+  同一条请求串行重试 10/10 全 200，属出口刚上线时的瞬时命中，不要据此改模型名单。
+
 ### ⚠️ 升级注意
 
 - **`rotate_on_status` 的默认值新增了 `403`。** 地区限制的轮换依赖它：

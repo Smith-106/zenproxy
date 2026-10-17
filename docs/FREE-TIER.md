@@ -142,6 +142,47 @@ IP 当前在信誉白名单上。所以：
 
 对照实验见 `FishBottle7/opencode2dsh` 与本仓库对 `opencode.ai/zen/v1` 的重放。
 
+### 1.4 2026-10-17 复核：整批 `-contributor-free` 别名被下架
+
+上游目录（`inference/v1` 85 + `zen/go/v1` 37，去重 100 个 ID）里几乎看不到 `-free` 结尾的
+名字了，但**目录不等于可用集**：老的 `-contributor-free` 别名有的还能打（1.2），有的直接
+410，有的换成 `-contributor`（无 `-free`）后要求付费账号。唯一可靠的判据是两协议面各打一遍：
+
+```bash
+sudo python3 scripts/probe-free-models-both-faces.py --out /tmp/model-probe.json
+```
+
+2026-10-17 的实测结果（`200 = 该面可用`）：
+
+| 模型 | `/chat/completions` | `/responses` | 处置 |
+| :--- | :--- | :--- | :--- |
+| `beam-free`、`big-pickle`、`deepseek-v4.1-flash-free` | 200 | 400 协议面不收 | 留 |
+| `longcat-2.5-preview-free`、`nemotron-3.5-super-vl-free`、`space-bunny-free` | 200 | 400 协议面不收 | 留（长思考，30~50s） |
+| `glm-5.3-flash-free`、`mimo-v2.6-flash-free` | 200 | 400 协议面不收 | 留 |
+| `nemotron-3.5-lightning-free` | 200（慢） | 400 协议面不收 | 留 |
+| `muse-spark-1.2-contributor-free` | 200 | **200** | 留 —— 两个面都接单 |
+| `muse-spark-1.3-contributor-free` | 410 `ModelDeprecated` | 410 | 删（上游已弃用） |
+| `muse-spark-1.2/1.3-contributor`、`gemini-4-argon-contributor(-free)` | 400 `Model is unavailable` | 400 | 删（要付费账号） |
+| `ling-3.1-flash-free`、`step-5-preview-free` | 400 `Model is unavailable` | 400 | 删（已换名/下线） |
+| `jev-1.13-free` | 400 `ModelProtocolUnsupported` | 400 | 删（两个面都不收） |
+
+三点值得记下来：
+
+1. **目录里查不到的名字仍可能可用**（1.2 的 `-free` 别名）；**目录里在的名字也可能不可用**
+   （`*-contributor` 在目录里，但免费账号一律 400）。所以只信实测。
+2. **只看 `/chat/completions` 会误删好模型**：`muse-spark-*-contributor-free` 在 chat 面回
+   400 `ModelProtocolUnsupported`，看起来和废模型一模一样，其实它在 `/responses` 上完全正常
+   —— 而这正是 pi / opencode 实际走的那个面。
+3. **换池那一瞬间会看到零星的 403 `OpenCode's free tier can only be used from withi…`**。
+   新出口刚上线时命中，同一条请求串行重试 10/10 全 200；不属于模型问题，别据此改名单。
+
+收敛到两处名单（缺一处就是"目录看得见、请求打不通"）：
+
+```bash
+sudo python3 scripts/converge-free-models.py --models-file /tmp/model-probe.json \
+    --alias muse-spark-1.3-contributor-free     # 老客户端还在用旧名 -> 靠 model_mapping 改写
+```
+
 ---
 
 ## 二、怎么自己复现
@@ -292,8 +333,11 @@ sudo docker restart zenproxy
 
 | 模型 | `/chat/completions` | `/responses` |
 | :--- | :--- | :--- |
-| `muse-spark-*-contributor-free` | 400 `ModelProtocolUnsupported` | 结构门后 200 |
-| 多数 `*-free`（`big-pickle`、`step-5-preview-free` 等） | 结构门后 200 | 视模型而定 |
+| `muse-spark-1.2-contributor-free` | 结构门后 200 | 结构门后 200 |
+| 多数 `*-free`（`big-pickle`、`beam-free`、`space-bunny-free` 等） | 结构门后 200 | 400 `ModelProtocolUnsupported` |
+| `jev-1.13-free` | 400 `ModelProtocolUnsupported` | 400 `ModelProtocolUnsupported` |
+
+（`muse-spark-1.3-contributor-free` 已在上游弃用，410；`step-5-preview-free` 已下线，见 1.4。）
 
 `zenproxy` 给 `/chat/completions` 和 `/responses` 都套结构壳。
 **没有套壳的端点永远只会回 403 `FreeTierError`**——那个 403 是"你没被套壳"，
