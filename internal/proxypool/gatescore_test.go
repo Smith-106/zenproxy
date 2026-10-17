@@ -288,6 +288,47 @@ func TestProvenExitIsQuarantinedNotRetired(t *testing.T) {
 // because quarantine put them in the impaired tier and the next gated pick
 // took them straight back. After a proxyconnect failure they must leave the
 // front of the queue.
+// Score is allowed to hit the floor. The pass count is not, and it is the
+// only signal left once a burst of drops has walked every known passer to -8.
+// Measured 2026-10-17 21:18: after that happened, thirty minutes of traffic
+// produced zero admissions, because the next pick was a uniform draw over
+// exits the gate has never admitted.
+func TestHistoryKeepsAFlooredExitAheadOfTheLottery(t *testing.T) {
+	pool := createTestPool(t, 6, config.Health{})
+	for i := 0; i < 8; i++ {
+		pool.MarkGatePass("a")
+	}
+	for i := 0; i < 12; i++ {
+		pool.MarkGateDrop("a", "stream ended")
+	}
+	if got := pool.scoreOf("a"); got >= gateGoodScore {
+		t.Fatalf("precondition: score %d still proven", got)
+	}
+	pool.mu.RLock()
+	m := pool.byID["a"]
+	pool.mu.RUnlock()
+	m.mu.Lock()
+	m.gatePassUntil = time.Time{}
+	m.mu.Unlock()
+	for i := 0; i < 15; i++ {
+		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
+		if px == nil || px.ID != "a" {
+			t.Fatalf("gated pick %d = %v, want floored-but-proven a", i, px)
+		}
+	}
+	// A dial failure still beats history: the exit must leave the front while sick.
+	pool.MarkFailure("a", `Post "https://opencode.ai/inference/v1/responses": proxyconnect tcp: i/o timeout`)
+	seen := map[string]int{}
+	for i := 0; i < 12; i++ {
+		if px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true); px != nil {
+			seen[px.ID]++
+		}
+	}
+	if seen["a"] == 12 {
+		t.Fatalf("request-sick history exit still monopolised picks: %v", seen)
+	}
+}
+
 func TestRequestDialFailureLeavesTheGatedFront(t *testing.T) {
 	pool := createTestPool(t, 6, config.Health{FailureThreshold: 3,
 		Quarantine: 10 * time.Minute, MaxBackoff: time.Minute})

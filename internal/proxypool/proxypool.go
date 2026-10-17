@@ -843,7 +843,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	// of them. Repetition is the weighting mechanism because pick() scatters a
 	// hash across the whole list — list order carries no meaning there, only
 	// multiplicity does.
-	var gatePassers, gatePassersImpaired, gatePassersLapsed, gatePassersParked []*member
+	var gatePassers, gatePassersImpaired, gatePassersLapsed, gatePassersHistory, gatePassersParked []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -862,6 +862,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		fails := m.failures
 		gatePass := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
 		gateScoreVal := m.gateScore
+		gatePassesVal := m.gatePasses
 		consec := m.consecFails
 		lastErr := m.lastErr
 		// proven is the pool's own verdict that this exit has carried free-tier
@@ -951,6 +952,16 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				// exit costs one attempt and has a far better hit rate than the
 				// 0.4% lottery over never-admitted exits.
 				gatePassersLapsed = append(gatePassersLapsed, m)
+			} else if gated && gatePassesVal >= gateGoodScore && !ft && !cool && !requestSick {
+				// Score can be driven to the floor by a burst of drops or
+				// refusals and then the exit disappears into the 1,600-wide
+				// lottery. The pass count is the part that does not decay:
+				// an exit that has carried eight or more free requests is
+				// still a better first try than one that never has, once it
+				// is no longer request-sick. Measured 2026-10-17 21:18, after
+				// the known passers had all been scored to -8, thirty minutes
+				// of traffic produced zero admissions.
+				gatePassersHistory = append(gatePassersHistory, m)
 			}
 			if taken {
 				healthyTaken = append(healthyTaken, m)
@@ -1013,6 +1024,13 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	// Then exits whose admission lapsed while their track record did not. Still
 	// gated-only: for plain traffic a lapsed admission is no information at all.
 	if m := pick(gatePassersLapsed); m != nil {
+		return m.Proxy
+	}
+	// Then exits whose score was walked down to the floor but which have
+	// actually carried free traffic. The score is allowed to go negative; the
+	// pass count is not. Still behind a currently-good exit, still skipped
+	// while request-sick, and still gated-only.
+	if m := pick(gatePassersHistory); m != nil {
 		return m.Proxy
 	}
 	// Then admitted-but-parked: refused or quota-cooled within the block window.
