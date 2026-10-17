@@ -480,6 +480,29 @@ type member struct {
 	freeTierUntil  time.Time
 	freeTierReason string
 
+	// gatePassUntil is the ONLY positive evidence the free-tier gate ever gives:
+	// an enveloped request for a free model came back 2xx through this exit.
+	//
+	// It cannot be inferred from anything else the pool already tracks. Health
+	// is blind to it — probes go to ipify and opencode.ai:443 and never speak
+	// the gate — and "not currently blocked" is not the same fact: every one of
+	// the 1,613 members is unblocked most of the time, and almost all of them
+	// answer FreeTierError the moment an enveloped request touches them.
+	//
+	// Measured 2026-10-17 over three hours of live traffic (10,192 enveloped
+	// upstream attempts, 220 admissions): EVERY admission came from six exits —
+	// resin-slot-199 (126 admissions / 1 refusal), static-161 (104/0),
+	// static-1040 (39/0), static-897 (15/0), resin-slot-386 (13/4),
+	// static-44 (8/0) — while 804 exits were refused five or more times and
+	// were never admitted once. The admission rate was flat across load
+	// (124 attempts → 2, 330 → 10), so this is a flagged population with a few
+	// clean IPs inside it, not congestion. Sampling it uniformly is why the
+	// pool's overall pass rate sat at 2.2%; PickForAccount now puts passers
+	// first (see gatePassers in PickForAccount), which is the difference
+	// between a lottery and a route.
+	gatePassUntil time.Time
+	gatePasses    int
+
 	// regionBlocked records, per model name, that this exit's country is refused
 	// for that model — and it is keyed by model because that is what the
 	// upstream actually does. Measured on one pool: an exit in RU answered 403
@@ -760,6 +783,14 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 
 	var healthyFree, healthyTaken, degradedFree, degradedTaken []*member
 	var cooled, region, quarantined []*member
+	// gatePassers are exits the free-tier gate has admitted recently. They are
+	// kept in their own tier ahead of every other healthy exit because on this
+	// pool they are the only exits that work for free models at all: the gate
+	// refuses by exit population, not by load (see member.gatePassUntil for the
+	// measurement). Deliberately NOT subject to the account-sharing tiebreak
+	// below — sharing a working exit costs a little per-IP allowance, while
+	// stepping off it to a "free" exit costs the whole request.
+	var gatePassers []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -776,6 +807,7 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 		h := m.healthy
 		ret := m.retired
 		fails := m.failures
+		gatePass := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
 		// A measured-slow exit is demoted, not discarded: with a pool made of
 		// unreliable nodes, "slow but answering" still beats "nothing".
 		// Unmeasured exits (latency 0) always count as fast, so a freshly
@@ -815,6 +847,9 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 		case reg:
 			region = append(region, m)
 		case h && !slow:
+			if gatePass {
+				gatePassers = append(gatePassers, m)
+			}
 			if taken {
 				healthyTaken = append(healthyTaken, m)
 			} else {
@@ -851,6 +886,14 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 	// way costs nothing and keeps accounts apart. It is deliberately a tiebreak
 	// and not a demotion: a healthy exit that is busy is still better than a
 	// degraded one, so the tier order itself is untouched.
+	// Gate passers first: an exit the free-tier gate has admitted is the only
+	// kind that can serve a free model right now, so it outranks even a
+	// healthy-but-unproven exit that no other account is using. When there are
+	// no passers (cold start, or every passer parked by a refusal) this branch
+	// is empty and selection falls through to exactly the previous behaviour.
+	if m := pick(gatePassers); m != nil {
+		return m.Proxy
+	}
 	if m := pick(healthyFree); m != nil {
 		return m.Proxy
 	}
@@ -1177,6 +1220,81 @@ func (p *Pool) ClearFreeTier(id string) {
 	m.freeTierReason = ""
 	m.mu.Unlock()
 	p.markDirty()
+}
+
+// gatePassTTL is how long one admission keeps an exit at the front of the queue.
+//
+// The admission set is small and sticky, but not eternal: a clean IP can be
+// flagged later (resin-slot-386 was admitted 13 times and refused 4 in the same
+// three hours), and a flagged one can come back. Thirty minutes covers a
+// working session — long enough that the pool is not re-discovering the same
+// six exits every rotation — while still re-measuring within an episode. A
+// refusal shortens it immediately anyway: BlockFreeTier parks the exit for
+// free_tier.block_duration, and a parked exit is not picked at all.
+const gatePassTTL = 30 * time.Minute
+
+// MarkGatePass records that the free-tier gate admitted this exit for an
+// enveloped request. It is the pool's only positive gate signal — see
+// member.gatePassUntil for the measurement that makes it worth having.
+func (p *Pool) MarkGatePass(id string) {
+	if id == "" {
+		return
+	}
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if m.retired {
+		m.mu.Unlock()
+		return
+	}
+	m.gatePasses++
+	m.gatePassUntil = now.Add(gatePassTTL)
+	passes := m.gatePasses
+	m.mu.Unlock()
+	p.markDirty()
+	// Logged at Debug: this fires on every successful free-tier request, and at
+	// Info it would out-shout the refusals that need attention.
+	p.log.Debug("free-tier gate admitted this exit", "exit", id,
+		"passes", passes, "until", now.Add(gatePassTTL).Format(time.RFC3339))
+}
+
+// GatePassing reports whether id is currently a gate passer, and its lifetime
+// admission count. Used by tests and the health panel; the pick path reads the
+// field directly under the member lock.
+func (p *Pool) GatePassing(id string) (bool, int) {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.gatePassUntil.IsZero() && time.Now().Before(m.gatePassUntil), m.gatePasses
+}
+
+// GatePassers lists the exits currently admitted by the free-tier gate, most
+// recently admitted first would be nicer but the pool keeps no ordering — the
+// panel only needs to show WHICH exits the gate is serving, so it stays a set.
+func (p *Pool) GatePassers() []string {
+	now := time.Now()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, 0, 8)
+	for _, m := range p.members {
+		m.mu.Lock()
+		passing := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
+		m.mu.Unlock()
+		if passing {
+			out = append(out, m.ID)
+		}
+	}
+	return out
 }
 
 // CoolForQuota records that an upstream has refused this exit until a stated
@@ -1510,6 +1628,13 @@ func (p *Pool) Health() []model.ProxyHealth {
 			SoftFails:   m.softFails,
 			ConsecFails: m.consecFails,
 			LastError:   m.lastErr,
+			// Only the live ones: an expired admission is history, and the
+			// panel exists to answer "who can serve free models NOW".
+			GatePasses: m.gatePasses,
+		}
+		if !m.gatePassUntil.IsZero() && time.Now().Before(m.gatePassUntil) {
+			t := m.gatePassUntil
+			h.GatePassUntil = &t
 		}
 		if !m.quarantineUntil.IsZero() && time.Now().Before(m.quarantineUntil) {
 			t := m.quarantineUntil

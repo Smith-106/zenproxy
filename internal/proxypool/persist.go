@@ -48,6 +48,12 @@ type exitRecord struct {
 	FreeTierReason  string               `json:"free_tier_reason,omitempty"`
 	QuotaUntil      time.Time            `json:"quota_until,omitempty"`
 	QuotaReason     string               `json:"quota_reason,omitempty"`
+	// GatePassUntil is the free-tier admission deadline and GatePasses its
+	// lifetime count. Persisted because the whole point of the signal is that
+	// it is scarce: rediscovering the six clean exits in a 1,613-member pool
+	// costs the first ~2% -passing minutes after every restart.
+	GatePassUntil   time.Time            `json:"gate_pass_until,omitempty"`
+	GatePasses      int                  `json:"gate_passes,omitempty"`
 	RegionBlocks    map[string]time.Time `json:"region_blocks,omitempty"`
 	Failures        int64                `json:"failures,omitempty"`
 	SoftFails       int64                `json:"soft_fails,omitempty"`
@@ -93,6 +99,8 @@ func (p *Pool) SaveState() {
 			FreeTierReason:  m.freeTierReason,
 			QuotaUntil:      m.quotaUntil,
 			QuotaReason:     m.quotaReason,
+			GatePassUntil:   m.gatePassUntil,
+			GatePasses:      m.gatePasses,
 			Failures:        m.failures,
 			SoftFails:       m.softFails,
 			ConsecFails:     m.consecFails,
@@ -173,6 +181,13 @@ func (p *Pool) loadState() {
 		if rec.QuotaUntil.After(now) {
 			m.quotaUntil = rec.QuotaUntil
 			m.quotaReason = rec.QuotaReason
+		}
+		// The pass count is restored unconditionally (it is history), while the
+		// deadline only survives if it has not already elapsed while the
+		// process was down — same rule as every other deadline here.
+		m.gatePasses = rec.GatePasses
+		if rec.GatePassUntil.After(now) {
+			m.gatePassUntil = rec.GatePassUntil
 		}
 		if len(rec.RegionBlocks) > 0 {
 			blocks := make(map[string]time.Time, len(rec.RegionBlocks))

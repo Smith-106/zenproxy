@@ -210,6 +210,16 @@ type ProxyHealth struct {
 	LastError        string     `json:"last_error,omitempty"`
 	LastCheck        *time.Time `json:"last_check,omitempty"`
 	BoundAccounts    []string   `json:"bound_accounts,omitempty"`
+	// GatePassUntil is when this exit's free-tier admission expires, and
+	// GatePasses how many admissions it has had in this process's lifetime.
+	//
+	// Exposed because this is the one signal an operator cannot derive from the
+	// rest of the panel: the exit looks identical to 1,600 others (healthy,
+	// fast, unblocked) yet it is one of the few the gate actually serves. The
+	// measured set was tiny — six exits out of 1,613 — so "which exits can
+	// serve free models right now" needs to be answerable without grepping logs.
+	GatePassUntil *time.Time `json:"gate_pass_until,omitempty"`
+	GatePasses    int        `json:"gate_passes,omitempty"`
 	// Retired exits are out of rotation for good. Quarantine expires on its
 	// own; retirement does not, which is the whole point: a dead IP that keeps
 	// coming back every 30 minutes is not a pool member, it is noise.

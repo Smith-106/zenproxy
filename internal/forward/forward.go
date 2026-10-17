@@ -550,6 +550,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if exitID != "" {
 				e.pool.MarkSuccess(exitID, time.Since(start))
 				e.pool.ClearFreeTier(exitID)
+				if plan != nil {
+					// The only positive free-tier signal in the system: this
+					// exit was admitted with the OpenCode envelope on. The pool
+					// prefers recent passers over everything else, because the
+					// gate refuses by exit population (measured: 305 admissions
+					// from six exits, 804 exits never admitted once) and uniform
+					// sampling is what held the pass rate at ~2%.
+					e.pool.MarkGatePass(exitID)
+				}
 			}
 			// Pin the conversation to the exit that just proved usable: when
 			// the storm fallback landed here over direct, the next request
