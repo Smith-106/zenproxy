@@ -486,7 +486,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		if proxy != nil {
 			exitID = proxy.ID
 		}
-		if fp := e.stormFallbackExit(transportFails); fp != nil && exitID != "direct" {
+		if fp := e.stormFallbackExit(transportFails, gated); fp != nil && exitID != "direct" {
 			proxy = fp
 			exitID = fp.ID
 			if !stormFallbackLogged {
@@ -796,7 +796,17 @@ const stormFallbackThreshold = 2
 // and the direct member is currently serving. A nil result means normal
 // rotation continues — no direct exit configured, direct itself sick, or the
 // request has not burned enough attempts yet.
-func (e *Engine) stormFallbackExit(transportFails int) *proxypool.Proxy {
+// stormFallbackExit returns the direct pseudo-exit once the proxy layer has
+// failed enough times, unless this request is judged by the free-tier gate.
+//
+// For a gated request direct is only a fallback if the gate has actually
+// admitted it. Otherwise the fallback is a guaranteed refusal: it cannot fix a
+// transport storm (the gate rejects the exit before any generation happens),
+// and it costs the request its remaining attempts — measured, direct was the
+// single most-refused exit in the pool while sitting outside the admission set,
+// and every one of those refusals ended in a failed turn. When direct is not
+// admitted the caller keeps rotating through the normal pool instead.
+func (e *Engine) stormFallbackExit(transportFails int, gated bool) *proxypool.Proxy {
 	if transportFails < stormFallbackThreshold {
 		return nil
 	}
@@ -806,6 +816,11 @@ func (e *Engine) stormFallbackExit(transportFails int) *proxypool.Proxy {
 	}
 	if h, _ := e.pool.Healthy("direct"); !h {
 		return nil
+	}
+	if gated {
+		if passing, _ := e.pool.GatePassing("direct"); !passing {
+			return nil
+		}
 	}
 	return p
 }
