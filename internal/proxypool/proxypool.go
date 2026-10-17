@@ -862,6 +862,12 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		fails := m.failures
 		gatePass := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
 		gateScoreVal := m.gateScore
+		// proven is the pool's own verdict that this exit has carried free-tier
+		// traffic, independent of the 30-minute admission TTL and of probe health:
+		// without it a proven exit becomes invisible to gated requests the moment
+		// its admission lapses or a probe fails, which is how the whole admitted
+		// set disappeared once (four exits retired, two lapsed, nothing left).
+		proven := gateScoreVal >= gateGoodScore
 		// A measured-slow exit is demoted, not discarded: with a pool made of
 		// unreliable nodes, "slow but answering" still beats "nothing".
 		// Unmeasured exits (latency 0) always count as fast, so a freshly
@@ -894,7 +900,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// is the worse of the two, and quarantine is the signal that lasts
 			// until proven otherwise. The one exception is an admitted exit on a
 			// gated request — see PickForAccountGated.
-			if gated && gatePass && !ft {
+			if gated && (gatePass || proven) && !ft {
 				gatePassersImpaired = append(gatePassersImpaired, m)
 			}
 			quarantined = append(quarantined, m)
@@ -914,7 +920,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// non-gated decision, and a refusal still re-arms the park, so a
 			// genuinely dead passer cannot be hammered: the red-window fast-fail
 			// bounds each request.
-			if gated && gatePass {
+			if gated && (gatePass || proven) {
 				gatePassersParked = append(gatePassersParked, m)
 			}
 			cooled = append(cooled, m)
@@ -925,7 +931,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				for i := gateWeight(gateScoreVal); i > 0; i-- {
 					gatePassers = append(gatePassers, m)
 				}
-			} else if gated && gateScoreVal >= gateGoodScore && !ft && !cool {
+			} else if gated && proven && !ft && !cool {
 				// Admission lapsed, reputation did not. The admission TTL is 30
 				// minutes, which is short compared with how long an IP stays
 				// clean — measured 2026-10-17, two of the six admitted exits
@@ -947,7 +953,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// a few probe failures on a tunnel the gate is still admitting. Keep
 			// them as gated candidates behind the healthy admissions instead of
 			// dropping to an exit the gate has never admitted.
-			if gated && gatePass && !ft && !cool && !reg {
+			if gated && (gatePass || proven) && !ft && !cool && !reg {
 				gatePassersImpaired = append(gatePassersImpaired, m)
 			}
 			if taken {
@@ -1175,7 +1181,26 @@ func (p *Pool) MarkFailure(id, reason string) {
 				"undo", "POST /admin/api/proxies/"+id+"/revive")
 		} else if !poison {
 			retireAfter := p.health.RetireAfter
-			if retireAfter > 0 && m.consecFails >= retireAfter {
+			// An exit the gate has admitted hundreds of times is not noise, and
+			// its streak is not evidence about the IP: on this pool it is usually
+			// evidence about the proxy provider's connection slots, because the
+			// free-tier route concentrates traffic on a handful of exits.
+			// Measured 2026-10-17: all four working exits retired within two
+			// minutes of each other, twenty consecutive "proxyconnect ... i/o
+			// timeout" / "Not Enough Connections" dial failures apiece, while they
+			// had carried hundreds of successful free-tier requests that same
+			// hour. Retirement is permanent, so it turned our own load into a
+			// permanent loss of the only route that worked; a nap is the correct
+			// verdict for a proven exit, and the quarantine above already applies
+			// it. Retirement stays available for exits that have never carried a
+			// free request (the 1,600-strong flagged population) and for TLS
+			// poison, which is a data-safety matter rather than a capacity one.
+			// The exemption is scoped to the admission window rather than to a
+			// lifetime score, so it cannot become free credit: an exit that stops
+			// being admitted for thirty minutes is retired like any other, while
+			// one the gate is serving right now is napping, not dead.
+			proven := !m.gatePassUntil.IsZero() && time.Now().Before(m.gatePassUntil)
+			if retireAfter > 0 && m.consecFails >= retireAfter && !proven {
 				m.retired = true
 				m.retiredAt = time.Now()
 				m.retiredReason = fmt.Sprintf("%d consecutive failures with no success in between; last: %s",
@@ -1184,13 +1209,19 @@ func (p *Pool) MarkFailure(id, reason string) {
 					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
 					"reason", reason, "poison_tls", false,
 					"undo", "POST /admin/api/proxies/"+id+"/revive")
-			} else if retireAfter > 0 && m.consecFails == retireAfter {
+			} else if retireAfter > 0 && m.consecFails == retireAfter && !proven {
 				// Exactly at the threshold but held by the breaker: say so
 				// once per streak, so consoles can tell deferred executions
 				// from healthy exits during an outage.
 				p.log.Info("retirement deferred by outage breaker",
 					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
 					"reason", reason)
+			} else if retireAfter > 0 && m.consecFails == retireAfter && proven {
+
+				p.log.Warn("retirement withheld: this exit has carried free-tier traffic",
+					"exit", id, "consecutive", m.consecFails, "retire_after", retireAfter,
+					"gate_score", m.gateScore, "gate_passes", m.gatePasses,
+					"reason", reason, "action", "quarantined instead")
 			}
 		}
 	}

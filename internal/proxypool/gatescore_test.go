@@ -172,6 +172,97 @@ func TestGatedPickPrefersParkedAdmissionOverNeverAdmittedExit(t *testing.T) {
 	}
 }
 
+// Retirement is permanent, and on this pool the streak that triggers it is
+// usually caused by our own concentration: measured 2026-10-17, all four working
+// exits retired within two minutes of each other at twenty consecutive
+// "proxyconnect ... i/o timeout" / "Not Enough Connections" dial failures, after
+// carrying hundreds of successful free-tier requests that same hour. With them
+// gone the gate had no admitted exit left at all — 0 admissions in 375 attempts.
+func TestProvenExitIsQuarantinedNotRetired(t *testing.T) {
+	pool := createTestPool(t, 4, config.Health{FailureThreshold: 1, RetireAfter: 4,
+		Quarantine: 30 * time.Second, MaxBackoff: time.Minute})
+	for i := 0; i < 6; i++ {
+		pool.MarkGatePass("a")
+	}
+	for i := 0; i < 6; i++ {
+		pool.MarkFailure("a", `Post "https://opencode.ai/inference/v1/responses": proxyconnect tcp: i/o timeout`)
+	}
+	pool.mu.RLock()
+	m, ok := pool.byID["a"]
+	pool.mu.RUnlock()
+	if !ok {
+		t.Fatal("exit a vanished")
+	}
+	m.mu.Lock()
+	retired, score := m.retired, m.gateScore
+	passUntil := m.gatePassUntil
+	m.mu.Unlock()
+	if retired {
+		t.Fatalf("a proven exit was retired permanently (score %d)", score)
+	}
+	if passUntil.IsZero() {
+		t.Fatal("precondition: the exit should still hold a live admission")
+	}
+
+	// The exemption is scoped to the admission window, not granted for life: an
+	// exit that stops being admitted for thirty minutes retires like any other.
+	m.mu.Lock()
+	m.gatePassUntil = time.Time{}
+	m.mu.Unlock()
+	for i := 0; i < 6; i++ {
+		pool.MarkFailure("a", "proxyconnect tcp: i/o timeout")
+	}
+	m.mu.Lock()
+	retiredAfterLapse := m.retired
+	m.mu.Unlock()
+	if !retiredAfterLapse {
+		t.Fatal("an exit whose admission lapsed kept its retirement exemption forever")
+	}
+
+	// An exit with no free-tier history still retires: that is what retirement is
+	// for, and it is what keeps the 1,600-strong flagged population from
+	// resurfacing forever.
+	pool2 := createTestPool(t, 4, config.Health{FailureThreshold: 1, RetireAfter: 4,
+		Quarantine: 30 * time.Second, MaxBackoff: time.Minute})
+	for i := 0; i < 6; i++ {
+		pool2.MarkFailure("b", "proxyconnect tcp: i/o timeout")
+	}
+	pool2.mu.RLock()
+	m2 := pool2.byID["b"]
+	pool2.mu.RUnlock()
+	m2.mu.Lock()
+	retired2 := m2.retired
+	m2.mu.Unlock()
+	if !retired2 {
+		t.Fatal("an unproven exit survived the retirement threshold")
+	}
+}
+
+// A proven exit whose admission lapsed must stay reachable for gated requests
+// even when a probe has it degraded or quarantined: the pool's own admission
+// history outranks a probe that never speaks the gate.
+func TestProvenExitStaysVisibleWithoutLiveAdmission(t *testing.T) {
+	pool := createTestPool(t, 6, config.Health{FailureThreshold: 1,
+		Quarantine: 10 * time.Minute, MaxBackoff: time.Minute})
+	for i := 0; i < 6; i++ {
+		pool.MarkGatePass("c")
+	}
+	pool.mu.RLock()
+	m := pool.byID["c"]
+	pool.mu.RUnlock()
+	m.mu.Lock()
+	m.gatePassUntil = time.Time{} // admission lapsed
+	m.mu.Unlock()
+	pool.MarkFailure("c", "probe: dial tcp: i/o timeout") // and now degraded
+
+	for i := 0; i < 10; i++ {
+		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
+		if px == nil || px.ID != "c" {
+			t.Fatalf("gated pick %d = %v, want proven exit c", i, px)
+		}
+	}
+}
+
 func TestGateScoreSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "exits-state.json")
