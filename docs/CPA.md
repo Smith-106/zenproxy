@@ -146,8 +146,16 @@ ON CONFLICT ("group", model, channel_id) DO UPDATE SET enabled = true;
 
 稳定性：CPA 连打同模型 10 次 → `200=10/10`。
 
-## 7. 两个动手时会踩的小坑
+## 7. 三个动手时会踩的小坑
 
+- **客户端会把 403 显示成「API key is invalid」，别信。** 2026-10-17 实测：DSH 的
+  `classifyPiAiError` 里写的是 `/\\b(?:401|403)\\b/.test(message) → "AUTH"`，而 AUTH 不在默认
+  `retryableCodes` 里 —— 于是免费门禁的一次 `403 FreeTierError` 被渲染成鉴权错误、整轮直接失败。
+  判据：同一把 key 打 CPA 得到 **403 + `FreeTierError`** 就是免费门禁（鉴权已过）；
+  真正的 key 错是 **401 + `{"error":"Invalid API key"}`**。修法不是换 key，而是让客户端重试：
+  在 `~/.dsh/settings.yaml` 的该 provider 的 `retryPolicy.retryableCodes` 里加 `AUTH`
+  （schema 接受任意非空字符串，`retry-policy.js` 的 `resolveRetryPolicy` 已验证）。
+  实测同一通道单发命中约 5/8，重试 10 次（退避 1.5→10s）后失败概率可忽略。
 - **`docker run … curlimages/curl -H "Authorization: Bearer $K"` 不会展开 `$K`** ——
   没有 shell，变量被字面传给 curl，得到一个假的 `401 Invalid API key`（很容易误判成密钥错）。
   正确写法是显式走 shell：`docker run --rm -e K="$K" … sh -c 'curl -H "Authorization: Bearer $K" …'`。

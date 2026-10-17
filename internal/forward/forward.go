@@ -50,6 +50,11 @@ type Engine struct {
 	log    *slog.Logger
 	direct *http.Transport
 	free   *FreeTier
+	// freeTierBlock is how long an exit is parked against free-tier traffic
+	// after the gate refuses it. Probes cannot clear that park (they never
+	// exercise the gate), so this value is literally the recovery time after a
+	// refusal wave — see config.FreeTier.BlockDuration.
+	freeTierBlock time.Duration
 
 	// gw resolves the unified /v1 ingress. poolPolicy looks up a pool's
 	// rotation policy; it is a func rather than the config slice so that the
@@ -79,13 +84,14 @@ func New(reg *registry.Registry, pool *proxypool.Pool, opts Options) *Engine {
 		policies[p.ID] = p
 	}
 	e := &Engine{
-		reg:  reg,
-		pool: pool,
-		ups:  opts.Upstreams,
-		pol:  opts.Policy,
-		log:  opts.Log,
-		free: NewFreeTier(opts.FreeTier),
-		gw:   gateway.New(opts.Gateway, opts.ModelList),
+		reg:           reg,
+		pool:          pool,
+		ups:           opts.Upstreams,
+		pol:           opts.Policy,
+		log:           opts.Log,
+		free:          NewFreeTier(opts.FreeTier),
+		freeTierBlock: freeTierBlockDuration(opts.FreeTier),
+		gw:            gateway.New(opts.Gateway, opts.ModelList),
 		poolPolicy: func(id string) config.PoolPolicy {
 			if p, ok := policies[id]; ok {
 				if p.Strategy == "" {
@@ -707,7 +713,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// exit-) shaped and blocking more of the pool is collateral damage
 			// paid by models the gate still serves.
 			if plan != nil && exitID != "" && tierGateFails <= 2 {
-				e.pool.BlockFreeTier(exitID, 15*time.Minute, "enveloped FreeTierError")
+				e.pool.BlockFreeTier(exitID, e.freeTierBlock, "enveloped FreeTierError")
 			}
 			if tierGateFails >= 2 {
 				e.log.Info("free-tier red window: fast-failing after capped attempts",
@@ -790,6 +796,20 @@ func (e *Engine) stormFallbackExit(transportFails int) *proxypool.Proxy {
 // FreeTier exposes the envelope writer for the dashboard, which reports which
 // models were discovered by refusal.
 func (e *Engine) FreeTier() *FreeTier { return e.free }
+
+// defaultFreeTierBlock is the fallback park duration when the config omits one.
+// It matches the value that used to be hardcoded here, so an old config file
+// keeps behaving the way it always did.
+const defaultFreeTierBlock = 15 * time.Minute
+
+// freeTierBlockDuration resolves the free-tier park duration. Anything <= 0
+// becomes the default rather than an unbounded park.
+func freeTierBlockDuration(cfg config.FreeTier) time.Duration {
+	if cfg.BlockDuration > 0 {
+		return cfg.BlockDuration
+	}
+	return defaultFreeTierBlock
+}
 
 // freeAttemptHeaderTimeout caps how long an enveloped free-tier attempt may
 // take to produce response headers. The envelope always streams upstream, so

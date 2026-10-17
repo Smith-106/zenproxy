@@ -351,3 +351,31 @@ sudo docker restart zenproxy
 - 非流式客户端仍会看到折叠后的 JSON；上游始终收到 `stream: true`。
 - 若弱模型再次出现标题化回答，先确认部署的是否为**去掉 prompt 注入**的版本，
   再查上游是否重新引入了 prompt 匹配。
+
+### 6.1 出口停用时长是这个池子的可用性旋钮（`free_tier.block_duration`）
+
+出口被闸门拒绝后会被停用一段时间（日志 `egress blocked for free-tier refusal`）。
+**探活永远清不掉这个停用** —— 探活走的是 ipify/opencode.ai，不触发闸门，所以
+"IP 能通"不是"这道门能过"的证据；停用期间轮换也不会选它。**只有时钟能把它放回来。**
+
+因此这个时长直接决定"闸门重新放开之后多久能恢复"。2026-10-17 实测：
+
+- 10 分钟前：zen-01 连打 8/8 全 200，1.5–3.4 秒；
+- 10 分钟后：四个账号 20/20 全 403，3 分钟内 130 次请求无一成功；
+- 同一时间 zenproxy 自己还在不停制造停用：3 分钟新增 64 条，60 分钟累计 347 条、
+  涉及 573 个出口。
+
+一波拒绝 ≈ 一分钟上百次请求 × 每次最多停用 2 个出口（`tierGateFails <= 2`），
+用原来硬编码的 15 分钟，池子会在**一波之内**被清空，然后在闸门已经放开之后
+继续瘫十几分钟 —— 客户端看到的就是 `403 FreeTierError` 或 `503 auth_unavailable`，
+和"模型下线""密钥失效"完全同形。现在改成可配置、默认仍 15m、生产上设 `2m`：
+
+```yaml
+free_tier:
+  block_duration: 2m
+```
+
+判据：一次普遍拒绝之后，如果 `status=200` 迟迟不回来，先看
+`docker logs zenproxy | grep "egress blocked for free-tier refusal"` 的速率——
+还在刷就是闸门真关着，不刷了却仍 403 就是池子被自己的停用拖住了（等 `block_duration` 到点，
+或按 `deploy/scripts` 的注入纪律清掉状态文件里的停用再滚动重建）。

@@ -222,6 +222,19 @@ type FreeTier struct {
 	// UserAgent overrides the mirrored client User-Agent. Set it when the
 	// upstream starts refusing the pinned version.
 	UserAgent string `yaml:"user_agent"`
+	// BlockDuration parks an exit against free-tier traffic after the gate
+	// refuses it. A health probe never clears this (probes do not exercise the
+	// gate), so the clock is the only clearer — which makes this value a direct
+	// availability knob.
+	//
+	// It must stay well under the gate's own flip interval. Measured on
+	// 2026-10-17: the gate went from all-pass to all-refuse within minutes, and
+	// a wave refusing ~130 requests a minute parks two exits per request. With
+	// the old hardcoded 15m the pool drained inside one wave and then stayed
+	// dead for the rest of the window and for 15 more minutes after the gate
+	// reopened, even though healthy exits were available again. 2m keeps a
+	// freshly-refused exit out of the next attempt without outliving the wave.
+	BlockDuration time.Duration `yaml:"block_duration"`
 }
 
 // DefaultFreeModels are the free-tier models known at the time of writing.
@@ -271,8 +284,9 @@ func Default() Config {
 		},
 		StateFile: "./data/state.json",
 		FreeTier: FreeTier{
-			Enabled: true,
-			Models:  DefaultFreeModels(),
+			Enabled:       true,
+			Models:        DefaultFreeModels(),
+			BlockDuration: 15 * time.Minute,
 		},
 	}
 }
@@ -381,6 +395,12 @@ func (c *Config) normalize() {
 		// An empty list would silently disable the envelope for every model but
 		// the ones the upstream happens to refuse first. Defaults restore it.
 		c.FreeTier.Models = d.FreeTier.Models
+	}
+	if c.FreeTier.BlockDuration <= 0 {
+		// A zero would mean "park forever" at the pool layer (it substitutes its
+		// own default), so a missing key must land on the documented default
+		// rather than on an accidental infinite park.
+		c.FreeTier.BlockDuration = d.FreeTier.BlockDuration
 	}
 	for name, up := range c.Upstreams {
 		up.BaseURL = strings.TrimRight(up.BaseURL, "/")

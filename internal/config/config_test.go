@@ -204,6 +204,38 @@ func TestDefaultEnablesTheFreeTierEnvelope(t *testing.T) {
 	}
 }
 
+func TestFreeTierBlockDuration(t *testing.T) {
+	// The park duration is an availability knob: a health probe cannot clear a
+	// park (probes never exercise the gate), so an over-long value keeps the
+	// pool dead long after the gate reopened. 2026-10-17 measured exactly that
+	// with the old hardcoded 15m. It has to be settable, and a missing key has
+	// to land on the documented default rather than on an unbounded park.
+	if got := Default().FreeTier.BlockDuration; got != 15*time.Minute {
+		t.Errorf("default block_duration = %v, want 15m", got)
+	}
+
+	// Omitted and explicitly non-positive both fall back to the default.
+	for _, zero := range []FreeTier{
+		{Enabled: true},
+		{Enabled: true, BlockDuration: -time.Second},
+	} {
+		c := Config{FreeTier: zero}
+		c.normalize()
+		if c.FreeTier.BlockDuration != 15*time.Minute {
+			t.Errorf("normalize block_duration = %v, want the 15m fallback",
+				c.FreeTier.BlockDuration)
+		}
+	}
+
+	// A set value survives normalize untouched — yaml.v3 parses "2m" straight
+	// into a time.Duration, so this is the whole path a real config file takes.
+	c := Config{FreeTier: FreeTier{Enabled: true, BlockDuration: 2 * time.Minute}}
+	c.normalize()
+	if c.FreeTier.BlockDuration != 2*time.Minute {
+		t.Errorf("explicit block_duration = %v, want 2m", c.FreeTier.BlockDuration)
+	}
+}
+
 func TestExampleConfigStaysLoadable(t *testing.T) {
 	// The example files are documentation that is easy to break while editing,
 	// and deploy/config.example.yaml is the one that actually becomes a running
