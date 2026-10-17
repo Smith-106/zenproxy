@@ -843,7 +843,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	// of them. Repetition is the weighting mechanism because pick() scatters a
 	// hash across the whole list — list order carries no meaning there, only
 	// multiplicity does.
-	var gatePassers, gatePassersImpaired, gatePassersLapsed []*member
+	var gatePassers, gatePassersImpaired, gatePassersLapsed, gatePassersParked []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -901,6 +901,22 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		case cool, ft:
 			// Quota-cooled and free-tier-blocked are both "working exit, wrong
 			// moment": demote together so Pick still prefers unblocked IPs.
+			//
+			// For a gated request they stay candidates behind everything else
+			// that is gated, because the park and the gate measure different
+			// things: the park says "this exit was refused minutes ago", while
+			// the alternative fallback says "this exit has never been admitted
+			// once in 10,000 attempts". Measured 2026-10-17 after the admission
+			// set was seeded: 129 of 134 refusals in one window came from
+			// never-admitted exits that the pool only reached because every
+			// admitted exit was parked — the pool was choosing a certain refusal
+			// over a stale admission. The park still holds the exit out of every
+			// non-gated decision, and a refusal still re-arms the park, so a
+			// genuinely dead passer cannot be hammered: the red-window fast-fail
+			// bounds each request.
+			if gated && gatePass {
+				gatePassersParked = append(gatePassersParked, m)
+			}
 			cooled = append(cooled, m)
 		case reg:
 			region = append(region, m)
@@ -982,6 +998,12 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	// Then exits whose admission lapsed while their track record did not. Still
 	// gated-only: for plain traffic a lapsed admission is no information at all.
 	if m := pick(gatePassersLapsed); m != nil {
+		return m.Proxy
+	}
+	// Then admitted-but-parked: refused or quota-cooled within the block window.
+	// Still ahead of an exit the gate has never admitted, for the reason in the
+	// cool/ft branch — a stale admission beats a certain refusal.
+	if m := pick(gatePassersParked); m != nil {
 		return m.Proxy
 	}
 	if m := pick(healthyFree); m != nil {

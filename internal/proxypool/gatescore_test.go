@@ -143,6 +143,35 @@ func TestLapsedAdmissionIsRetriedBeforeNeverAdmittedExits(t *testing.T) {
 	}
 }
 
+// A park is a two-minute verdict; a never-admitted exit is a permanent one.
+// Measured after the admission set was seeded: 129 of 134 refusals in one window
+// came from never-admitted exits the pool only reached because every admitted
+// exit was parked. Choosing a certain refusal over a stale admission is the same
+// mistake as the earlier quarantine fallback, one tier down.
+func TestGatedPickPrefersParkedAdmissionOverNeverAdmittedExit(t *testing.T) {
+	pool := createTestPool(t, 6, config.Health{})
+	pool.MarkGatePass("e")
+	if !pool.BlockFreeTier("e", 2*time.Minute, "enveloped FreeTierError") {
+		t.Fatal("BlockFreeTier returned false")
+	}
+	for i := 0; i < 12; i++ {
+		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
+		if px == nil || px.ID != "e" {
+			t.Fatalf("gated pick %d = %v, want the parked admitted exit e", i, px)
+		}
+	}
+	// Non-gated traffic keeps the old rule: a parked exit is out of rotation.
+	seen := map[string]bool{}
+	for i := 0; i < 40; i++ {
+		if px := pool.PickForAccount("", "deepseek-v4.1-flash", ""); px != nil {
+			seen[px.ID] = true
+		}
+	}
+	if seen["e"] {
+		t.Fatalf("a parked exit served plain traffic: %v", seen)
+	}
+}
+
 func TestGateScoreSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "exits-state.json")
