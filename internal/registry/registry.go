@@ -443,6 +443,18 @@ func (r *Registry) ExitFor(accountID string) *proxypool.Proxy {
 // model and 200 for another in the same second. Resolving without the model
 // would keep handing back an exit the upstream is going to refuse.
 func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
+	return r.exitForModel(accountID, model, false)
+}
+
+// ExitForModelGated is ExitForModel for a request the free-tier gate will
+// judge. It only changes how the pool is asked to choose (see
+// proxypool.PickForAccountGated); an account's explicitly configured exit still
+// wins, because that is configuration, not a heuristic.
+func (r *Registry) ExitForModelGated(accountID, model string) *proxypool.Proxy {
+	return r.exitForModel(accountID, model, true)
+}
+
+func (r *Registry) exitForModel(accountID, model string, gated bool) *proxypool.Proxy {
 	r.mu.Lock()
 	e, ok := r.accounts[accountID]
 	if !ok {
@@ -484,7 +496,7 @@ func (r *Registry) ExitForModel(accountID, model string) *proxypool.Proxy {
 		}
 	}
 
-	px := r.pool.PickForAccount(accountID, model, "")
+	px := r.pool.PickForAccountGated(accountID, model, "", gated)
 	if px == nil {
 		return nil
 	}
@@ -555,6 +567,18 @@ func (r *Registry) Rotate(accountID, excludeExit string) *proxypool.Proxy {
 // is refused for the same model — turning one wasted attempt into two, and the
 // caller would see the same 403 with no sign that anything moved.
 func (r *Registry) RotateFor(accountID, excludeExit, model string) *proxypool.Proxy {
+	return r.rotateFor(accountID, excludeExit, model, false)
+}
+
+// RotateForGated is RotateFor for a request the free-tier gate will judge: the
+// replacement may be an admitted exit even while health has it quarantined,
+// because a probe failure is weaker evidence than a real 2xx through the same
+// exit. See proxypool.PickForAccountGated for the measurement.
+func (r *Registry) RotateForGated(accountID, excludeExit, model string) *proxypool.Proxy {
+	return r.rotateFor(accountID, excludeExit, model, true)
+}
+
+func (r *Registry) rotateFor(accountID, excludeExit, model string, gated bool) *proxypool.Proxy {
 	if r.pool == nil || r.pool.Len() == 0 {
 		return nil
 	}
@@ -564,7 +588,7 @@ func (r *Registry) RotateFor(accountID, excludeExit, model string) *proxypool.Pr
 	}
 	r.mu.Unlock()
 
-	px := r.pool.PickForAccount(accountID, model, excludeExit)
+	px := r.pool.PickForAccountGated(accountID, model, excludeExit, gated)
 	if px == nil {
 		return nil
 	}

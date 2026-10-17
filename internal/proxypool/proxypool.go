@@ -772,6 +772,28 @@ func (p *Pool) PickFor(model, exclude string) *Proxy {
 // since an account only re-resolves its exit when the old one goes bad, and the
 // replacement used to be chosen without regard to anyone else.
 func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
+	return p.PickForAccountGated(accountID, model, exclude, false)
+}
+
+// PickForAccountGated is PickForAccount for a request the free-tier gate will
+// judge, and gated changes exactly one thing: an exit the gate has admitted
+// stays a candidate even while quarantined, ranked right behind the admitted
+// exits that are not quarantined.
+//
+// The two verdicts measure different links and on this pool they routinely
+// disagree. Quarantine comes from a health probe to ipify/opencode.ai:443;
+// admission comes from a real enveloped request that came back 2xx through the
+// exit. Measured 2026-10-17: four of the six admitted exits were quarantined at
+// the same moment by probe failures (consec_fails 3-4) while the gate was still
+// serving them, and with those four gone the pool fell back to non-admitted
+// exits and refused every request in that window. The evidence is not
+// symmetric — a probe says "this hop cannot reach a probe host", admission says
+// "this hop carried the exact request we care about".
+//
+// It is a candidate, not a promotion: a genuinely dead exit keeps failing real
+// requests and its quarantine is renewed. Plain traffic never sees this tier, so
+// paid models keep their old aversion to quarantined exits.
+func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool) *Proxy {
 	if len(p.members) == 0 {
 		return nil
 	}
@@ -790,7 +812,7 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 	// measurement). Deliberately NOT subject to the account-sharing tiebreak
 	// below — sharing a working exit costs a little per-IP allowance, while
 	// stepping off it to a "free" exit costs the whole request.
-	var gatePassers []*member
+	var gatePassers, gatePassersQuarantined []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -838,7 +860,11 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 		case q:
 			// Broken outranks the rest: a cooled exit that is also quarantined
 			// is the worse of the two, and quarantine is the signal that lasts
-			// until proven otherwise.
+			// until proven otherwise. The one exception is an admitted exit on a
+			// gated request — see PickForAccountGated.
+			if gated && gatePass && !ft {
+				gatePassersQuarantined = append(gatePassersQuarantined, m)
+			}
 			quarantined = append(quarantined, m)
 		case cool, ft:
 			// Quota-cooled and free-tier-blocked are both "working exit, wrong
@@ -892,6 +918,13 @@ func (p *Pool) PickForAccount(accountID, model, exclude string) *Proxy {
 	// no passers (cold start, or every passer parked by a refusal) this branch
 	// is empty and selection falls through to exactly the previous behaviour.
 	if m := pick(gatePassers); m != nil {
+		return m.Proxy
+	}
+	// Admitted-but-quarantined comes next for gated requests only: a probe
+	// failure is weaker evidence than a real 2xx through the same exit, and the
+	// alternative (a healthy exit the gate has never admitted) is measurably a
+	// refusal. Empty for plain traffic.
+	if m := pick(gatePassersQuarantined); m != nil {
 		return m.Proxy
 	}
 	if m := pick(healthyFree); m != nil {

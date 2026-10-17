@@ -544,7 +544,11 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 						"account", ent.ID, "exit", exitID, "attempt", attempt)
 					continue
 				}
-				e.reg.RotateForSession(ent.ID, sessionID, exitID, askedModel)
+					if gated {
+					e.reg.RotateForSessionGated(ent.ID, sessionID, exitID, askedModel)
+				} else {
+					e.reg.RotateForSession(ent.ID, sessionID, exitID, askedModel)
+				}
 				continue
 			}
 			break

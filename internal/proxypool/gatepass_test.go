@@ -131,3 +131,43 @@ func TestGatePassersListsOnlyCurrentAdmissions(t *testing.T) {
 		t.Fatalf("GatePassers after expiry = %q, want b", got)
 	}
 }
+
+// A probe failure and a gate admission measure different links, and on this
+// pool they disagree: four of the six admitted exits were quarantined by health
+// probes at the same moment while the gate was still serving them, and losing
+// them dropped every request in that window back to non-admitted exits. For a
+// gated request an admitted exit therefore stays a candidate through quarantine,
+// but only for gated requests — plain traffic keeps its aversion.
+func TestGatedPickKeepsQuarantinedAdmittedExit(t *testing.T) {
+	newPool := func() *Pool {
+		pool := createTestPool(t, 6, config.Health{FailureThreshold: 1})
+		pool.MarkGatePass("c")
+		pool.MarkFailure("c", "unreachable: dial tcp: connection refused")
+		if ok, _ := pool.Healthy("c"); ok {
+			t.Fatal("precondition: c must be quarantined")
+		}
+		return pool
+	}
+
+	plain := newPool()
+	for i := 0; i < 25; i++ {
+		if px := plain.PickForAccount("", "muse-spark-1.2-contributor-free", ""); px != nil && px.ID == "c" {
+			t.Fatalf("plain pick returned a quarantined exit at i=%d", i)
+		}
+	}
+
+	gated := newPool()
+	for i := 0; i < 5; i++ {
+		px := gated.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
+		if px == nil || px.ID != "c" {
+			t.Fatalf("gated pick %d lost the quarantined admitted exit: %v", i, px)
+		}
+	}
+
+	// A free-tier refusal is the fresher verdict and still wins over the
+	// quarantine exception: a parked exit must not be handed out at all.
+	gated.BlockFreeTier("c", 2*time.Minute, "enveloped FreeTierError")
+	if px := gated.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true); px != nil && px.ID == "c" {
+		t.Fatal("free-tier-blocked exit served a gated pick")
+	}
+}

@@ -202,7 +202,7 @@ func (r *Registry) ExitForSessionGated(accountID, sessionID, model string) *prox
 func (r *Registry) exitForSession(accountID, sessionID, model string, preferGatePass bool) *proxypool.Proxy {
 	sessionID = strings.TrimSpace(sessionID)
 	if r.sessions == nil || !r.sessions.Enabled() || sessionID == "" {
-		return r.ExitForModel(accountID, model)
+		return r.exitForModel(accountID, model, preferGatePass)
 	}
 
 	if bound, ok := r.sessions.GetAndRefresh(accountID, sessionID, model); ok {
@@ -214,7 +214,7 @@ func (r *Registry) exitForSession(accountID, sessionID, model string, preferGate
 					// refused since the session was bound to it.
 					passing, _ := r.pool.GatePassing(bound)
 					if !passing || r.pool.FreeTierBlocked(bound) {
-						if alt := r.pool.PickForAccount(accountID, model, ""); alt != nil {
+						if alt := r.pool.PickForAccountGated(accountID, model, "", true); alt != nil {
 							if altPassing, _ := r.pool.GatePassing(alt.ID); altPassing {
 								r.sessions.Set(accountID, sessionID, model, alt.ID)
 								r.setBinding(accountID, alt.ID)
@@ -247,7 +247,7 @@ func (r *Registry) exitForSession(accountID, sessionID, model string, preferGate
 		}
 	}
 
-	px := r.ExitForModel(accountID, model)
+	px := r.exitForModel(accountID, model, preferGatePass)
 	if px != nil {
 		r.sessions.Set(accountID, sessionID, model, px.ID)
 		if r.log != nil {
@@ -282,11 +282,22 @@ func (r *Registry) BindSession(accountID, sessionID, model, exitID string) bool 
 // RotateForSession moves off excludeExit and rebinds the session to the
 // replacement, mirroring CPA's "sticky auth failed → reselect + rebind".
 func (r *Registry) RotateForSession(accountID, sessionID, excludeExit, model string) *proxypool.Proxy {
+	return r.rotateForSession(accountID, sessionID, excludeExit, model, false)
+}
+
+// RotateForSessionGated is RotateForSession for a request the free-tier gate
+// will judge: the replacement comes from the gated pick, which can return an
+// admitted exit that health has quarantined.
+func (r *Registry) RotateForSessionGated(accountID, sessionID, excludeExit, model string) *proxypool.Proxy {
+	return r.rotateForSession(accountID, sessionID, excludeExit, model, true)
+}
+
+func (r *Registry) rotateForSession(accountID, sessionID, excludeExit, model string, gated bool) *proxypool.Proxy {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID != "" && r.sessions != nil {
 		r.sessions.Invalidate(accountID, sessionID, model)
 	}
-	px := r.RotateFor(accountID, excludeExit, model)
+	px := r.rotateFor(accountID, excludeExit, model, gated)
 	if px != nil && sessionID != "" && r.sessions != nil {
 		r.sessions.Set(accountID, sessionID, model, px.ID)
 		if r.log != nil {
