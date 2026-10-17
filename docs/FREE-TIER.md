@@ -406,9 +406,11 @@ free_tier:
 - 封装后的免费请求拿到 2xx → `MarkGatePass(exit)`，该出口进"过闸名单"（TTL 30 分钟）；
 - `PickForAccount` 把过闸名单排在**所有健康出口之前**（且不受"别的账号正在用"这个
   平票规则影响：共用好出口只损失一点 per-IP 额度，从好出口挪开则整条请求报废）；
-- 被拒仍然立刻 `BlockFreeTier`（2 分钟），停用的出口不会被选中，
-  所以"刚放行又翻脸"的出口会马上掉出名单；
-- 名单和次数写进 `exits-state.json`（`gate_pass_until` / `gate_passes`），
+- 被拒立刻 `BlockFreeTier`（2 分钟），同时**撤销过闸记忆并把质量分 -3**。
+  普通流量完全不选停用出口；门控请求只在「没有干净过闸出口」时才退到
+  仍被证明过、但正被停用的出口。分数掉到 8 以下就不再优先重试，
+  所以翻脸的出口（`resin-slot-199` 那种旧分 16、现在次次被拒）不会被无限重试；
+- 名单、次数、质量分写进 `exits-state.json`（`gate_pass_until` / `gate_passes` / `gate_score`），
   重启不用重新抽签；
 - 健康面板每条出口多了 `gate_pass_until` / `gate_passes`，
   "现在哪些出口能服务免费模型"可以直接看，不必翻日志。

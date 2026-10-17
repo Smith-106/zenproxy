@@ -1320,8 +1320,24 @@ func (p *Pool) BlockFreeTier(id string, d time.Duration, reason string) bool {
 		m.freeTierReason = reason
 		m.lastErr = reason
 		m.lastCheck = time.Now()
+		// A refusal is fresher than the 30-minute admission, so the exit leaves
+		// the front tier immediately. The score also steps down, which is what
+		// stops a once-good exit from being retried forever after the gate has
+		// turned on it: resin-slot-199 was admitted 126 times hours earlier,
+		// still scored 16, and was then refused on every retry. Three refusals
+		// walk a capped score back under the "proven" line; a later admission
+		// walks it forward again. Exits the gate has never admitted are not
+		// scored — there is nothing to revoke.
+		if m.gatePasses > 0 || !m.gatePassUntil.IsZero() || m.gateScore != 0 {
+			m.gatePassUntil = time.Time{}
+			m.gateScore -= gateScoreDrop
+			if m.gateScore < gateScoreMin {
+				m.gateScore = gateScoreMin
+			}
+		}
 		p.log.Info("egress blocked for free-tier refusal",
-			"exit", id, "for", d.String(), "until", until.Format(time.RFC3339), "reason", reason)
+			"exit", id, "for", d.String(), "until", until.Format(time.RFC3339),
+			"score", m.gateScore, "reason", reason)
 		p.markDirty()
 		return true
 	}

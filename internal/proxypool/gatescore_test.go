@@ -150,9 +150,17 @@ func TestLapsedAdmissionIsRetriedBeforeNeverAdmittedExits(t *testing.T) {
 // mistake as the earlier quarantine fallback, one tier down.
 func TestGatedPickPrefersParkedAdmissionOverNeverAdmittedExit(t *testing.T) {
 	pool := createTestPool(t, 6, config.Health{})
-	pool.MarkGatePass("e")
+	// One admission is not a reputation. The parked-but-proven fallback only
+	// applies once the exit has actually carried traffic; a single pass that is
+	// immediately refused is revoked, not remembered.
+	for i := 0; i < 6; i++ {
+		pool.MarkGatePass("e")
+	}
 	if !pool.BlockFreeTier("e", 2*time.Minute, "enveloped FreeTierError") {
 		t.Fatal("BlockFreeTier returned false")
+	}
+	if passing, _ := pool.GatePassing("e"); passing {
+		t.Fatal("a refusal left the admission in force")
 	}
 	for i := 0; i < 12; i++ {
 		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
@@ -169,6 +177,40 @@ func TestGatedPickPrefersParkedAdmissionOverNeverAdmittedExit(t *testing.T) {
 	}
 	if seen["e"] {
 		t.Fatalf("a parked exit served plain traffic: %v", seen)
+	}
+}
+
+// A refusal revokes the live admission and steps the score down. Repeated
+// refusals walk a capped score back under the proven line, after which the
+// exit is no longer retried ahead of the rest of the pool. This is what stops
+// an exit that used to pass (resin-slot-199, 126 admissions, score 16) from
+// being handed every request once the gate has turned on it.
+func TestRepeatedRefusalsEjectAFormerlyProvenExit(t *testing.T) {
+	pool := createTestPool(t, 6, config.Health{})
+	for i := 0; i < 8; i++ {
+		pool.MarkGatePass("a")
+	}
+	if got := pool.scoreOf("a"); got < gateGoodScore {
+		t.Fatalf("precondition score %d, want >= %d", got, gateGoodScore)
+	}
+	for i := 0; i < 8; i++ {
+		// Each call extends the park by a moment, so each one counts.
+		time.Sleep(time.Millisecond)
+		if !pool.BlockFreeTier("a", 2*time.Minute, "enveloped FreeTierError") {
+			t.Fatalf("block %d did not extend the park", i)
+		}
+	}
+	if got := pool.scoreOf("a"); got >= gateGoodScore {
+		t.Fatalf("score after repeated refusals = %d, still proven", got)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 30; i++ {
+		if px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true); px != nil {
+			seen[px.ID] = true
+		}
+	}
+	if len(seen) < 2 || (len(seen) == 1 && seen["a"]) {
+		t.Fatalf("refused exit still monopolises gated picks: %v", seen)
 	}
 }
 
