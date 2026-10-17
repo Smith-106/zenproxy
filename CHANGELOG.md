@@ -385,6 +385,51 @@
   另记一条环境特征：换池瞬间会看到零星 `403 OpenCode's free tier can only be used from withi…`，
   同一条请求串行重试 10/10 全 200，属出口刚上线时的瞬时命中，不要据此改模型名单。
 
+### 修复（2026-10-17：CPA 路由 —— alias 语义、冷却放大器、免费模型全量暴露）
+
+- **客户端 `400 unknown provider for model muse-spark-1.2-contributor-free` 的根因是 CPA 的
+  `alias` 语义，不是模型下线。** CPA v8.0.15 的 model 条目有两个名字：`name` 是**转发给上游**
+  的名字，`alias` 才是**客户端可用名**；`alias` 非空时 `name` 就不再是可用名，而 `/v1/models`
+  却仍然只列 `name` —— 于是「列表里有、请求打不通」。实测对照（同 provider 同 key）：
+  `glm-5.3-flash`(alias) → 200，`glm-5.3-flash-free`(name) → 400 unknown provider。
+  上游 sub2api 直连同一模型 200，说明后端一直是好的。
+- **免费模型改为 `alias: ""` 全量挂载（10 个正名 + 2 个历史名），历史名不占用 alias。**
+  原来 `muse-spark-1.3-contributor-free` / `glm-5.3-flash` 是挂在 1.2 / `-free` 条目上的 alias，
+  这会把正名从目录里挤掉。现在它们作为**独立条目**保留，改名交给 new-api 的 `model_mapping`
+  （CPA 这层不做第二份映射）。
+- **new-api 侧补齐历史名要的三样 + 定价：** `channels.models`、`abilities` 行（含 `enabled`）、
+  `channels.model_mapping`，外加 `options.ModelRatio` / `CompletionRatio`（别名不继承原名价格，
+  缺失直接 `400 price not configured`）。`abilities` 的分组列名是保留字，SQL 必须写 `"group"`。
+- **修掉一个把偶发失败放大成十分钟硬锁的配置：** `routing.retry.request-retry: 0` +
+  `cooldown.save-cooldown-status: true`。免费面单发成功率本就只有 ~50%，一次 403 即进入长冷却，
+  且冷却**落盘**（`docker restart` 也不清），表现为该模型整段 503
+  `auth_unavailable: no auth available …`。判据是错误里 `request id` 的时间戳：
+  与 `date -u` 不一致即缓存复用，不是上游坏。现改为 `request-retry: 2` +
+  `max-retry-credentials: 1`，并对 new-api 这条 provider 单独 `disable-cooling: true`
+  （上游 new-api 自己会跨 zen-01/02/03/05 重试，在这里再冷却等于作废它的重试）。
+  全局冷却保持开启 —— 对真不可用的上游它是有价值的限流。
+- **新增 `docs/CPA.md`**：错误签名对照表（CPA / new-api / 上游各自的措辞）、alias 语义、
+  冷却判据、new-api 别名三件套、逐跳定位配方，以及两个动手坑（`docker run … curl` 不展
+  `$VAR` 会伪造出 401；`config.yaml` 的 `openai-compatibility` 是单行 flow-style，禁 grep）。
+- **新增 `scripts/cpa-expose-models.py` / `scripts/cpa-routing-tuning.py`**，都带干跑模式：
+  前者清点并修复「列表里有、打不通」，后者调重试与 provider 级冷却。两者只做精确子串替换，
+  **不整体重排 YAML**（那一行里挤着几十把 key）。
+- **验收（真实流量）：** CPA 上 12 个名字 `12/12` 全 200；同一模型连打 `200=10/10`；
+  公网 `https://cpa.nikoniko.tech/v1/chat/completions`、`/v1/responses`、
+  `/zenapi/v1/chat/completions`、`/zenapi/v1/responses`（流式 10 个 SSE 事件）四条路径全通。
+
+### 凭据（2026-10-17：第 10 次泄露 + `redact.py` 补两个形状）
+
+- **记一次真实泄露：** 为看一个 provider 条目，用 `sudo python3 -c` 打印配置里 `name: new-api`
+  附近的 26 行，并现场手写 `re.sub(r"(api-key:\s*).*", …)` 遮密钥。该行是 flow-style JSON，
+  密钥写法是 `"api-key": "…"`，**正则一个都没命中** —— 41 把 `nvapi-`、11 把 ollama 及其余
+  provider 的活 key 进了对话。`scripts/redact.py` 本来就能盖住这个形状，是绕过它才出的事；
+  `docs/SECRETS.md` 已按第 10 次记录。
+- **`scripts/redact.py` 补一条值形状规则：URL userinfo 里的凭据**
+  （`socks5h://user:pass@host`）。此前这类值含 `/` 与 `@`，既不匹配已知 key 前缀，又被两条
+  opaque-token 规则跳过，等于是唯一没被覆盖的凭据形状（第 6 次泄露漏的正是它）。
+  同时把本次 flow-style 单行数组的形状加进 `--test` 用例，`9/9` 通过。
+
 ### ⚠️ 升级注意
 
 - **`rotate_on_status` 的默认值新增了 `403`。** 地区限制的轮换依赖它：

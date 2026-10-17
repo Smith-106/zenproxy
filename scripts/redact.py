@@ -69,6 +69,10 @@ SECRET_VALUE = [
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"),  # JWT
     re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{8,}"),      # any bearer token
     re.compile(r"\bsk_live_[A-Za-z0-9]{10,}"),          # Stripe
+    # Credentials embedded in a URL userinfo ($socks5h://user:pass@host$). Incident
+    # #6 leaked the proxy password this way: the value contains `/` and `@`, so both
+    # the opaque-token rules below skip it, and no other pattern matched it.
+    re.compile(r"\b[a-z][a-z0-9+.\-]*://[^/\s:@]+:[^/\s@]+@", re.I),
 ]
 
 # A token-ish run that is long enough to be a credential and carries no spaces.
@@ -233,6 +237,21 @@ CASES = [
     ("env dump line",
      "RESIN_PROXY_TOKEN=Zm9vYmFyYmF6cXV1eDEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbg",
      "Zm9vYmFyYmF6"),
+    # Incident #10: a hand-written `re.sub(r"(api-key:\s*).*")` guard only matched
+    # block-style `api-key: value`, so the flow-style single-line array (where the key
+    # is written `"api-key": "…"`) sailed through with ~60 live keys in one line.
+    ("flow-style single-line openai-compatibility array (incident #10)",
+     'api-keys:\n  openai-compatibility: [{"base-url": "http://new-api:3000/v1", '
+     '"disabled": false, "keys": [{"api-key": "sk-FAKE7dIcNfHjK2mQpVrXtZbYwGuSaLeE"}], '
+     '"models": [{"name": "muse-spark-1.2-contributor-free"}], "name": "new-api"}, '
+     '{"keys": [{"api-key": "nvapi-FAKEq9LmWz4Rt7Yp2Kd8Xc3Vb6Nn1Jj5Hh0Gg"}], '
+     '"name": "nvidia-free"}]\n',
+     "7dIcNfHjK2mQpVrXtZ"),
+    # Incident #6 again, now guarded: proxy password inside a URL userinfo.
+    ("proxy credentials in a URL userinfo",
+     'keys:\n- api-key: sk-FAKEaB3dE6gJ9mP2sV5xZ8bC1fH4kL7n\n'
+     "  proxy-url: socks5h://proxy_user:Fx9mK2pR7nQ4@20.194.7.31:31080\n",
+     "Kx9mP2vR7nQ4"),
 ]
 
 
