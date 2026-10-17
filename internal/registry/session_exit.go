@@ -177,6 +177,29 @@ func (c *SessionExitCache) evictOldestLocked() {
 //
 // An empty sessionID disables the cache path entirely.
 func (r *Registry) ExitForSession(accountID, sessionID, model string) *proxypool.Proxy {
+	return r.exitForSession(accountID, sessionID, model, false)
+}
+
+// ExitForSessionGated is ExitForSession for a request the free-tier gate will
+// judge, and it exists because stickiness and gate admission disagree.
+//
+// The cache is restored from disk across restarts, so it is full of bindings
+// made before the pool learned which exits the gate admits. Sticky-wins then
+// means every one of those conversations keeps landing on an exit the gate
+// refuses, forever: measured right after the admission set was seeded, 342 of
+// 346 refusals came from exits OUTSIDE the admission set while the six admitted
+// exits served every single success. The binding, not the pick, was the
+// bottleneck.
+//
+// So for a gated request the binding is only kept when it is still an admitted
+// exit. Otherwise the session is rebound to a current admission, and the cost is
+// exactly what stickiness was protecting — one upstream prompt cache — while the
+// benefit is the difference between a refused turn and an answered one.
+func (r *Registry) ExitForSessionGated(accountID, sessionID, model string) *proxypool.Proxy {
+	return r.exitForSession(accountID, sessionID, model, true)
+}
+
+func (r *Registry) exitForSession(accountID, sessionID, model string, preferGatePass bool) *proxypool.Proxy {
 	sessionID = strings.TrimSpace(sessionID)
 	if r.sessions == nil || !r.sessions.Enabled() || sessionID == "" {
 		return r.ExitForModel(accountID, model)
@@ -185,6 +208,27 @@ func (r *Registry) ExitForSession(accountID, sessionID, model string) *proxypool
 	if bound, ok := r.sessions.GetAndRefresh(accountID, sessionID, model); ok {
 		if px, ok := r.pool.Get(bound); ok {
 			if healthy, _ := r.pool.Healthy(bound); healthy && r.exitServesModel(bound, model) {
+				if preferGatePass {
+					// Re-read the admission under the pool's lock on every hit:
+					// a 30m admission does expire, and the exit may have been
+					// refused since the session was bound to it.
+					passing, _ := r.pool.GatePassing(bound)
+					if !passing || r.pool.FreeTierBlocked(bound) {
+						if alt := r.pool.PickForAccount(accountID, model, ""); alt != nil {
+							if altPassing, _ := r.pool.GatePassing(alt.ID); altPassing {
+								r.sessions.Set(accountID, sessionID, model, alt.ID)
+								r.setBinding(accountID, alt.ID)
+								r.pool.Bind(alt.ID, accountID)
+								if r.log != nil {
+									r.log.Info("session-exit: rebinding to a free-tier admitted exit",
+										"account", accountID, "session", truncateSession(sessionID),
+										"from", bound, "to", alt.ID, "model", model)
+								}
+								return alt
+							}
+						}
+					}
+				}
 				// Keep the account binding aligned so avoidSpentExit / admin
 				// views still see the live exit.
 				r.setBinding(accountID, bound)

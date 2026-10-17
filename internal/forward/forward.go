@@ -474,7 +474,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		}
 		target := &targetCopy
 		exitID := ""
-		proxy := e.reg.ExitForSession(ent.ID, sessionID, askedModel)
+		gated := e.free != nil && e.free.wants(askedModel)
+		var proxy *proxypool.Proxy
+		if gated {
+			// A gate-judged request must not stay sticky to an exit the gate
+			// does not admit — see ExitForSessionGated.
+			proxy = e.reg.ExitForSessionGated(ent.ID, sessionID, askedModel)
+		} else {
+			proxy = e.reg.ExitForSession(ent.ID, sessionID, askedModel)
+		}
 		if proxy != nil {
 			exitID = proxy.ID
 		}
