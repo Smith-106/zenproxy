@@ -596,6 +596,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				if foldErr != "" {
 					if exitID != "" && e.pool != nil {
 						e.pool.MarkFailure(exitID, "fold: "+foldErr)
+						// An admitted exit that took the request and then dropped
+						// the stream is the failure a client actually feels, and
+						// it is invisible to health probes. Recorded separately so
+						// the pass tier can weight admitted exits against each
+						// other instead of rotating evenly between good and bad
+						// tunnels (measured 3x spread in drops per admission).
+						if gated {
+							e.pool.MarkGateDrop(exitID, "stream ended without a completed response")
+						}
 					}
 					if hdrSent {
 						payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
@@ -639,6 +648,9 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				if foldErr != "" {
 					if exitID != "" && e.pool != nil {
 						e.pool.MarkFailure(exitID, "fold: "+foldErr)
+						if gated {
+							e.pool.MarkGateDrop(exitID, "stream died before completion")
+						}
 					}
 					e.log.Info("upstream stream died before completion; re-rolling on another exit",
 						"account", ent.ID, "exit", exitID, "class", "fold", "err", foldErr)
@@ -1092,6 +1104,11 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 		// and leaves rotation like any other sick exit.
 		if exitID != "" && e.pool != nil {
 			e.pool.MarkFailure(exitID, "fold: "+foldErr)
+			// writeFolded only ever runs for an enveloped (gate-planned) reply,
+			// so the plan's presence is the gated test here.
+			if plan != nil {
+				e.pool.MarkGateDrop(exitID, "stream ended without a completed response")
+			}
 		}
 		if hdrSent {
 			payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})

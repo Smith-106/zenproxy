@@ -220,6 +220,13 @@ type ProxyHealth struct {
 	// serve free models right now" needs to be answerable without grepping logs.
 	GatePassUntil *time.Time `json:"gate_pass_until,omitempty"`
 	GatePasses    int        `json:"gate_passes,omitempty"`
+	// GateScore and GateDrops rank the admitted exits against each other. Among
+	// the six measured admissions the share of streams that died mid-response
+	// varied threefold, so "admitted" alone does not say whether a client will
+	// actually get an answer: GateScore is what selection weights by, GateDrops
+	// is the raw count of streams this exit failed to carry.
+	GateScore int `json:"gate_score,omitempty"`
+	GateDrops int `json:"gate_drops,omitempty"`
 	// Retired exits are out of rotation for good. Quarantine expires on its
 	// own; retirement does not, which is the whole point: a dead IP that keeps
 	// coming back every 30 minutes is not a pool member, it is noise.

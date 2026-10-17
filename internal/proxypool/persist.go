@@ -54,6 +54,13 @@ type exitRecord struct {
 	// costs the first ~2% -passing minutes after every restart.
 	GatePassUntil   time.Time            `json:"gate_pass_until,omitempty"`
 	GatePasses      int                  `json:"gate_passes,omitempty"`
+	// GateScore ranks admitted exits against each other (see member.gateScore)
+	// and GateDrops counts the streams they failed to carry. Both persist for the
+	// same reason as the admission itself: a restart should not reset the pool's
+	// opinion of which admitted tunnel is the reliable one, or it will re-learn
+	// that by handing clients a few more dead streams.
+	GateScore       int                  `json:"gate_score,omitempty"`
+	GateDrops       int                  `json:"gate_drops,omitempty"`
 	RegionBlocks    map[string]time.Time `json:"region_blocks,omitempty"`
 	Failures        int64                `json:"failures,omitempty"`
 	SoftFails       int64                `json:"soft_fails,omitempty"`
@@ -101,6 +108,8 @@ func (p *Pool) SaveState() {
 			QuotaReason:     m.quotaReason,
 			GatePassUntil:   m.gatePassUntil,
 			GatePasses:      m.gatePasses,
+		GateScore:       m.gateScore,
+		GateDrops:       m.gateDrops,
 			Failures:        m.failures,
 			SoftFails:       m.softFails,
 			ConsecFails:     m.consecFails,
@@ -186,6 +195,8 @@ func (p *Pool) loadState() {
 		// deadline only survives if it has not already elapsed while the
 		// process was down — same rule as every other deadline here.
 		m.gatePasses = rec.GatePasses
+		m.gateScore = rec.GateScore
+		m.gateDrops = rec.GateDrops
 		if rec.GatePassUntil.After(now) {
 			m.gatePassUntil = rec.GatePassUntil
 		}

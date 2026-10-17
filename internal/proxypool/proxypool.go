@@ -503,6 +503,31 @@ type member struct {
 	gatePassUntil time.Time
 	gatePasses    int
 
+	// gateScore ranks admitted exits against each other, because "the gate
+	// admits it" is not the same as "it carries a conversation". Measured on the
+	// six admitted exits 2026-10-17, admissions versus mid-stream drops were
+	// static-161 131/32, static-1040 69/70, static-44 53/94, static-897 38/45 —
+	// a threefold spread in what a client actually experiences
+	// (the upstream stream ended without a completed response), while the tier
+	// treated all four as interchangeable and rotated evenly. So the better
+	// tunnel was handed the same share as the worse one, and a third of the
+	// attempts had to be re-rolled.
+	//
+	// It is a bounded, self-healing rank rather than a ratio: +gateScorePass on
+	// every admission, -gateScoreDrop on every drop, clamped both ways. A ratio
+	// of lifetime counters would punish an exit forever for an outage early in
+	// its life (static-1040 opened 39 admissions against 70 drops and stayed
+	// there); a bounded score walks back out of the floor after a few clean
+	// admissions, which is what the next request should believe. Drops decay
+	// faster than admissions accumulate precisely because one drop is stronger
+	// evidence than one admission: the gate can admit an exit that then kills
+	// every stream, and a client pays for each of those.
+	gateScore int
+
+	// gateDrops counts mid-stream drops on this exit, for the health panel only;
+	// gateScore is what selection reads.
+	gateDrops int
+
 	// regionBlocked records, per model name, that this exit's country is refused
 	// for that model — and it is keyed by model because that is what the
 	// upstream actually does. Measured on one pool: an exit in RU answered 403
@@ -812,7 +837,13 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	// measurement). Deliberately NOT subject to the account-sharing tiebreak
 	// below — sharing a working exit costs a little per-IP allowance, while
 	// stepping off it to a "free" exit costs the whole request.
-	var gatePassers, gatePassersQuarantined []*member
+	//
+	// Each admitted exit appears gateWeight(score) times, so a tunnel that
+	// actually carries streams is drawn more often than one that drops a third
+	// of them. Repetition is the weighting mechanism because pick() scatters a
+	// hash across the whole list — list order carries no meaning there, only
+	// multiplicity does.
+	var gatePassers, gatePassersImpaired, gatePassersLapsed []*member
 	// Retired exits are tracked separately precisely so that no later branch
 	// can accidentally hand one out.
 	var bestRetired *member
@@ -830,6 +861,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		ret := m.retired
 		fails := m.failures
 		gatePass := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
+		gateScoreVal := m.gateScore
 		// A measured-slow exit is demoted, not discarded: with a pool made of
 		// unreliable nodes, "slow but answering" still beats "nothing".
 		// Unmeasured exits (latency 0) always count as fast, so a freshly
@@ -863,7 +895,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// until proven otherwise. The one exception is an admitted exit on a
 			// gated request — see PickForAccountGated.
 			if gated && gatePass && !ft {
-				gatePassersQuarantined = append(gatePassersQuarantined, m)
+				gatePassersImpaired = append(gatePassersImpaired, m)
 			}
 			quarantined = append(quarantined, m)
 		case cool, ft:
@@ -874,7 +906,20 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			region = append(region, m)
 		case h && !slow:
 			if gatePass {
-				gatePassers = append(gatePassers, m)
+				for i := gateWeight(gateScoreVal); i > 0; i-- {
+					gatePassers = append(gatePassers, m)
+				}
+			} else if gated && gateScoreVal >= gateGoodScore && !ft && !cool {
+				// Admission lapsed, reputation did not. The admission TTL is 30
+				// minutes, which is short compared with how long an IP stays
+				// clean — measured 2026-10-17, two of the six admitted exits
+				// (resin-slot-199 with 126 admissions, resin-slot-386 with 13)
+				// simply aged out of the tier and were then only reachable
+				// whenever no admitted exit was left, so they never got the one
+				// attempt that would re-admit them. Retrying a lapsed-but-proven
+				// exit costs one attempt and has a far better hit rate than the
+				// 0.4% lottery over never-admitted exits.
+				gatePassersLapsed = append(gatePassersLapsed, m)
 			}
 			if taken {
 				healthyTaken = append(healthyTaken, m)
@@ -882,6 +927,13 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				healthyFree = append(healthyFree, m)
 			}
 		default:
+			// Degraded is the same disagreement as quarantine, one step earlier:
+			// a few probe failures on a tunnel the gate is still admitting. Keep
+			// them as gated candidates behind the healthy admissions instead of
+			// dropping to an exit the gate has never admitted.
+			if gated && gatePass && !ft && !cool && !reg {
+				gatePassersImpaired = append(gatePassersImpaired, m)
+			}
 			if taken {
 				degradedTaken = append(degradedTaken, m)
 			} else {
@@ -920,11 +972,16 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 	if m := pick(gatePassers); m != nil {
 		return m.Proxy
 	}
-	// Admitted-but-quarantined comes next for gated requests only: a probe
-	// failure is weaker evidence than a real 2xx through the same exit, and the
-	// alternative (a healthy exit the gate has never admitted) is measurably a
-	// refusal. Empty for plain traffic.
-	if m := pick(gatePassersQuarantined); m != nil {
+	// Admitted but impaired (probe-quarantined or degraded) comes next for gated
+	// requests only: a probe failure is weaker evidence than a real 2xx through
+	// the same exit, and the alternative — a healthy exit the gate has never
+	// admitted — is measurably a refusal. Empty for plain traffic.
+	if m := pick(gatePassersImpaired); m != nil {
+		return m.Proxy
+	}
+	// Then exits whose admission lapsed while their track record did not. Still
+	// gated-only: for plain traffic a lapsed admission is no information at all.
+	if m := pick(gatePassersLapsed); m != nil {
 		return m.Proxy
 	}
 	if m := pick(healthyFree); m != nil {
@@ -1266,6 +1323,84 @@ func (p *Pool) ClearFreeTier(id string) {
 // free_tier.block_duration, and a parked exit is not picked at all.
 const gatePassTTL = 30 * time.Minute
 
+// gateScore bookkeeping: one admission is worth less than one drop, because the
+// two are not symmetric evidence. An admission says "the gate let this exit in
+// and the request completed"; a drop says "the gate let it in and the stream
+// died under the client". The pool can recover from a missed admission (the next
+// pick costs one attempt) but a drop costs the client a visible stall.
+const (
+	gateScorePass = 2
+	gateScoreDrop = 3
+	gateScoreMax  = 16
+	gateScoreMin  = -8
+	// gateGoodScore is the "this exit has carried requests" line: four net
+	// admissions. It sets both the top weighting bucket and the bar for retrying
+	// an exit whose admission TTL lapsed.
+	gateGoodScore = 8
+)
+
+// gateWeight is how many times an admitted exit's ID appears in the pass-tier
+// candidate list, i.e. its share of picks among the admitted exits.
+//
+// Three shares, not a continuous weight: with four to six admitted exits a finer
+// gradient buys nothing measurable, while three buckets are easy to reason about
+// in an incident ("is this exit good, neutral, or bad right now"). A fresh
+// admission with no history is neutral rather than excluded — otherwise a newly
+// discovered exit could never be measured.
+func gateWeight(score int) int {
+	switch {
+	case score >= gateGoodScore:
+		return 3
+	case score >= 0:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// MarkGateDrop records that an admitted exit failed to carry the request
+// through: the upstream stream ended without a completed response, or a
+// transport failure hit this exit on a gated request.
+//
+// This is the counterweight to MarkGatePass, and it is the one that keeps the
+// pass tier from becoming self-defeating: without it every admitted exit looks
+// equally good forever, and the pool keeps rotating the client onto the tunnel
+// that kills one stream in three.
+func (p *Pool) MarkGateDrop(id, reason string) {
+	if id == "" {
+		return
+	}
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return
+	}
+	m.mu.Lock()
+	if m.retired {
+		m.mu.Unlock()
+		return
+	}
+	// Only exits the gate has ever admitted are ranked: a drop on an exit outside
+	// the admission set says nothing about a route the pool would take, and
+	// letting those drift to the score floor would make the panel's column
+	// meaningless for 1,600 exits that never carry a free request.
+	if m.gatePassUntil.IsZero() {
+		m.mu.Unlock()
+		return
+	}
+	m.gateDrops++
+	m.gateScore -= gateScoreDrop
+	if m.gateScore < gateScoreMin {
+		m.gateScore = gateScoreMin
+	}
+	score, drops := m.gateScore, m.gateDrops
+	m.mu.Unlock()
+	p.markDirty()
+	p.log.Debug("free-tier admitted exit dropped the request", "exit", id,
+		"reason", reason, "score", score, "drops", drops)
+}
+
 // MarkGatePass records that the free-tier gate admitted this exit for an
 // enveloped request. It is the pool's only positive gate signal — see
 // member.gatePassUntil for the measurement that makes it worth having.
@@ -1286,14 +1421,18 @@ func (p *Pool) MarkGatePass(id string) {
 		return
 	}
 	m.gatePasses++
+	m.gateScore += gateScorePass
+	if m.gateScore > gateScoreMax {
+		m.gateScore = gateScoreMax
+	}
 	m.gatePassUntil = now.Add(gatePassTTL)
-	passes := m.gatePasses
+	passes, score := m.gatePasses, m.gateScore
 	m.mu.Unlock()
 	p.markDirty()
 	// Logged at Debug: this fires on every successful free-tier request, and at
 	// Info it would out-shout the refusals that need attention.
 	p.log.Debug("free-tier gate admitted this exit", "exit", id,
-		"passes", passes, "until", now.Add(gatePassTTL).Format(time.RFC3339))
+		"passes", passes, "score", score, "until", now.Add(gatePassTTL).Format(time.RFC3339))
 }
 
 // GatePassing reports whether id is currently a gate passer, and its lifetime
@@ -1664,6 +1803,8 @@ func (p *Pool) Health() []model.ProxyHealth {
 			// Only the live ones: an expired admission is history, and the
 			// panel exists to answer "who can serve free models NOW".
 			GatePasses: m.gatePasses,
+			GateScore:  m.gateScore,
+			GateDrops:  m.gateDrops,
 		}
 		if !m.gatePassUntil.IsZero() && time.Now().Before(m.gatePassUntil) {
 			t := m.gatePassUntil
