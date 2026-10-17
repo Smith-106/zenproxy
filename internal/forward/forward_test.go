@@ -116,6 +116,7 @@ func TestTransientTransportKeepsAffinityCandidates(t *testing.T) {
 		{"read: unexpected EOF", true},
 		{"write: connection reset by peer", true},
 		{"i/o timeout", true},
+		{`Post "https://opencode.ai/inference/v1/responses": proxyconnect tcp: dial tcp 10.0.0.1:3129: i/o timeout`, false},
 		{"x509: certificate is not valid for any names", false},
 		{"socks5: general failure", false},
 		{"tls: failed to verify certificate", false},

@@ -213,9 +213,20 @@ func (r *Registry) exitForSession(accountID, sessionID, model string, preferGate
 					// a 30m admission does expire, and the exit may have been
 					// refused since the session was bound to it.
 					passing, _ := r.pool.GatePassing(bound)
-					if !passing || r.pool.FreeTierBlocked(bound) {
-						if alt := r.pool.PickForAccountGated(accountID, model, "", true); alt != nil {
-							if altPassing, _ := r.pool.GatePassing(alt.ID); altPassing {
+					blocked := r.pool.FreeTierBlocked(bound)
+					// Still healthy (under the failure threshold) but the last
+					// real request could not dial. Keeping the pin here is how
+					// a session spends every attempt on a proxy that is timing
+					// out, while the exit never quite gets quarantined.
+					sick := r.pool.RequestSick(bound)
+					if !passing || blocked || sick {
+						if alt := r.pool.PickForAccountGated(accountID, model, bound, true); alt != nil {
+							altPassing, _ := r.pool.GatePassing(alt.ID)
+							// Move for a live admission always. Also move off an
+							// exit that just failed to carry a request, or is
+							// parked, even when nobody else is currently admitted:
+							// staying put only repeats the failure.
+							if altPassing || sick || blocked {
 								r.sessions.Set(accountID, sessionID, model, alt.ID)
 								r.setBinding(accountID, alt.ID)
 								r.pool.Bind(alt.ID, accountID)

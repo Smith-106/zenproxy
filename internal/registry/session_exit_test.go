@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"zenproxy/internal/config"
 	"zenproxy/internal/model"
+	"zenproxy/internal/proxypool"
 )
 
 // TestSessionFileSyncSharesPinsAcrossReplicas is the contract that keeps the
@@ -177,6 +179,33 @@ func TestRotateForSessionRebinds(t *testing.T) {
 	got := r.ExitForSession("zen-01", "pfx_rot", "muse-spark")
 	if got == nil || got.ID != repl.ID {
 		t.Fatalf("session did not follow rotate: got %v want %s", got, repl.ID)
+	}
+}
+
+// One proxyconnect timeout is under failure_threshold, so the exit stays
+// healthy and the old pin would keep a gated session on it. That pin has to
+// move: repeating the dial is an 8s timeout, not a cached conversation.
+func TestGatedSessionLeavesDialSickExit(t *testing.T) {
+	pool, err := proxypool.NewPool([]proxypool.Spec{
+		{ID: "a", URL: "http://127.0.0.1:9"},
+		{ID: "b", URL: "http://127.0.0.1:9"},
+		{ID: "c", URL: "http://127.0.0.1:9"},
+	}, config.Health{Timeout: time.Second, FailureThreshold: 3, Quarantine: time.Minute, MaxBackoff: time.Minute}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatal(err)
+	}
+	if !r.BindSession("zen-01", "pfx_sick", "muse-spark-1.2-contributor-free", "a") {
+		t.Fatal("pin refused")
+	}
+	pool.MarkFailure("a", `Post "https://opencode.ai/inference/v1/responses": proxyconnect tcp: dial tcp 10.0.0.1:3129: i/o timeout`)
+	px := r.ExitForSessionGated("zen-01", "pfx_sick", "muse-spark-1.2-contributor-free")
+	if px == nil || px.ID == "a" {
+		t.Fatalf("gated session stayed on a dial-sick exit: %v", px)
 	}
 }
 

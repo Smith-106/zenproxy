@@ -862,12 +862,21 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		fails := m.failures
 		gatePass := !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil)
 		gateScoreVal := m.gateScore
+		consec := m.consecFails
+		lastErr := m.lastErr
 		// proven is the pool's own verdict that this exit has carried free-tier
 		// traffic, independent of the 30-minute admission TTL and of probe health:
 		// without it a proven exit becomes invisible to gated requests the moment
 		// its admission lapses or a probe fails, which is how the whole admitted
 		// set disappeared once (four exits retired, two lapsed, nothing left).
 		proven := gateScoreVal >= gateGoodScore
+		// A probe failure is blind to the gate, so it must not hide an exit the
+		// gate is serving. A real request failure is the opposite: this exit
+		// just failed to carry traffic. Leaving it in a front tier is how four
+		// dead proxies absorbed 281 attempts and zero admissions in one window
+		// (2026-10-17 21:09) — each dial timed out, quarantine put them in the
+		// impaired tier, and the next gated pick took them straight back.
+		requestSick := consec > 0 && !probeQuarantineReason(lastErr)
 		// A measured-slow exit is demoted, not discarded: with a pool made of
 		// unreliable nodes, "slow but answering" still beats "nothing".
 		// Unmeasured exits (latency 0) always count as fast, so a freshly
@@ -900,7 +909,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// is the worse of the two, and quarantine is the signal that lasts
 			// until proven otherwise. The one exception is an admitted exit on a
 			// gated request — see PickForAccountGated.
-			if gated && (gatePass || proven) && !ft {
+			if gated && (gatePass || proven) && !ft && !requestSick && probeQuarantineReason(lastErr) {
 				gatePassersImpaired = append(gatePassersImpaired, m)
 			}
 			quarantined = append(quarantined, m)
@@ -920,18 +929,18 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// non-gated decision, and a refusal still re-arms the park, so a
 			// genuinely dead passer cannot be hammered: the red-window fast-fail
 			// bounds each request.
-			if gated && (gatePass || proven) {
+			if gated && (gatePass || proven) && !requestSick {
 				gatePassersParked = append(gatePassersParked, m)
 			}
 			cooled = append(cooled, m)
 		case reg:
 			region = append(region, m)
 		case h && !slow:
-			if gatePass {
+			if gatePass && !requestSick {
 				for i := gateWeight(gateScoreVal); i > 0; i-- {
 					gatePassers = append(gatePassers, m)
 				}
-			} else if gated && proven && !ft && !cool {
+			} else if gated && proven && !ft && !cool && !requestSick {
 				// Admission lapsed, reputation did not. The admission TTL is 30
 				// minutes, which is short compared with how long an IP stays
 				// clean — measured 2026-10-17, two of the six admitted exits
@@ -953,7 +962,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 			// a few probe failures on a tunnel the gate is still admitting. Keep
 			// them as gated candidates behind the healthy admissions instead of
 			// dropping to an exit the gate has never admitted.
-			if gated && (gatePass || proven) && !ft && !cool && !reg {
+			if gated && (gatePass || proven) && !ft && !cool && !reg && !requestSick && probeQuarantineReason(lastErr) {
 				gatePassersImpaired = append(gatePassersImpaired, m)
 			}
 			if taken {
@@ -1425,6 +1434,30 @@ func gateWeight(score int) int {
 	default:
 		return 1
 	}
+}
+
+// probeQuarantineReason reports a failure recorded by the health probe. The
+// probe never speaks the free-tier gate, so it is not evidence that an exit
+// the gate has admitted cannot carry a request. A real forward failure
+// (proxyconnect, a folded stream, an upstream Post error) is that evidence.
+func probeQuarantineReason(reason string) bool {
+	lower := strings.ToLower(strings.TrimSpace(reason))
+	return strings.HasPrefix(lower, "unreachable:") || strings.HasPrefix(lower, "tls:")
+}
+
+// RequestSick reports that this exit's latest failure was a real request, not
+// a probe, and has not been cleared by a success since. Gated picks leave such
+// an exit out of every front tier until that happens.
+func (p *Pool) RequestSick(id string) bool {
+	p.mu.RLock()
+	m, ok := p.byID[id]
+	p.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.consecFails > 0 && !probeQuarantineReason(m.lastErr)
 }
 
 // MarkGateDrop records that an admitted exit failed to carry the request

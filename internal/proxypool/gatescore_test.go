@@ -283,6 +283,37 @@ func TestProvenExitIsQuarantinedNotRetired(t *testing.T) {
 // A proven exit whose admission lapsed must stay reachable for gated requests
 // even when a probe has it degraded or quarantined: the pool's own admission
 // history outranks a probe that never speaks the gate.
+// A real dial failure is not a probe false-negative. Measured 2026-10-17 21:09:
+// the four revived exits absorbed 281 transport attempts and completed zero,
+// because quarantine put them in the impaired tier and the next gated pick
+// took them straight back. After a proxyconnect failure they must leave the
+// front of the queue.
+func TestRequestDialFailureLeavesTheGatedFront(t *testing.T) {
+	pool := createTestPool(t, 6, config.Health{FailureThreshold: 3,
+		Quarantine: 10 * time.Minute, MaxBackoff: time.Minute})
+	for i := 0; i < 6; i++ {
+		pool.MarkGatePass("a")
+	}
+	pool.MarkFailure("a", `Post "https://opencode.ai/inference/v1/responses": proxyconnect tcp: dial tcp 10.0.0.1:3129: i/o timeout`)
+	if !pool.RequestSick("a") {
+		t.Fatal("a dial timeout was not recorded as a request failure")
+	}
+	if ok, _ := pool.Healthy("a"); !ok {
+		t.Fatal("precondition: one failure is under the threshold, a stays healthy")
+	}
+	seen := map[string]int{}
+	for i := 0; i < 20; i++ {
+		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)
+		if px == nil {
+			t.Fatal("nil pick")
+		}
+		seen[px.ID]++
+	}
+	if seen["a"] == 20 {
+		t.Fatalf("a dial-sick exit still took every gated pick: %v", seen)
+	}
+}
+
 func TestProvenExitStaysVisibleWithoutLiveAdmission(t *testing.T) {
 	pool := createTestPool(t, 6, config.Health{FailureThreshold: 1,
 		Quarantine: 10 * time.Minute, MaxBackoff: time.Minute})
@@ -295,7 +326,7 @@ func TestProvenExitStaysVisibleWithoutLiveAdmission(t *testing.T) {
 	m.mu.Lock()
 	m.gatePassUntil = time.Time{} // admission lapsed
 	m.mu.Unlock()
-	pool.MarkFailure("c", "probe: dial tcp: i/o timeout") // and now degraded
+	pool.MarkFailure("c", "unreachable: dial tcp: i/o timeout") // probe, not a real request
 
 	for i := 0; i < 10; i++ {
 		px := pool.PickForAccountGated("", "muse-spark-1.2-contributor-free", "", true)

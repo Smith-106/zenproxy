@@ -544,7 +544,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 						"account", ent.ID, "exit", exitID, "attempt", attempt)
 					continue
 				}
-					if gated {
+				if gated {
 					e.reg.RotateForSessionGated(ent.ID, sessionID, exitID, askedModel)
 				} else {
 					e.reg.RotateForSession(ent.ID, sessionID, exitID, askedModel)
@@ -1504,6 +1504,12 @@ func isTransientTransport(err error) bool {
 		return false
 	}
 	if strings.Contains(lower, "socks5: host unreachable") {
+		return false
+	}
+	// Dialing the proxy port itself timed out or was refused. That is the
+	// exit, not a one-packet blip on a live tunnel: retrying it spends another
+	// full dial timeout (8s) before rotation is even allowed to start.
+	if strings.Contains(lower, "proxyconnect") {
 		return false
 	}
 	switch {
