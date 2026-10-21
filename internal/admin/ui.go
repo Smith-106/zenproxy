@@ -398,8 +398,8 @@ function renderExits(list) {
       state += ' <span class="pill ok" title="免费模型现在会挑它。别的出口看起来一样健康，但这次还没被准入">可走免费</span>';
     }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
-    if (e.peer_retired) state += ' <span class="pill warn" title="另一份状态文件里它已经退役。这边还在轮换">另一副本已退役</span>';
-    if (e.peer_keeps) state += ' <span class="pill warn" title="这边已经退役，另一份状态文件里它还在轮换">另一副本还在用</span>';
+    if (e.peer_retired) state += ' <span class="pill warn" title="' + esc(peerRetiredTitle(e)) + '">另一副本已退役</span>';
+    if (e.peer_keeps) state += ' <span class="pill warn" title="这边已经退役。另一边还没退役，挑选时会把它排在干净出口后面">另一副本还在用</span>';
     const act = [];
     if (e.retired) {
       act.push('<button onclick="reviveExit(\'' + esc(e.id) + '\')">恢复</button>');
@@ -496,6 +496,11 @@ function exitIPCell(e) {
   const note = exitIPWord(e.exit_ip_note);
   const title = note ? ' title="' + esc(note) + '"' : '';
   return '<code' + title + '>' + esc(ip) + '</code>';
+}
+function peerRetiredTitle(e) {
+  if (e.quarantined_until) return '另一份状态文件里它已经退役。这边隔离中，现在不参与轮换';
+  if (e.healthy) return '另一份状态文件里它已经退役。这边还健康，但排在干净出口后面';
+  return '另一份状态文件里它已经退役。这边不健康，排在干净出口后面';
 }
 function peerBit(e) {
   const parts = [];
