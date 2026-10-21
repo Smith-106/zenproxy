@@ -313,7 +313,7 @@ function renderExits(list) {
       '<td class="muted" title="上游返回了响应（429/5xx）：出口本身没坏，只换了绑定">' + (e.soft_failures || 0) + '</td>' +
       '<td class="muted">' + (e.retired ? '—' : ((q && q > new Date()) ? q.toLocaleTimeString() : '—')) + '</td>' +
       '<td class="muted">' + esc((e.bound_accounts || []).join(', ') || '—') + '</td>' +
-      '<td class="muted">' + esc(e.last_error || '—') + '</td>' +
+      '<td class="muted" title="' + esc(scrubReason(e.last_error || '')) + '">' + esc(shortReason(e.last_error)) + '</td>' +
       '<td>' + act.join(' ') + '</td>' +
     '</tr>';
   }).join('');
@@ -347,25 +347,54 @@ function regionCell(e) {
     models.length + ' 个模型受限</span>';
 }
 
-// 一次上游失败会被归进哪一类，直接决定了代理的动作：换出口只对
-// transport / proxy_auth / rate_limit / server 有效，auth 是钥匙的问题，
-// tier_gate 是客户端身份的问题——这两类换多少个 IP 都没用。
+// 类别决定下一步，面板上的这句话要和代码一致：
+// transport / proxy_auth / rate_limit / server / region / tier_gate / policy_gate 会换出口；
+// auth 和 client 换多少个 IP 都没用。
 const CLASS_ZH = {
   ok: ['ok', '成功'], transport: ['warn', '链路故障'], proxy_auth: ['bad', '出口 407'],
   rate_limit: ['warn', '被限流'], server: ['warn', '上游 5xx'], auth: ['bad', '钥匙无效'],
-  tier_gate: ['bad', '额度门禁'], client: ['bad', '请求有误'],
+  tier_gate: ['bad', '额度门禁'], region: ['warn', '地区拒绝'], policy_gate: ['warn', '出口被风控'],
+  client: ['bad', '请求有误'],
   cancelled: ['muted', '已取消'], unknown: ['muted', '未知'],
 };
 function classPill(cls) {
   if (!cls) return '<span class="muted">—</span>';
   const m = CLASS_ZH[cls] || ['muted', cls];
   const tip = cls === 'tier_gate'
-    ? '免费额度的客户端身份门禁（FreeTierError）：换出口、换账号都解决不了，看免费额度区'
+    ? '免费门禁（FreeTierError）。套壳之后仍可能是某一个出口的问题，所以会再换一两个出口，然后才把上游原文交回去'
     : cls === 'auth'
     ? '401/403 且是钥匙的形状：检查这个账号的 key，不是出口的问题'
-    : cls === 'rate_limit' ? '429：账号级配额问题，只换绑定不隔离出口' : '';
+    : cls === 'region'
+    ? '这个模型在该出口的国家不可用。只对这个模型换出口，出口本身还能服务别的模型'
+    : cls === 'policy_gate'
+    ? '上游按出口 IP 做了风控。换出口有用，连续几次会把这个出口隔离'
+    : cls === 'rate_limit' ? '429：账号或出口额度问题。有重置时刻就等，否则换绑定' : '';
   return '<span class="pill ' + m[0] + '" title="' + esc(tip) + '">' + esc(m[1]) +
          ' <code>' + esc(cls) + '</code></span>';
+}
+function scrubReason(msg) {
+  if (!msg) return '';
+  return String(msg)
+    .replace(/[^\s\/@]+:[^\s\/@]+@/g, '')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, '<exit>');
+}
+function shortReason(msg) {
+  const raw = scrubReason(msg);
+  if (!raw) return '—';
+  const low = raw.toLowerCase();
+  if (low.indexOf('proxyconnect') >= 0 || low.indexOf('socks5:') >= 0 || low.indexOf('i/o timeout') >= 0 || low.indexOf('connection refused') >= 0 || low.indexOf('no such host') >= 0)
+    return '出口连不上游';
+  if (low.indexOf('certificate') >= 0 || low.indexOf('tls:') >= 0)
+    return '出口 TLS 失败';
+  if (low.indexOf('freetiererror') >= 0 || low.indexOf('only be used from within opencode') >= 0)
+    return '免费门禁';
+  if (low.indexOf('policy violation') >= 0)
+    return '出口被风控';
+  if (low.indexOf('regionerror') >= 0 || low.indexOf('not available in your country') >= 0)
+    return '地区拒绝';
+  let s = raw.replace(/^Post "[^"]*":\s*/, '');
+  if (s.length > 72) s = s.slice(0, 72) + '…';
+  return s;
 }
 
 function fmtTime(v) {
@@ -394,8 +423,8 @@ function renderAccounts(list) {
       '<td>' + (st.requests || 0) + '</td>' +
       '<td>' + (st.failures || 0) + '</td>' +
       '<td>' + (st.rotations || 0) + '</td>' +
-      '<td class="muted" title="' + esc(st.last_error || '') + '">' +
-        esc((st.last_error || '—').slice(0, 42)) + '</td>' +
+      '<td class="muted" title="' + esc(scrubReason(st.last_error || '')) + '">' +
+        esc(shortReason(st.last_error)) + '</td>' +
       '<td style="white-space:normal">' +
         '<button onclick="fillAccount(\'' + esc(a.id) + '\')">编辑</button> ' +
         '<button onclick="toggleAccount(\'' + esc(a.id) + '\')">' + (a.enabled ? '禁用' : '启用') + '</button> ' +

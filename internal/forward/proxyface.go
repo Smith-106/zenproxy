@@ -138,11 +138,11 @@ func (e *Engine) tunnel(w http.ResponseWriter, r *http.Request, ent *registry.En
 		}
 	}
 	if conn == nil {
-		msg := "no exit could reach " + target
+		code, why := clientFacingFailure("")
 		if lastEr != nil {
-			msg += ": " + lastEr.Error()
+			code, why = clientFacingFailure(lastEr.Error())
 		}
-		writeJSONError(w, http.StatusBadGateway, msg)
+		writeJSONErrorCode(w, http.StatusBadGateway, code, "no exit could reach "+target+": "+why)
 		return
 	}
 	defer conn.Close()
@@ -263,6 +263,7 @@ func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *re
 		cancel()
 		return
 	}
-	writeJSONError(w, http.StatusBadGateway,
-		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", attempts, ent.ID, lastMsg))
+	code, why := clientFacingFailure(lastMsg)
+	writeJSONErrorCode(w, http.StatusBadGateway, code,
+		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", attempts, ent.ID, why))
 }

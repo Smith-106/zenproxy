@@ -43,6 +43,9 @@ func TestWriteFoldedReportsAFailedFoldAsBadGateway(t *testing.T) {
 		if env.Error.Type != "zenproxy_error" || env.Error.Message == "" {
 			t.Errorf("surface %d: envelope = %+v", s, env.Error)
 		}
+		if rec.Header().Get("X-Zen-Error") != "upstream_fold" {
+			t.Errorf("surface %d: X-Zen-Error = %q", s, rec.Header().Get("X-Zen-Error"))
+		}
 	}
 }
 

@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### 修复（2026-10-21：控制台的失败原因不再是拨号串的前 42 个字）
+
+- 账号表把 `last_error` 截成 42 字，看到的永远是 `Post "https://opencode.ai/inference/v1/re`。
+  现在显示成一句人话（出口连不上游、TLS 失败、免费门禁、地区拒绝、出口被风控），
+  悬停全文会去掉代理账密和 IP。`region` 和 `policy_gate` 也有了自己的标签，
+  不再落到未知类。
+
+### 修复（2026-10-21：上游原文交回去时也带上失败类别）
+
+- 轮换停下来、把上游的 429/403/5xx 原样交回时，响应头带 `X-Zen-Error`
+  （`rate_limit`、`tier_gate`、`auth`、`region`、`policy_gate`、`server`、`client`）。
+  正文仍是上游自己的话。流被折断时，502 和已经发出的 SSE 错误事件用
+  `upstream_fold`，并且同样不带出口地址。
+
+### 修复（2026-10-21：失败回给调用方的是原因，不是出口地址）
+
+- 出口耗尽时，客户端拿到的 JSON 带稳定的 `error.code`（`exit_unreachable` /
+  `exit_tls` / `exit_auth` / `upstream_failed`）和 `X-Zen-Error`。正文不再带
+  `dial tcp <ip>:port` 或代理账密。完整拨号错误仍只留在服务端日志里，供下一跳
+  （new-api、CPA、pi）直接显示这句原因。
+
 ### 修复（2026-10-21：免费模型不再把 35 秒空挂交给客户端）
 
 - 套壳请求等响应头的上限从 30 秒降到 8 秒。30 秒刚好超过客户端 35 秒的预算：

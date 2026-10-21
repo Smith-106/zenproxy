@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -624,15 +625,11 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 						}
 					}
 					if hdrSent {
-						payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
-						w.Header().Set("Content-Type", "text/event-stream")
-						w.WriteHeader(http.StatusOK)
-						_, _ = w.Write([]byte("data: "))
-						_, _ = w.Write(payload)
-						_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+						var flusher http.Flusher
 						if f, ok := w.(http.Flusher); ok {
-							f.Flush()
+							flusher = f
 						}
+						writeSSEError(w, flusher, "upstream_fold", foldErr)
 						cancel()
 						return
 					}
@@ -645,7 +642,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 							continue
 						}
 					}
-					writeJSONError(w, http.StatusBadGateway, foldErr)
+					writeFoldTerminal(w, foldErr)
 					cancel()
 					return
 				}
@@ -678,7 +675,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 							continue
 						}
 					}
-					writeJSONError(w, http.StatusBadGateway, foldErr)
+					writeFoldTerminal(w, foldErr)
 					cancel()
 					return
 				}
@@ -771,7 +768,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if tierGateFails >= 2 {
 				e.log.Info("free-tier red window: fast-failing after capped attempts",
 					"account", ent.ID, "exit", exitID, "refusals", tierGateFails)
-				writeUpstreamResponse(w, resp, errBody)
+				writeUpstreamResponse(w, resp, errBody, class)
 				cancel()
 				return
 			}
@@ -801,7 +798,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// account, or another account entirely.
 			nextCand, ok := ch.next(ent, class, exitID, askedModel, sessionID)
 			if !ok {
-				writeUpstreamResponse(w, resp, errBody)
+				writeUpstreamResponse(w, resp, errBody, class)
 				cancel()
 				return
 			}
@@ -809,14 +806,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			cancel()
 			continue
 		}
-		writeUpstreamResponse(w, resp, errBody)
+		writeUpstreamResponse(w, resp, errBody, class)
 		cancel()
 		return
 	}
 
 	e.reg.Record(cur.ent.ID, model.ClassTransport, errors.New(lastMsg))
-	writeJSONError(w, http.StatusBadGateway,
-		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", maxAttempts, cur.ent.ID, lastMsg))
+	code, why := clientFacingFailure(lastMsg)
+	writeJSONErrorCode(w, http.StatusBadGateway, code,
+		fmt.Sprintf("all %d attempt(s) failed for account %s: %s", maxAttempts, cur.ent.ID, why))
 }
 
 // stormFallbackThreshold is how many straight transport-class failures within
@@ -1124,13 +1122,11 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 	resp.Body.Close()
 	if err != nil {
 		if hdrSent {
-			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"failed to read the upstream stream\",\"type\":\"api_error\"}}\n\ndata: [DONE]\n\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
+			writeSSEError(w, flusher, "upstream_fold", "failed to read the upstream stream")
 			return
 		}
-		writeJSONError(w, http.StatusBadGateway, "failed to read the upstream stream: "+err.Error())
+		code, why := clientFacingFailure(err.Error())
+		writeJSONErrorCode(w, http.StatusBadGateway, code, "failed to read the upstream stream: "+why)
 		return
 	}
 	s := surfaceChat
@@ -1161,48 +1157,30 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 			}
 		}
 		if hdrSent {
-			payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": foldErr, "type": "api_error"}})
-			_, _ = w.Write([]byte("data: "))
-			_, _ = w.Write(payload)
-			_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
+			writeSSEError(w, flusher, "upstream_fold", foldErr)
 			return
 		}
-		writeJSONError(w, http.StatusBadGateway, foldErr)
+		writeFoldTerminal(w, foldErr)
 		return
 	}
 	if plan != nil && plan.ReplyAsChat {
 		chatJSON, convErr := responsesToChatCompletion(out)
 		if convErr != nil {
 			if hdrSent {
-				payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "failed to convert responses reply to chat: " + convErr.Error(), "type": "api_error"}})
-				_, _ = w.Write([]byte("data: "))
-				_, _ = w.Write(payload)
-				_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
-				if flusher != nil {
-					flusher.Flush()
-				}
+				writeSSEError(w, flusher, "upstream_fold", "failed to convert responses reply to chat: "+convErr.Error())
 				return
 			}
-			writeJSONError(w, http.StatusBadGateway, "failed to convert responses reply to chat: "+convErr.Error())
+			writeJSONErrorCode(w, http.StatusBadGateway, "upstream_fold", "failed to convert responses reply to chat: "+scrubClientText(convErr.Error()))
 			return
 		}
 		if plan.Stream {
 			sse, sseErr := chatCompletionToSSE(chatJSON)
 			if sseErr != nil {
 				if hdrSent {
-					payload, _ := json.Marshal(map[string]any{"error": map[string]string{"message": "failed to stream converted chat reply: " + sseErr.Error(), "type": "api_error"}})
-					_, _ = w.Write([]byte("data: "))
-					_, _ = w.Write(payload)
-					_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
-					if flusher != nil {
-						flusher.Flush()
-					}
+					writeSSEError(w, flusher, "upstream_fold", "failed to stream converted chat reply: "+sseErr.Error())
 					return
 				}
-				writeJSONError(w, http.StatusBadGateway, "failed to stream converted chat reply: "+sseErr.Error())
+				writeJSONErrorCode(w, http.StatusBadGateway, "upstream_fold", "failed to stream converted chat reply: "+scrubClientText(sseErr.Error()))
 				return
 			}
 			_, _ = w.Write(sse)
@@ -1438,12 +1416,36 @@ func readAllKeepalive(r io.Reader, limit int64, every time.Duration, onTick func
 	return io.ReadAll(io.LimitReader(r, limit))
 }
 
-// writeUpstreamResponse replays a buffered error response verbatim.
-func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+// writeUpstreamResponse replays a buffered error response verbatim and stamps
+// the class we already computed. The body stays the upstream's own words —
+// the next hop still has the vendor sentence — but X-Zen-Error tells it
+// whether to retry, rotate, or stop without parsing that sentence.
+func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte, class model.ErrorClass) {
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
+	if class != "" && class != model.ClassOK {
+		w.Header().Set("X-Zen-Error", string(class))
+	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func writeFoldTerminal(w http.ResponseWriter, foldErr string) {
+	writeJSONErrorCode(w, http.StatusBadGateway, "upstream_fold", scrubClientText(foldErr))
+}
+
+func writeSSEError(w http.ResponseWriter, flusher http.Flusher, code, msg string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]string{
+		"message": scrubClientText(msg),
+		"type":    "api_error",
+		"code":    code,
+	}})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+	if flusher != nil {
+		flusher.Flush()
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1836,9 +1838,62 @@ func inboundSessionID(h http.Header, body []byte) string {
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	writeJSONErrorCode(w, status, "", msg)
+}
+
+// writeJSONErrorCode is the client-facing envelope. code is a stable token the
+// next hop can branch on; an empty code keeps the older two-field shape.
+func writeJSONErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	if code != "" {
+		w.Header().Set("X-Zen-Error", code)
+	}
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":{"type":"zenproxy_error","message":%q}}`, msg)
+	if code == "" {
+		fmt.Fprintf(w, `{"error":{"type":"zenproxy_error","message":%q}}`, msg)
+		return
+	}
+	fmt.Fprintf(w, `{"error":{"type":"zenproxy_error","code":%q,"message":%q}}`, code, msg)
+}
+
+var (
+	clientIPv4     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
+	clientUserinfo = regexp.MustCompile(`[^\s/@]+:[^\s/@]+@`)
+)
+
+// clientFacingFailure is what the caller is allowed to see after the exits
+// are exhausted. The raw dial error stays in the log: it names the exit
+// address and, on some dialers, the proxy userinfo. The next hop (new-api,
+// CPA, pi) prints this string, so it has to be a reason, not a socket dump.
+func clientFacingFailure(msg string) (code, text string) {
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "proxyconnect") || strings.Contains(lower, "socks5:"):
+		return "exit_unreachable", "the exit could not reach the upstream"
+	case strings.Contains(lower, "certificate") || strings.Contains(lower, "tls:"):
+		return "exit_tls", "the exit failed the TLS handshake"
+	case strings.Contains(lower, "authentication required") || strings.Contains(lower, "proxy auth"):
+		return "exit_auth", "the exit rejected the proxy credentials"
+	case strings.Contains(lower, "i/o timeout") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host") || strings.Contains(lower, "network is unreachable"):
+		return "exit_unreachable", "the exit could not reach the upstream"
+	case strings.TrimSpace(msg) == "":
+		return "exit_unreachable", "the exit could not reach the upstream"
+	default:
+		return "upstream_failed", scrubClientText(msg)
+	}
+}
+
+func scrubClientText(msg string) string {
+	msg = clientUserinfo.ReplaceAllString(msg, "")
+	msg = clientIPv4.ReplaceAllString(msg, "<exit>")
+	msg = strings.Join(strings.Fields(msg), " ")
+	if msg == "" {
+		return "the upstream did not answer"
+	}
+	if len(msg) > 180 {
+		msg = msg[:180] + "…"
+	}
+	return msg
 }
 
 // WriteError emits the JSON error envelope shared by every ingress.
