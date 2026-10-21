@@ -491,6 +491,15 @@ function exitIPWord(note) {
   if (note.indexOf('status ') === 0) return '隧道是通的，地址探测返回 ' + note.slice(7);
   return '隧道是通的，这次没问到出口地址';
 }
+function boundFlags(a) {
+  const bits = [];
+  if (a.bound_slow) bits.push('<span class="pill warn" title="绑定的出口延迟超过上限，挑选时靠后">偏慢</span>');
+  if (a.bound_gate) bits.push('<span class="pill ok" title="绑定的出口正在被免费模型使用">可走免费</span>');
+  if (a.bound_prunable) bits.push('<span class="pill warn" title="下一次清理会把这个账号正在用的出口移出轮换">可清理</span>');
+  if (a.bound_quarantine) bits.push('<span class="pill bad" title="绑定的出口在隔离，现在不参与轮换">隔离中</span>');
+  if (a.bound_peer_retired) bits.push('<span class="pill warn" title="绑定的出口在另一副本已退役，这边排在干净出口后面">另一副本已退役</span>');
+  return bits.join(' ');
+}
 function accountIPCell(a) {
   if (!a.bound_exit) return '<code>—</code>';
   return exitIPCell({exit_ip: a.bound_exit_ip, exit_ip_note: a.bound_exit_ip_note});
@@ -581,7 +590,7 @@ function renderAccounts(list) {
       '<td>' + esc(a.upstream) + '</td>' +
       '<td><code>' + esc(a.key_hint || '未设置') + '</code></td>' +
       '<td><code>' + esc(a.proxy || 'auto') + '</code></td>' +
-      '<td><code>' + esc(a.bound_exit || '直连') + '</code></td>' +
+      '<td><code>' + esc(a.bound_exit || '直连') + '</code> ' + boundFlags(a) + '</td>' +
       '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) + '</td>' +

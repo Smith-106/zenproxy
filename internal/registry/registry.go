@@ -69,20 +69,27 @@ type Entry struct {
 
 // View is the API-safe projection of an account: no credentials.
 type View struct {
-	ID              string            `json:"id"`
-	Name            string            `json:"name,omitempty"`
-	Upstream        string            `json:"upstream"`
-	Pool            string            `json:"pool"`
-	Enabled         bool              `json:"enabled"`
-	Proxy           string            `json:"proxy"`
-	Weight          int               `json:"weight"`
-	HasKey          bool              `json:"has_key"`
-	KeyHint         string            `json:"key_hint,omitempty"`
-	BoundExit       string            `json:"bound_exit,omitempty"`
-	BoundExitIP     string            `json:"bound_exit_ip,omitempty"`
-	BoundExitIPNote string            `json:"bound_exit_ip_note,omitempty"`
-	Headers         map[string]string `json:"headers,omitempty"`
-	Stats           model.Stats       `json:"stats"`
+	ID              string `json:"id"`
+	Name            string `json:"name,omitempty"`
+	Upstream        string `json:"upstream"`
+	Pool            string `json:"pool"`
+	Enabled         bool   `json:"enabled"`
+	Proxy           string `json:"proxy"`
+	Weight          int    `json:"weight"`
+	HasKey          bool   `json:"has_key"`
+	KeyHint         string `json:"key_hint,omitempty"`
+	BoundExit       string `json:"bound_exit,omitempty"`
+	BoundExitIP     string `json:"bound_exit_ip,omitempty"`
+	BoundExitIPNote string `json:"bound_exit_ip_note,omitempty"`
+	// These repeat the bound exit's row marks. The account table is four rows;
+	// the exit table is the whole pool, and the marks were only on the exit.
+	BoundSlow        bool              `json:"bound_slow,omitempty"`
+	BoundGate        bool              `json:"bound_gate,omitempty"`
+	BoundPrunable    bool              `json:"bound_prunable,omitempty"`
+	BoundQuarantine  bool              `json:"bound_quarantine,omitempty"`
+	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
+	Headers          map[string]string `json:"headers,omitempty"`
+	Stats            model.Stats       `json:"stats"`
 }
 
 // Registry is the concurrency-safe account table.
@@ -350,6 +357,11 @@ func (r *Registry) viewLocked(e *Entry) View {
 			if h.ID == v.BoundExit {
 				v.BoundExitIP = h.ExitIP
 				v.BoundExitIPNote = h.ExitIPNote
+				v.BoundSlow = h.Slow
+				v.BoundGate = h.GatePassUntil != nil
+				v.BoundPrunable = h.Prunable
+				v.BoundQuarantine = h.QuarantinedTill != nil
+				v.BoundPeerRetired = h.PeerRetired
 				break
 			}
 		}
