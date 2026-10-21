@@ -316,6 +316,10 @@ function renderExits(list) {
       const why = quarantineWord(e.quarantine_class);
       state = '<span class="pill bad" title="' + esc(why ? ('隔离原因：' + why) : '隔离中，原因还没探到') + '">隔离中' +
         (why ? ' · ' + esc(why) : '') + '</span>';
+    } else if (e.healthy && e.consecutive_failures > 0) {
+      const why = shortReason(e.last_error);
+      state = '<span class="pill warn" title="还在轮换里，再连续失败几次才会隔离">观察 · ' +
+        (why && why !== '—' ? esc(why) + ' ' : '') + e.consecutive_failures + ' 次</span>';
     } else if (e.healthy) {
       state = '<span class="pill ok">健康</span>';
     } else {
