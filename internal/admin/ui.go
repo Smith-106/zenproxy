@@ -411,18 +411,20 @@ function setExitFilter(id) {
 function renderExits(list) {
   cache.exits = list;
   exitFilterButtons(list);
-  const there = [];
-  const keeps = [];
-  for (const e of list) {
-    if (e.peer_retired) there.push(peerBit(e));
-    if (e.peer_keeps) keeps.push(esc(e.id));
-  }
   const peer = document.getElementById('peer_ids');
   if (peer) {
+    const there = list.filter(e => e.peer_retired).length;
+    const keeps = list.filter(e => e.peer_keeps).length;
+    const quota = list.filter(e => e.peer_quota).length;
+    const here = list.filter(e => e.peer_quota_here).length;
     const bits = [];
-    if (there.length) bits.push('另一副本已退役：' + there.join('，'));
-    if (keeps.length) bits.push('另一副本还在用：' + keeps.join('，'));
-    peer.innerHTML = bits.join('。');
+    if (there) bits.push('另一副本已退役 ' + there + ' 个');
+    if (keeps) bits.push('另一副本还在用 ' + keeps + ' 个');
+    if (quota) bits.push('另一副本在冷却、这边没有 ' + quota + ' 个');
+    if (here) bits.push('这边在冷却、另一边没有 ' + here + ' 个');
+    peer.textContent = bits.length
+      ? bits.join('，') + '。用上面的「两边不一致」看具体哪几条，这里不再把出口 ID 铺开。'
+      : '';
   }
   cache.pruneCount = list.filter(e => e.prunable && !e.retired).length;
   const btn = document.getElementById('prune_btn');
@@ -618,18 +620,11 @@ function exitIPCell(e) {
   return '<code' + title + '>' + esc(ip) + '</code>';
 }
 function peerRetiredTitle(e) {
-  if (e.quarantined_until) return '另一份状态文件里它已经退役。这边隔离中，现在不参与轮换';
-  if (e.healthy) return '另一份状态文件里它已经退役。这边还健康，但排在干净出口后面';
-  return '另一份状态文件里它已经退役。这边不健康，排在干净出口后面';
-}
-function peerBit(e) {
-  const parts = [];
   const word = quarantineWord(e.peer_retired_class);
-  if (word) parts.push(word);
-  if (e.quarantined_until) parts.push('这边隔离中');
-  else if (e.healthy) parts.push('这边仍健康，排在干净出口后面');
-  else if (!e.retired) parts.push('这边不健康');
-  return esc(e.id) + (parts.length ? '（' + parts.join('，') + '）' : '');
+  const why = word ? '另一边记下的是' + word + '。' : '';
+  if (e.quarantined_until) return why + '这边隔离中，现在不参与轮换';
+  if (e.healthy) return why + '这边还健康，但排在干净出口后面';
+  return why + '这边不健康，排在干净出口后面';
 }
 function quarantineWord(cls) {
   if (cls === 'timeout') return '超时';
