@@ -571,6 +571,11 @@ type Pool struct {
 
 	rr atomic.Uint64
 
+	// peerRetired is the other replica's retired set, refreshed from its state
+	// file. Picks read it without touching the disk. The map is replaced whole
+	// and never mutated.
+	peerRetired atomic.Value // map[string]struct{}
+
 	// outageMu guards the global-failure circuit breaker (see
 	// noteFailureOutcome). It is deliberately a leaf lock — never held while
 	// taking p.mu or a member lock — so MarkFailure's hold order
@@ -712,7 +717,9 @@ func NewPool(specs []Spec, hc config.Health, log *slog.Logger, statePath ...stri
 		p.members = append(p.members, m)
 		p.byID[s.ID] = m
 	}
+	p.peerRetired.Store(map[string]struct{}{})
 	p.loadState()
+	p.refreshPeerRetired()
 	return p, nil
 }
 
@@ -889,6 +896,12 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 		// added member is not starved before its first probe.
 		slow := p.health.MaxLatency > 0 && m.latencyMS > 0 &&
 			time.Duration(m.latencyMS)*time.Millisecond > p.health.MaxLatency
+		// The other replica already retired this exit for a dial failure. It
+		// can still answer here, so it stays usable, but it waits behind exits
+		// both replicas still accept. An active free-tier admission keeps its
+		// front seat: those exits are scarce, and none of the disagreed set
+		// was admitted when this was measured.
+		peerDead := p.peerHasRetired(m.ID)
 		// taken means some OTHER account is parked here. An empty accountID
 		// means the caller cannot say who is asking (the health panel, the
 		// forward ingress), and then nothing is taken: without an identity to
@@ -946,7 +959,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				for i := gateWeight(gateScoreVal); i > 0; i-- {
 					gatePassers = append(gatePassers, m)
 				}
-			} else if gated && proven && !ft && !cool && !requestSick {
+			} else if !peerDead && gated && proven && !ft && !cool && !requestSick {
 				// Admission lapsed, reputation did not. The admission TTL is 30
 				// minutes, which is short compared with how long an IP stays
 				// clean — measured 2026-10-17, two of the six admitted exits
@@ -957,7 +970,7 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				// exit costs one attempt and has a far better hit rate than the
 				// 0.4% lottery over never-admitted exits.
 				gatePassersLapsed = append(gatePassersLapsed, m)
-			} else if gated && gatePassesVal >= gateGoodScore && !ft && !cool && !requestSick {
+			} else if !peerDead && gated && gatePassesVal >= gateGoodScore && !ft && !cool && !requestSick {
 				// Score can be driven to the floor by a burst of drops or
 				// refusals and then the exit disappears into the 1,600-wide
 				// lottery. The pass count is the part that does not decay:
@@ -967,6 +980,14 @@ func (p *Pool) PickForAccountGated(accountID, model, exclude string, gated bool)
 				// the known passers had all been scored to -8, thirty minutes
 				// of traffic produced zero admissions.
 				gatePassersHistory = append(gatePassersHistory, m)
+			}
+			if peerDead && !(gatePass && !requestSick) {
+				if taken {
+					degradedTaken = append(degradedTaken, m)
+				} else {
+					degradedFree = append(degradedFree, m)
+				}
+				break
 			}
 			if taken {
 				healthyTaken = append(healthyTaken, m)

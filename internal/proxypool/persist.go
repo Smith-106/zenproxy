@@ -530,6 +530,7 @@ func (p *Pool) saveLoop(ctx context.Context, every time.Duration) {
 	}
 	t := time.NewTicker(every)
 	defer t.Stop()
+	p.refreshPeerRetired()
 	for {
 		select {
 		case <-ctx.Done():
@@ -540,7 +541,32 @@ func (p *Pool) saveLoop(ctx context.Context, every time.Duration) {
 		case <-t.C:
 			// Flush even when nothing changed. saved_at is how the other
 			// replica tells a live peer from a file left by a dead container.
+			p.refreshPeerRetired()
 			p.SaveState()
 		}
 	}
+}
+
+func (p *Pool) refreshPeerRetired() {
+	notes, ok := p.peerExitRetired()
+	if !ok {
+		p.peerRetired.Store(map[string]struct{}{})
+		return
+	}
+	set := make(map[string]struct{}, len(notes))
+	for id, note := range notes {
+		if note.Retired {
+			set[id] = struct{}{}
+		}
+	}
+	p.peerRetired.Store(set)
+}
+
+func (p *Pool) peerHasRetired(id string) bool {
+	set, _ := p.peerRetired.Load().(map[string]struct{})
+	if set == nil {
+		return false
+	}
+	_, ok := set[id]
+	return ok
 }

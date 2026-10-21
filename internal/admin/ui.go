@@ -502,7 +502,7 @@ function peerBit(e) {
   const word = quarantineWord(e.peer_retired_class);
   if (word) parts.push(word);
   if (e.quarantined_until) parts.push('这边隔离中');
-  else if (e.healthy) parts.push('这边仍健康');
+  else if (e.healthy) parts.push('这边仍健康，排在干净出口后面');
   else if (!e.retired) parts.push('这边不健康');
   return esc(e.id) + (parts.length ? '（' + parts.join('，') + '）' : '');
 }

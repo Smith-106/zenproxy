@@ -290,3 +290,36 @@ func TestHealthMarksTheExitsTheOtherReplicaDoesNotShare(t *testing.T) {
 		t.Fatalf("ex-3 should be unmarked, got %+v", got["ex-3"])
 	}
 }
+
+func TestPickLeavesAPeerRetiredExitBehindACleanOne(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "exits-state-a.json")
+	peer := filepath.Join(dir, "exits-state-b.json")
+	now := time.Now().UTC().Format(time.RFC3339)
+	write := func(path, exits string) {
+		t.Helper()
+		body := `{"version":1,"saved_at":"` + now + `","exits":{` + exits + `}}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(self, `"ex-a":{},"ex-b":{}`)
+	write(peer, `"ex-a":{},"ex-b":{"retired":true,"retired_reason":"i/o timeout"}`)
+	p, err := NewPool([]Spec{
+		{ID: "ex-a", URL: "http://127.0.0.1:1"},
+		{ID: "ex-b", URL: "http://127.0.0.1:2"},
+	}, config.Health{}, testLogger(), self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		got := p.Pick("")
+		if got == nil || got.ID != "ex-a" {
+			t.Fatalf("pick %d = %v, want ex-a while it is still clean", i, got)
+		}
+	}
+	got := p.Pick("ex-a")
+	if got == nil || got.ID != "ex-b" {
+		t.Fatalf("with the clean exit excluded, got %v, want ex-b", got)
+	}
+}
