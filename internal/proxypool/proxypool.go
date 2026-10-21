@@ -30,7 +30,7 @@ import (
 	"zenproxy/internal/model"
 )
 
-// poisonRetireAfter is how many TLS/certificate poison strikes it takes to
+// PoisonRetireAfter is how many TLS/certificate poison strikes it takes to
 // retire an exit for good. Quarantine already happens on the first such
 // failure (see MarkFailure); retirement is the door that stops the probe loop
 // from re-admitting a MITM slot every quarantine window.
@@ -41,7 +41,7 @@ import (
 // consecFails and keep the slot immortal. Only a real MarkSuccess (forwarded
 // traffic) clears the poison streak. Ordinary transport noise still uses
 // health.RetireAfter + consecFails.
-const poisonRetireAfter = 2
+const PoisonRetireAfter = 2
 
 // tunnelKeepAlive arms TCP keepalive on every dialed conn — proxy tunnels,
 // SOCKS slots and direct dials alike. The custom dialers used zero-value
@@ -440,7 +440,7 @@ type member struct {
 	softFails   int64
 	consecFails int
 	// poisonConsec counts TLS/certificate poison strikes. Unlike consecFails,
-	// probe success does not reset it — see poisonRetireAfter.
+	// probe success does not reset it — see PoisonRetireAfter.
 	poisonConsec    int
 	quarantineUntil time.Time
 	// quarantineClass is the panel word for why this nap started. It is the
@@ -1218,20 +1218,20 @@ func (p *Pool) MarkFailure(id, reason string) {
 	}
 	// Quarantine is a nap; retirement is the door. Ordinary exits use
 	// consecFails vs RetireAfter. Poison TLS uses poisonConsec vs
-	// poisonRetireAfter so a lucky probe between MITM blips cannot wipe the
+	// PoisonRetireAfter so a lucky probe between MITM blips cannot wipe the
 	// streak (probe success clears consecFails but not poisonConsec).
 	// While the outage breaker is open the door is locked: no retirement on
 	// any path. Streaks keep accruing, so whatever stays dead after the
 	// breaker lifts retires on its very next failure; whatever recovered
 	// heals via probe success instead.
 	if !m.retired && !outage {
-		if poison && poisonRetireAfter > 0 && m.poisonConsec >= poisonRetireAfter {
+		if poison && PoisonRetireAfter > 0 && m.poisonConsec >= PoisonRetireAfter {
 			m.retired = true
 			m.retiredAt = time.Now()
 			m.retiredReason = fmt.Sprintf("%d TLS poison strikes (probe success does not reset); last: %s",
 				m.poisonConsec, reason)
 			p.log.Warn("egress retired for good",
-				"exit", id, "poison_consec", m.poisonConsec, "retire_after", poisonRetireAfter,
+				"exit", id, "poison_consec", m.poisonConsec, "retire_after", PoisonRetireAfter,
 				"reason", reason, "poison_tls", true,
 				"undo", "POST /admin/api/proxies/"+id+"/revive")
 		} else if !poison {

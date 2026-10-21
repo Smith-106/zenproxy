@@ -172,6 +172,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`这边隔离中，现在不参与轮换`, `挑选时会把它排在干净出口后面`,
 		`TLS 累计 `, `连续失败 `, `retireWord`, `还没问过出口地址`, `accountIPCell`, `bound_exit_ip_note`, `bound_slow`, `bound_gate`, `bound_prunable`, `boundFlags`,
 		`setExitFilter`, `exit_filters`, `这个筛选下没有出口`, `peer_quota_here`, `另一边没冷却`,
+		`正在被免费准入的不退休`, `tls_poison_retire_after`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
@@ -190,7 +191,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 	for obj, keys := range map[string][]string{
 		"policy": {"max_attempts", "rotate_on_status", "rotate_on_transport", "max_body_bytes", "stream_idle_timeout", "upstream_timeout"},
-		"health": {"interval", "timeout", "failure_threshold", "quarantine", "max_backoff", "max_latency", "retire_after"},
+		"health": {"interval", "timeout", "failure_threshold", "quarantine", "max_backoff", "max_latency", "retire_after", "tls_poison_retire_after"},
 	} {
 		sub, _ := status[obj].(map[string]any)
 		if sub == nil {
@@ -201,6 +202,10 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 				t.Errorf("status.%s is missing %q", obj, key)
 			}
 		}
+	}
+	health, _ := status["health"].(map[string]any)
+	if health["tls_poison_retire_after"] != float64(proxypool.PoisonRetireAfter) {
+		t.Errorf("tls_poison_retire_after = %v, want %d", health["tls_poison_retire_after"], proxypool.PoisonRetireAfter)
 	}
 	ft, _ := status["free_tier"].(map[string]any)
 	if ft == nil {

@@ -296,7 +296,8 @@ function renderConfig(s) {
     row('failure_threshold（几次失败开始隔离）', h.failure_threshold) +
     row('quarantine → max_backoff（隔离退避）', h.quarantine + ' → ' + h.max_backoff) +
     row('max_latency（超过则降为备用）', h.max_latency) +
-    row('retire_after（永久淘汰阈值，0=关闭）', h.retire_after) +
+    row('retire_after（普通连续失败才用；正在被免费准入的不退休，0=关闭）', h.retire_after) +
+    row('tls_poison_retire_after（证书类失败，探活成功也不清零）', h.tls_poison_retire_after) +
     '</tbody></table>' +
     '<p class="muted" style="margin-top:8px">这里只展示、不修改：要调参数改 YAML 后重启生效。</p>';
 }

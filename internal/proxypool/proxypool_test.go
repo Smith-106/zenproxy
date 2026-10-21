@@ -731,16 +731,16 @@ func TestPoisonTLSQuarantinesOnFirstStrike(t *testing.T) {
 
 func TestPoisonTLSRetiresFasterThanOrdinaryFailures(t *testing.T) {
 	pool := retirePool(t, 2, 20)
-	for i := 0; i < poisonRetireAfter-1; i++ {
+	for i := 0; i < PoisonRetireAfter-1; i++ {
 		pool.MarkFailure("a", "tls: failed to verify certificate")
 		if h := healthOf(t, pool, "a"); h.Retired {
-			t.Fatalf("retired after only %d of %d poison failures: %+v", i+1, poisonRetireAfter, h)
+			t.Fatalf("retired after only %d of %d poison failures: %+v", i+1, PoisonRetireAfter, h)
 		}
 	}
 	pool.MarkFailure("a", "tls: failed to verify certificate")
 	h := healthOf(t, pool, "a")
 	if !h.Retired {
-		t.Fatalf("not retired after %d poison TLS failures: %+v", poisonRetireAfter, h)
+		t.Fatalf("not retired after %d poison TLS failures: %+v", PoisonRetireAfter, h)
 	}
 	if h.RetiredReason != "tls poison 2" || strings.Contains(h.RetiredReason, "certificate") {
 		t.Errorf("retired reason = %q, want the count without the dial", h.RetiredReason)
@@ -814,7 +814,7 @@ func TestRealSuccessClearsPoisonStreak(t *testing.T) {
 	pool := retirePool(t, 2, 20)
 	pool.MarkFailure("a", "x509: certificate is not valid for any names")
 	pool.MarkSuccess("a", time.Millisecond)
-	for i := 0; i < poisonRetireAfter-1; i++ {
+	for i := 0; i < PoisonRetireAfter-1; i++ {
 		pool.MarkFailure("a", "tls: failed to verify certificate")
 		if h := healthOf(t, pool, "a"); h.Retired {
 			t.Fatalf("retired early after real success reset, strike %d: %+v", i+1, h)
