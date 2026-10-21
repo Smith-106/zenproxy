@@ -209,6 +209,7 @@ async function load() {
     renderConfig(status);
     renderPools(status);
     fillUpstreams(status.upstreams || []);
+    cache.failureThreshold = (status.health || {}).failure_threshold || 0;
     document.getElementById('foot').innerHTML =
       '监听 <code>' + esc(status.listen || '') + '</code> · 上游 <code>' +
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
@@ -434,8 +435,10 @@ function renderExits(list) {
         (why ? ' · ' + esc(why) : '') + '</span>';
     } else if (e.healthy && e.consecutive_failures > 0) {
       const why = shortReason(e.last_error);
-      state = '<span class="pill warn" title="还在轮换里，再连续失败几次才会隔离">观察 · ' +
-        (why && why !== '—' ? esc(why) + ' ' : '') + e.consecutive_failures + ' 次</span>';
+      const need = (cache.failureThreshold || 0) - e.consecutive_failures;
+      const left = need > 0 ? ('再 ' + need + ' 次就隔离') : '再失败就隔离';
+      state = '<span class="pill warn" title="还在轮换里。' + esc(left) + '">观察 · ' +
+        (why && why !== '—' ? esc(why) + ' ' : '') + e.consecutive_failures + ' 次，' + left + '</span>';
     } else if (e.healthy) {
       state = '<span class="pill ok">健康</span>';
     } else {
