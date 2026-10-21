@@ -483,7 +483,7 @@ function renderExits(list) {
       '<td>' + esc(e.scheme) + '</td>' +
       '<td><code title="连这个代理的地址，不是流量出去时的公网 IP">' + esc(e.addr) + '</code></td>' +
       '<td>' + exitIPCell(e) + '</td>' +
-      '<td>' + (e.latency_ms ? e.latency_ms + ' ms' : '—') + '</td>' +
+      '<td>' + latencyCell(e) + '</td>' +
       '<td>' + state + '</td>' +
       '<td>' + quotaCell(e) + '</td>' +
       '<td>' + regionCell(e) + '</td>' +
@@ -514,6 +514,13 @@ function openDetailIds() {
 // Kept separate from health on purpose: an exit the upstream has spent is
 // working perfectly, it just will not be served. Showing it as unwell would send
 // an operator to debug a healthy proxy.
+function latencyCell(e) {
+  if (e.latency_ms) return e.latency_ms + ' ms';
+  if (!e.retired && e.healthy) {
+    return '<span class="muted" title="这次进程还没有一次成功计时">还没量过</span>';
+  }
+  return '—';
+}
 function overCap(ms) {
   const cap = cache.maxLatencyMS || 0;
   if (!ms || !cap || ms <= cap) return '';

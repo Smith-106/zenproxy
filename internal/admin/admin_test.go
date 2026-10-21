@@ -182,6 +182,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
+		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
