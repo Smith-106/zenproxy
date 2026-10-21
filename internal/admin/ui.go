@@ -147,7 +147,7 @@ const dashboardHTML = `<!doctype html>
     </form>
     <table id="accounts"><thead><tr>
       <th>账号</th><th>上游</th><th>Key</th><th>策略</th><th>出口</th><th>出口 IP</th><th>状态</th>
-      <th>最近分类</th><th>请求</th><th>成功/请求</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
+      <th>最近分类</th><th>请求</th><th>成功/请求</th><th title="每成功换一次绑定的出口记一笔。公网 IP 不一定变了">换出口</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" id="sticky_line" style="margin-top:8px"></p>
     <p class="muted">
@@ -268,8 +268,8 @@ function renderStat(s) {
     ['请求', s.requests],
     ['成功', (s.success || 0) + ' / ' + (s.requests || 0)],
     ['尝试失败', s.failures, '一次请求换出口会记多次，不是失败的请求数'],
-    ['换 IP 次数', s.rotations],
-    ['在线', Math.floor(s.uptime_seconds) + 's'],
+    ['换出口', s.rotations, '每成功换一次绑定的出口记一笔。公网 IP 不一定变了'],
+    ['在线', uptimeWord(s.uptime_seconds)],
   ];
   document.getElementById('stat').innerHTML = cards.map(c =>
     '<div class="card"' + (c[2] ? ' title="' + esc(c[2]) + '"' : '') + '><div class="k">' + esc(c[0]) + '</div><div class="v">' + esc(c[1]) + '</div></div>').join('');
@@ -513,6 +513,15 @@ function overCap(ms) {
   const extra = ms - cap;
   if (extra < 1000) return '超出 ' + extra + ' ms';
   return '超出 ' + (Math.round(extra / 100) / 10) + ' 秒';
+}
+function uptimeWord(sec) {
+  sec = Math.floor(sec || 0);
+  if (sec < 90) return sec + ' 秒';
+  const min = Math.round(sec / 60);
+  if (min < 90) return min + ' 分钟';
+  const hr = Math.round(sec / 3600);
+  if (hr < 48) return hr + ' 小时';
+  return Math.round(sec / 86400) + ' 天';
 }
 function timeLeft(t) {
   const mins = Math.round((t - new Date()) / 60000);

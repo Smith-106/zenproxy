@@ -20,7 +20,7 @@ func TestEveryTableColumnCountMatchesItsEmptyState(t *testing.T) {
 
 	for _, m := range matches {
 		id := m[1]
-		want := strings.Count(m[2], "<th>")
+		want := strings.Count(m[2], "<th")
 		if want == 0 {
 			t.Fatalf("table %q has no headers", id)
 		}

@@ -179,6 +179,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`overCap`, `maxLatencyMS`, `超出 `,
 		`openDetailIds`, `paintRows`,
 		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
+		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
