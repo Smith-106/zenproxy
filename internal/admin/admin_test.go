@@ -175,6 +175,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`正在被免费准入的不退休`, `tls_poison_retire_after`,
 		`代理地址`, `不是流量出去时的公网 IP`, `e.quota_reason`,
 		`failureThreshold`, `次就隔离`, `隔离还剩`, `不到 1 分钟`, `napLeft`,
+		`proxyCell`, `粘住`, `还能服务当前模型时不换`, `还没粘住`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,

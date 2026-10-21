@@ -642,6 +642,25 @@ function fmtTime(v) {
   return isNaN(d) ? esc(v) : d.toLocaleString();
 }
 
+function proxyCell(a) {
+  const mode = a.proxy || 'auto';
+  if (mode === 'auto') {
+    const stuck = a.bound_exit
+      ? ' <span class="muted" title="它还健康、还能服务当前模型时不换。不健康才重新挑">粘住</span>'
+      : '';
+    return '<code title="auto 不是每次重挑">' + esc(mode) + '</code>' + stuck;
+  }
+  if (mode === 'direct' || mode === 'none') {
+    return '<code title="不走代理，直接连上游">' + esc(mode) + '</code>';
+  }
+  return '<code title="优先用这个出口。它不健康时才回池子里重挑">' + esc(mode) + '</code>';
+}
+function boundWord(a) {
+  if (a.bound_exit) return a.bound_exit;
+  const mode = a.proxy || 'auto';
+  if (mode === 'direct' || mode === 'none') return '直连';
+  return '还没粘住';
+}
 function renderAccounts(list) {
   const tb = document.querySelector('#accounts tbody');
   if (!list.length) { tb.innerHTML = '<tr><td colspan="13" class="muted">还没有账号，用上面的表单加一个</td></tr>'; return; }
@@ -654,8 +673,8 @@ function renderAccounts(list) {
         (a.has_key ? '' : ' <span class="pill warn" title="没有 key，这个账号发出去的请求上游会直接拒收">无 key</span>') + '</td>' +
       '<td>' + esc(a.upstream) + '</td>' +
       '<td><code>' + esc(a.key_hint || '未设置') + '</code></td>' +
-      '<td><code>' + esc(a.proxy || 'auto') + '</code></td>' +
-      '<td><code>' + esc(a.bound_exit || '直连') + '</code> ' + boundFlags(a) + '</td>' +
+      '<td>' + proxyCell(a) + '</td>' +
+      '<td><code>' + esc(boundWord(a)) + '</code> ' + boundFlags(a) + '</td>' +
       '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) + '</td>' +
@@ -750,7 +769,7 @@ async function saveAccount(ev) {
 
 async function rotate(id) {
   try { const r = await api('/accounts/' + encodeURIComponent(id) + '/rotate', { method: 'POST' });
-        toast(id + ' 已切换到 ' + (r.account.bound_exit || '直连')); await load(); }
+        toast(id + ' 已切换到 ' + boundWord(r.account)); await load(); }
   catch (e) { toast(e.message, true); }
 }
 
