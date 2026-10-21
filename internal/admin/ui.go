@@ -131,7 +131,7 @@ const dashboardHTML = `<!doctype html>
     <h2>账号池</h2>
     <form onsubmit="return saveAccount(event)">
       <label>账号 ID<input id="f_id" placeholder="zen-01" required></label>
-      <label>备注<input id="f_name" placeholder="可选"></label>
+      <label>备注<input id="f_name" placeholder="空着保存会清空" title="和钥匙不一样：这里空着保存会把备注清掉。"></label>
       <label>上游
         <select id="f_upstream"></select>
       </label>
@@ -155,7 +155,7 @@ const dashboardHTML = `<!doctype html>
       「编辑」把该账号回填到上面表单里，改完点保存即可更新（ID 本身也可以改，改了就是新增）。
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
-      自定义头空着保存会清空。钥匙留空才是不改。
+      备注和自定义头空着保存都会清空。钥匙留空才是不改。
       「成功/请求」的右边是请求数。尝试失败按每一次上游调用计，写在同一格下面：
       一次请求换几个出口就会记几笔，不能拿来当除数。
     </p>

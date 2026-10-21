@@ -279,7 +279,7 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 
 type accountRequest struct {
 	ID       string            `json:"id"`
-	Name     string            `json:"name"`
+	Name     *string           `json:"name"`
 	Upstream string            `json:"upstream"`
 	Pool     string            `json:"pool"`
 	APIKey   string            `json:"api_key"`
@@ -333,9 +333,14 @@ func (s *Server) handleUpsertAccount(w http.ResponseWriter, r *http.Request) {
 			proxy = "auto"
 		}
 	}
-	name := req.Name
-	if name == "" && hasPrev {
+	// 备注和钥匙不一样。表单会把空字符串发过来，那就是用户清掉了。
+	// 没带这个字段（启用/禁用只发 id 和 enabled）才保留旧备注。
+	name := ""
+	if hasPrev {
 		name = prev.Name
+	}
+	if req.Name != nil {
+		name = *req.Name
 	}
 	weight := 0
 	if hasPrev {

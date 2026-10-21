@@ -95,6 +95,37 @@ func TestUpsertMergesPartialUpdates(t *testing.T) {
 	}
 }
 
+// 表单把备注清成空字符串时，旧备注必须真的消失。没带 name 的启用/禁用不能跟着清。
+func TestClearingTheNoteRemovesIt(t *testing.T) {
+	cfg := config.Default()
+	s, reg := testServer(t, cfg, nil)
+	if err := reg.Upsert(model.Account{
+		ID: "zen-01", Name: "n", Upstream: "zen", APIKey: "sk-0123456789abcdef", Proxy: "auto", Enabled: true,
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	rec := authed(s, http.MethodPost, "/admin/api/accounts", `{"id":"zen-01","name":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	ent, _ := reg.Get("zen-01")
+	if ent.Account.Name != "" {
+		t.Fatalf("name = %q, want empty", ent.Account.Name)
+	}
+	rec = authed(s, http.MethodPost, "/admin/api/accounts", `{"id":"zen-01","name":"kept","enabled":false}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	rec = authed(s, http.MethodPost, "/admin/api/accounts", `{"id":"zen-01","enabled":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	ent, _ = reg.Get("zen-01")
+	if ent.Account.Name != "kept" || !ent.Account.Enabled {
+		t.Fatalf("toggle disturbed the note: %+v", ent.Account)
+	}
+}
+
 // …and an explicit field still wins over the stored one.
 func TestUpsertExplicitFieldsWin(t *testing.T) {
 	cfg := config.Default()
@@ -184,7 +215,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
 		`untimed_note`, `个这次还没量过延迟`,
-		`空着保存会清空`, `钥匙留空才是不改`,
+		`空着保存会清空`, `钥匙留空才是不改`, `备注和自定义头空着保存都会清空`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
