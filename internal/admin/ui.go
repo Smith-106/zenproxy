@@ -116,7 +116,7 @@ const dashboardHTML = `<!doctype html>
     <p id="exit_filters"></p>
     <table id="exits"><thead><tr>
       <th>出口 ID</th><th>类型</th><th>代理地址</th><th>出口 IP</th><th>延迟</th>
-      <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
+      <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离还剩</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" id="peer_ids"></p>
     <p class="muted" style="margin-top:8px">
@@ -476,7 +476,7 @@ function renderExits(list) {
       '<td>' + regionCell(e) + '</td>' +
       '<td>' + e.consecutive_failures + '</td>' +
       '<td class="muted" title="上游返回了响应（429/5xx）：出口本身没坏，只换了绑定">' + (e.soft_failures || 0) + '</td>' +
-      '<td class="muted">' + (e.retired ? '—' : ((q && q > new Date()) ? q.toLocaleTimeString() : '—')) + '</td>' +
+      '<td class="muted">' + (e.retired ? '—' : napLeft(q)) + '</td>' +
       '<td class="muted">' + esc((e.bound_accounts || []).join(', ') || '—') + '</td>' +
       '<td class="muted">' + esc(shortReason(e.last_error)) + '</td>' +
       '<td>' + act.join(' ') + '</td>' +
@@ -489,6 +489,16 @@ function renderExits(list) {
 // Kept separate from health on purpose: an exit the upstream has spent is
 // working perfectly, it just will not be served. Showing it as unwell would send
 // an operator to debug a healthy proxy.
+function timeLeft(t) {
+  const mins = Math.round((t - new Date()) / 60000);
+  if (mins >= 90) return Math.round(mins / 60) + ' 小时';
+  if (mins < 1) return '不到 1 分钟';
+  return mins + ' 分钟';
+}
+function napLeft(q) {
+  if (!q || q <= new Date()) return '—';
+  return '<span title="到点自己回来：' + esc(q.toLocaleString()) + '">还剩 ' + timeLeft(q) + '</span>';
+}
 function quotaLeft(e) {
   if (!e.quota_until) return null;
   const t = new Date(e.quota_until);
@@ -498,8 +508,7 @@ function quotaLeft(e) {
 function quotaCell(e) {
   const t = quotaLeft(e);
   if (!t) return '<span class="muted">—</span>';
-  const mins = Math.round((t - new Date()) / 60000);
-  const left = mins >= 90 ? Math.round(mins / 60) + ' 小时' : mins + ' 分钟';
+  const left = timeLeft(t);
   const known = CLASS_ZH[e.quota_reason];
   const why = known ? known[1] : '';
   return '<span class="pill warn" title="上游说的重置时刻 ' + esc(t.toLocaleString()) + '">' +
