@@ -172,6 +172,77 @@ func TestSaveAndLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestReplicaSaveKeepsTheOtherSidesKeyAndStats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	stale := New(path, nil, testLogger())
+	stale.SetReplica("zenproxy-b")
+	if err := stale.Upsert(account("zen-01", "sk-key-old-value-0001")); err != nil {
+		t.Fatalf("stale upsert: %v", err)
+	}
+	if err := stale.Save(); err != nil {
+		t.Fatalf("stale save: %v", err)
+	}
+
+	time.Sleep(20 * time.Millisecond)
+	panel := New(path, nil, testLogger())
+	panel.SetReplica("zenproxy-a")
+	if err := panel.Load(); err != nil {
+		t.Fatalf("panel load: %v", err)
+	}
+	if err := panel.Upsert(account("zen-01", "sk-key-new-value-0002")); err != nil {
+		t.Fatalf("panel upsert: %v", err)
+	}
+	panel.BeginRequest("zen-01")
+	if err := panel.Save(); err != nil {
+		t.Fatalf("panel save: %v", err)
+	}
+
+	stale.BeginRequest("zen-01")
+	stale.BeginRequest("zen-01")
+	stale.Record("zen-01", model.ClassTransport, nil)
+	if err := stale.Save(); err != nil {
+		t.Fatalf("stale resave: %v", err)
+	}
+	got, ok := stale.Get("zen-01")
+	if !ok || got.APIKey != "sk-key-new-value-0002" {
+		t.Fatal("replica B kept the old key after A rotated it")
+	}
+
+	again := New(path, nil, testLogger())
+	again.SetReplica("zenproxy-a")
+	if err := again.Load(); err != nil {
+		t.Fatalf("reload A: %v", err)
+	}
+	reloaded, ok := again.Get("zen-01")
+	if !ok || reloaded.APIKey != "sk-key-new-value-0002" {
+		t.Fatal("A's key did not survive B's save")
+	}
+	st, _ := again.Stats("zen-01")
+	if st.Requests != 1 {
+		t.Fatalf("A's request count = %d, want 1", st.Requests)
+	}
+
+	b := New(path, nil, testLogger())
+	b.SetReplica("zenproxy-b")
+	if err := b.Load(); err != nil {
+		t.Fatalf("reload B: %v", err)
+	}
+	bst, _ := b.Stats("zen-01")
+	if bst.Requests != 2 || bst.Failures != 1 {
+		t.Fatalf("B's stats = %+v, want 2 requests and 1 failure", bst)
+	}
+	rows := panel.ReplicaAccountCounters()
+	var sawB bool
+	for _, row := range rows {
+		if row.Name == "zenproxy-b" && !row.Self && row.Requests == 2 && row.Failures == 1 {
+			sawB = true
+		}
+	}
+	if !sawB {
+		t.Fatalf("panel counters = %+v, want B's 2 requests and 1 failure", rows)
+	}
+}
+
 func TestDeleteRemovesTheAccount(t *testing.T) {
 	r := New("", poolOf(t, "a"), testLogger())
 	if err := r.Upsert(account("zen-01", "k")); err != nil {
@@ -400,7 +471,6 @@ func TestEnabledIDsSkipsDisabledAccounts(t *testing.T) {
 		t.Fatalf("EnabledIDs = %v", ids)
 	}
 }
-
 
 // Two accounts on one exit are not two chances: they share the per-IP allowance
 // and the region refusals, so the redundancy the pool exists to provide is gone.

@@ -26,11 +26,38 @@ import (
 )
 
 // file is the on-disk state. It contains API keys, so it is written 0600.
+//
+// Bindings and stats are per replica. Both processes used to rewrite the whole
+// document, so the later save erased the other side's affinity and counters,
+// and a key edited on the panel (which is only published on replica A) could
+// be put back to the old value by replica B.
 type file struct {
-	Version  int                     `json:"version"`
-	Accounts []model.Account         `json:"accounts"`
-	Bindings map[string]string       `json:"bindings"`
-	Stats    map[string]*model.Stats `json:"stats"`
+	Version    int                      `json:"version"`
+	Accounts   []model.Account          `json:"accounts"`
+	Bindings   map[string]string        `json:"bindings"`
+	Stats      map[string]*model.Stats  `json:"stats"`
+	AccountRev map[string]time.Time     `json:"account_rev,omitempty"`
+	Deleted    map[string]time.Time     `json:"deleted,omitempty"`
+	Replicas   map[string]*replicaSlice `json:"replicas,omitempty"`
+}
+
+// replicaSlice is one process's affinity and counters. The account records
+// above it stay shared, because a key has to be the same whichever replica
+// answers.
+type replicaSlice struct {
+	SavedAt  time.Time               `json:"saved_at"`
+	Bindings map[string]string       `json:"bindings,omitempty"`
+	Stats    map[string]*model.Stats `json:"stats,omitempty"`
+}
+
+// ReplicaAccounts is the panel's view of one replica's counters. It carries
+// no account id and no error text: those can quote an address.
+type ReplicaAccounts struct {
+	Name     string    `json:"name"`
+	Self     bool      `json:"self"`
+	Requests int64     `json:"requests"`
+	Failures int64     `json:"failures"`
+	SavedAt  time.Time `json:"saved_at,omitempty"`
 }
 
 // Entry is one account plus its runtime state.
@@ -75,18 +102,37 @@ type Registry struct {
 	path string
 	pool *proxypool.Pool
 	log  *slog.Logger
+
+	// replica namespaces bindings and stats. accountRev stamps an edit so a
+	// stale sibling cannot write an older key back. deleted is the matching
+	// tombstone.
+	replica    string
+	accountRev map[string]time.Time
+	deleted    map[string]time.Time
 }
 
 // New creates an empty registry bound to a state file path.
 func New(path string, pool *proxypool.Pool, log *slog.Logger) *Registry {
 	return &Registry{
-		accounts: make(map[string]*Entry),
-		bindings: make(map[string]string),
-		rrCursor: make(map[string]int),
-		path:     path,
-		pool:     pool,
-		log:      log,
+		accounts:   make(map[string]*Entry),
+		bindings:   make(map[string]string),
+		rrCursor:   make(map[string]int),
+		path:       path,
+		pool:       pool,
+		log:        log,
+		replica:    replicaName(),
+		accountRev: make(map[string]time.Time),
+		deleted:    make(map[string]time.Time),
 	}
+}
+
+// SetReplica names this process's slice of the shared state file. Tests use it
+// to put two registries on one machine; production uses the hostname chosen in
+// New.
+func (r *Registry) SetReplica(name string) {
+	r.mu.Lock()
+	r.replica = name
+	r.mu.Unlock()
 }
 
 // SetSessionExitCache installs the session→exit sticky table. Safe to call
@@ -116,18 +162,45 @@ func (r *Registry) Load() error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.accountRev == nil {
+		r.accountRev = make(map[string]time.Time)
+	}
+	for id, rev := range f.AccountRev {
+		r.accountRev[id] = rev
+	}
+	if r.deleted == nil {
+		r.deleted = make(map[string]time.Time)
+	}
+	for id, at := range f.Deleted {
+		r.deleted[id] = at
+	}
+	bindings := f.Bindings
+	stats := f.Stats
+	if f.Replicas != nil {
+		// A file that already has per-replica slices must not hand A's counters
+		// to B just because B has not saved yet. The top-level maps are only
+		// the fallback for a file written before replicas existed.
+		bindings, stats = nil, nil
+		if sl := f.Replicas[r.replica]; sl != nil {
+			bindings = sl.Bindings
+			stats = sl.Stats
+		}
+	}
 	for _, a := range f.Accounts {
 		if a.ID == "" {
 			continue
 		}
+		if at, gone := r.deleted[a.ID]; gone && !r.accountRev[a.ID].After(at) {
+			continue
+		}
 		e := &Entry{Account: a}
-		if st, ok := f.Stats[a.ID]; ok && st != nil {
+		if st, ok := stats[a.ID]; ok && st != nil {
 			e.Stats = *st
 		}
 		r.accounts[a.ID] = e
 		r.order = append(r.order, a.ID)
 	}
-	for account, exit := range f.Bindings {
+	for account, exit := range bindings {
 		if exit == "" {
 			continue
 		}
@@ -158,40 +231,54 @@ func (r *Registry) Seed(accounts []model.Account) int {
 		}
 		r.accounts[a.ID] = &Entry{Account: a}
 		r.order = append(r.order, a.ID)
+		r.accountRev[a.ID] = time.Now().UTC()
+		delete(r.deleted, a.ID)
 		added++
 	}
 	return added
 }
 
 // Save writes the state atomically with 0600 permissions.
+//
+// The write is a merge, not a replacement. Account edits with a newer stamp
+// win; bindings and counters are stored under this replica's name so the other
+// process keeps its own. A sibling that saved a newer key while we were not
+// looking is copied into memory, which is how replica B learns a rotation
+// done on the panel without a restart.
 func (r *Registry) Save() error {
 	if r.path == "" {
 		return nil
 	}
-	r.mu.RLock()
-	f := file{
-		Version:  1,
-		Accounts: make([]model.Account, 0, len(r.order)),
-		Bindings: make(map[string]string, len(r.bindings)),
-		Stats:    make(map[string]*model.Stats, len(r.order)),
+	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
+		return err
 	}
-	seen := make(map[string]bool, len(r.order))
-	for _, id := range r.order {
-		e, ok := r.accounts[id]
-		if !ok || seen[id] {
-			continue
-		}
-		seen[id] = true
-		f.Accounts = append(f.Accounts, e.Account)
-		st := e.Stats
-		f.Stats[id] = &st
+	unlock, err := lockState(r.path)
+	if err != nil {
+		return err
 	}
-	for a, exit := range r.bindings {
-		f.Bindings[a] = exit
-	}
-	r.mu.RUnlock()
+	defer unlock()
 
-	body, err := json.MarshalIndent(f, "", "  ")
+	snap := r.snapshot()
+	disk, err := readState(r.path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	merged := mergeAccounts(snap, disk)
+	merged.Replicas = disk.Replicas
+	if merged.Replicas == nil {
+		merged.Replicas = make(map[string]*replicaSlice)
+	}
+	merged.Replicas[snap.replica] = &replicaSlice{
+		SavedAt:  time.Now().UTC(),
+		Bindings: snap.bindings,
+		Stats:    snap.stats,
+	}
+	// Top-level bindings and stats stay populated for a reader that has not
+	// learned about replicas yet. They are this process's slice, not a union.
+	merged.Bindings = snap.bindings
+	merged.Stats = snap.stats
+
+	body, err := json.MarshalIndent(merged.file, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -202,7 +289,11 @@ func (r *Registry) Save() error {
 	if err := os.WriteFile(tmp, body, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, r.path)
+	if err := os.Rename(tmp, r.path); err != nil {
+		return err
+	}
+	r.adopt(merged.adopt)
+	return nil
 }
 
 // Get returns one account entry.
@@ -284,6 +375,8 @@ func (r *Registry) Upsert(a model.Account) error {
 		e = &Entry{Account: a}
 		r.accounts[a.ID] = e
 		r.order = append(r.order, a.ID)
+		r.accountRev[a.ID] = time.Now().UTC()
+		delete(r.deleted, a.ID)
 		return nil
 	}
 	if a.APIKey == "" {
@@ -293,6 +386,8 @@ func (r *Registry) Upsert(a model.Account) error {
 		a.CreatedAt = e.CreatedAt
 	}
 	e.Account = a
+	r.accountRev[a.ID] = time.Now().UTC()
+	delete(r.deleted, a.ID)
 	return nil
 }
 
@@ -316,6 +411,8 @@ func (r *Registry) Delete(id string) bool {
 			break
 		}
 	}
+	r.deleted[id] = time.Now().UTC()
+	delete(r.accountRev, id)
 	return true
 }
 
@@ -694,6 +791,316 @@ func (r *Registry) EnabledIDs() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+type accountSnap struct {
+	replica  string
+	accounts map[string]model.Account
+	rev      map[string]time.Time
+	deleted  map[string]time.Time
+	bindings map[string]string
+	stats    map[string]*model.Stats
+	order    []string
+}
+
+type adopted struct {
+	id      string
+	account model.Account
+	rev     time.Time
+	drop    bool
+}
+
+type mergedState struct {
+	file
+	adopt []adopted
+}
+
+func (r *Registry) snapshot() accountSnap {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	s := accountSnap{
+		replica:  r.replica,
+		accounts: make(map[string]model.Account, len(r.accounts)),
+		rev:      make(map[string]time.Time, len(r.accountRev)),
+		deleted:  make(map[string]time.Time, len(r.deleted)),
+		bindings: make(map[string]string, len(r.bindings)),
+		stats:    make(map[string]*model.Stats, len(r.accounts)),
+		order:    append([]string(nil), r.order...),
+	}
+	if s.replica == "" {
+		s.replica = "local"
+	}
+	for id, e := range r.accounts {
+		s.accounts[id] = e.Account
+		st := e.Stats
+		s.stats[id] = &st
+	}
+	for id, rev := range r.accountRev {
+		s.rev[id] = rev
+	}
+	for id, at := range r.deleted {
+		s.deleted[id] = at
+	}
+	for id, exit := range r.bindings {
+		s.bindings[id] = exit
+	}
+	return s
+}
+
+func readState(path string) (file, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return file{}, err
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return file{}, err
+	}
+	return f, nil
+}
+
+func mergeAccounts(snap accountSnap, disk file) mergedState {
+	byID := make(map[string]model.Account, len(disk.Accounts)+len(snap.accounts))
+	for _, a := range disk.Accounts {
+		if a.ID != "" {
+			byID[a.ID] = a
+		}
+	}
+	diskRev := disk.AccountRev
+	if diskRev == nil {
+		diskRev = map[string]time.Time{}
+	}
+	deleted := make(map[string]time.Time, len(disk.Deleted)+len(snap.deleted))
+	for id, at := range disk.Deleted {
+		deleted[id] = at
+	}
+	for id, at := range snap.deleted {
+		if prev, ok := deleted[id]; !ok || at.After(prev) {
+			deleted[id] = at
+		}
+	}
+
+	var adopt []adopted
+	for _, id := range snap.order {
+		local, ok := snap.accounts[id]
+		if !ok {
+			continue
+		}
+		localRev := snap.rev[id]
+		if at, gone := deleted[id]; gone && !localRev.After(at) {
+			delete(byID, id)
+			continue
+		}
+		chosen := local
+		if diskA, onDisk := byID[id]; onDisk {
+			chosen = preferAccount(local, diskA, localRev, diskRev[id])
+			if diskRev[id].After(localRev) || chosen.APIKey != local.APIKey {
+				rev := diskRev[id]
+				if localRev.After(rev) {
+					rev = localRev
+				}
+				adopt = append(adopt, adopted{id: id, account: chosen, rev: rev})
+			}
+		}
+		byID[id] = chosen
+	}
+	for id, diskA := range byID {
+		if _, ours := snap.accounts[id]; ours {
+			continue
+		}
+		if at, gone := deleted[id]; gone && !diskRev[id].After(at) {
+			delete(byID, id)
+			adopt = append(adopt, adopted{id: id, drop: true, rev: at})
+			continue
+		}
+		adopt = append(adopt, adopted{id: id, account: diskA, rev: diskRev[id]})
+	}
+	for id, at := range deleted {
+		rev := diskRev[id]
+		if localRev, ok := snap.rev[id]; ok && localRev.After(rev) {
+			rev = localRev
+		}
+		if !rev.After(at) {
+			delete(byID, id)
+		}
+	}
+
+	accounts := make([]model.Account, 0, len(byID))
+	seen := make(map[string]bool, len(byID))
+	for _, id := range snap.order {
+		if a, ok := byID[id]; ok && !seen[id] {
+			accounts = append(accounts, a)
+			seen[id] = true
+		}
+	}
+	for _, a := range disk.Accounts {
+		if seen[a.ID] {
+			continue
+		}
+		if kept, ok := byID[a.ID]; ok {
+			accounts = append(accounts, kept)
+			seen[a.ID] = true
+		}
+	}
+	revOut := make(map[string]time.Time, len(byID))
+	for id := range byID {
+		rev := diskRev[id]
+		if local, ok := snap.rev[id]; ok && local.After(rev) {
+			rev = local
+		}
+		if !rev.IsZero() {
+			revOut[id] = rev
+		}
+	}
+	delOut := make(map[string]time.Time)
+	for id, at := range deleted {
+		if _, ok := byID[id]; !ok && !at.IsZero() {
+			delOut[id] = at
+		}
+	}
+	return mergedState{
+		file: file{
+			Version:    1,
+			Accounts:   accounts,
+			AccountRev: revOut,
+			Deleted:    delOut,
+		},
+		adopt: adopt,
+	}
+}
+
+// preferAccount keeps the newer edit, and never replaces a stored key with an
+// empty one. An empty key in an upsert means "leave the stored key alone".
+func preferAccount(local, disk model.Account, localRev, diskRev time.Time) model.Account {
+	newer, older := local, disk
+	if diskRev.After(localRev) {
+		newer, older = disk, local
+	}
+	if newer.APIKey == "" {
+		newer.APIKey = older.APIKey
+	}
+	return newer
+}
+
+func (r *Registry) adopt(items []adopted) {
+	if len(items) == 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, item := range items {
+		if r.accountRev[item.id].After(item.rev) && !item.rev.IsZero() {
+			continue
+		}
+		if item.drop {
+			delete(r.accounts, item.id)
+			for i, oid := range r.order {
+				if oid == item.id {
+					r.order = append(r.order[:i], r.order[i+1:]...)
+					break
+				}
+			}
+			if !item.rev.IsZero() {
+				r.deleted[item.id] = item.rev
+			}
+			continue
+		}
+		if e, ok := r.accounts[item.id]; ok {
+			e.Account = item.account
+		} else {
+			r.accounts[item.id] = &Entry{Account: item.account}
+			r.order = append(r.order, item.id)
+		}
+		if !item.rev.IsZero() {
+			r.accountRev[item.id] = item.rev
+		}
+		delete(r.deleted, item.id)
+	}
+}
+
+// ReplicaAccountCounters reports this process's counters from memory and each
+// sibling's counters from the shared file. A sibling that has not saved for
+// three minutes is a dead container, same rule as the exit-state files.
+func (r *Registry) ReplicaAccountCounters() []ReplicaAccounts {
+	r.mu.RLock()
+	self := ReplicaAccounts{Name: r.replica, Self: true}
+	for _, e := range r.accounts {
+		self.Requests += e.Stats.Requests
+		self.Failures += e.Stats.Failures
+	}
+	path, replica := r.path, r.replica
+	r.mu.RUnlock()
+
+	out := []ReplicaAccounts{self}
+	if path == "" {
+		return out
+	}
+	disk, err := readState(path)
+	if err != nil {
+		return out
+	}
+	names := make([]string, 0, len(disk.Replicas))
+	for name := range disk.Replicas {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if name == replica {
+			continue
+		}
+		sl := disk.Replicas[name]
+		if sl == nil || sl.SavedAt.IsZero() || time.Since(sl.SavedAt) > 3*time.Minute {
+			continue
+		}
+		row := ReplicaAccounts{Name: name, SavedAt: sl.SavedAt}
+		for _, st := range sl.Stats {
+			if st == nil {
+				continue
+			}
+			row.Requests += st.Requests
+			row.Failures += st.Failures
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+func replicaName() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		return "local"
+	}
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', ' ':
+			return '-'
+		default:
+			return r
+		}
+	}, host)
+}
+
+func lockState(path string) (func(), error) {
+	lockPath := path + ".lock"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if time.Now().After(deadline) {
+			_ = os.Remove(lockPath)
+			f, err = os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return nil, fmt.Errorf("lock state %s: %w", path, err)
+			}
+			_ = f.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // RunSaver snapshots state to disk periodically and on shutdown.

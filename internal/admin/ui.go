@@ -216,6 +216,16 @@ function replicaLine(s) {
     const when = r.saved_at ? new Date(r.saved_at).toLocaleTimeString() : '—';
     return who + ' <code>' + esc(r.file || '') + '</code> 退役 ' + (r.retired || 0) +
       ' / ' + (r.exits || 0) + '，额度冷却 ' + (r.quota || 0) + '，写于 ' + esc(when);
+  }).join(' · ') + accountReplicaLine(s);
+}
+
+function accountReplicaLine(s) {
+  const rows = s.account_replicas || [];
+  if (!rows.length) return '';
+  return ' · ' + rows.map(r => {
+    const who = r.self ? '本副本账号' : '另一副本账号';
+    return who + ' <code>' + esc(r.name || '') + '</code> 请求 ' + (r.requests || 0) +
+      ' 失败 ' + (r.failures || 0);
   }).join(' · ');
 }
 

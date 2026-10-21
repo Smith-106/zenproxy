@@ -167,7 +167,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`id="free"`, `id="free_lists"`, `id="free_hint"`, `id="foot"`, `id="cfg"`,
 		`id="f_upstream"`, `id="f_weight"`, `id="f_headers"`, `id="stat"`,
 		`id="exits"`, `id="accounts"`, `id="gate"`, `id="msg"`,
-		`renderStat(`, `renderFree(`, `renderConfig(`, `renderExits(`, `renderAccounts(`, `replicaLine(`,
+		`renderStat(`, `renderFree(`, `renderConfig(`, `renderExits(`, `renderAccounts(`, `replicaLine(`, `accountReplicaLine(`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
@@ -179,7 +179,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 
 	status := decode(t, authed(s, http.MethodGet, "/admin/api/status", ""))
-	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "free_tier", "policy", "health", "exits_retired"} {
+	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "account_replicas", "free_tier", "policy", "health", "exits_retired"} {
 		if _, ok := status[key]; !ok {
 			t.Errorf("status is missing %q", key)
 		}
