@@ -200,12 +200,23 @@ async function load() {
     document.getElementById('foot').innerHTML =
       '监听 <code>' + esc(status.listen || '') + '</code> · 上游 <code>' +
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
-      esc((status.allowed_hosts || []).join(', ') || '（仅回环监听时可为空）') + '</code> · 状态文件 <code>' +
-      esc(status.state_file || '') + '</code>';
+      esc((status.allowed_hosts || []).join(', ') || '（仅回环监听时可为空）') + '</code> · ' +
+      replicaLine(status);
     renderExits(exits.exits || []);
     cache.accounts = accounts.accounts || [];
     renderAccounts(cache.accounts);
   } catch (e) { toast(e.message, true); }
+}
+
+function replicaLine(s) {
+  const rows = s.replicas || [];
+  if (!rows.length) return '状态文件 <code>' + esc(s.state_file || '未持久化') + '</code>';
+  return rows.map(r => {
+    const who = r.self ? '本副本' : '另一副本';
+    const when = r.saved_at ? new Date(r.saved_at).toLocaleTimeString() : '—';
+    return who + ' <code>' + esc(r.file || '') + '</code> 退役 ' + (r.retired || 0) +
+      ' / ' + (r.exits || 0) + '，额度冷却 ' + (r.quota || 0) + '，写于 ' + esc(when);
+  }).join(' · ');
 }
 
 function renderStat(s) {

@@ -118,6 +118,47 @@ func TestSeedFromSharedFileDoesNotRewriteIt(t *testing.T) {
 	}
 }
 
+func TestStateSnapshotsSeeTheOtherReplica(t *testing.T) {
+	dir := t.TempDir()
+	specs := []Spec{{ID: "ex-b", URL: "http://127.0.0.1:58002"}}
+	a, err := NewPool(specs, config.Health{}, testLogger(), filepath.Join(dir, "exits-state-a.json"))
+	if err != nil {
+		t.Fatalf("a: %v", err)
+	}
+	b, err := NewPool(specs, config.Health{}, testLogger(), filepath.Join(dir, "exits-state-b.json"))
+	if err != nil {
+		t.Fatalf("b: %v", err)
+	}
+	if err := b.Retire("ex-b", "only b saw this"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	b.SaveState()
+	a.markDirty()
+	a.SaveState()
+
+	snaps := a.StateSnapshots()
+	if len(snaps) != 2 {
+		t.Fatalf("snapshots = %d, want 2", len(snaps))
+	}
+	var self, other *ReplicaState
+	for i := range snaps {
+		if snaps[i].Self {
+			self = &snaps[i]
+		} else {
+			other = &snaps[i]
+		}
+	}
+	if self == nil || other == nil {
+		t.Fatalf("missing self/other: %+v", snaps)
+	}
+	if self.Retired != 0 {
+		t.Fatalf("self retired = %d, want 0", self.Retired)
+	}
+	if other.Retired != 1 || other.Exits != 1 {
+		t.Fatalf("other = %+v, want 1 retired of 1", *other)
+	}
+}
+
 func TestExpiredBlockNotRestored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "exits-state.json")
 	specs := []Spec{{ID: "ex-a", URL: "http://127.0.0.1:58001"}}

@@ -179,6 +179,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"upstreams":     upstreams,
 		"allowed_hosts": s.cfg.Policy.AllowedHosts,
 		"state_file":    s.cfg.StateFile,
+		"replicas":      s.pool.StateSnapshots(),
 		// Read-only view of the knobs that shape rotation, so the console can
 		// show why the proxy behaves the way it does without opening the YAML.
 		// Nothing here is a secret: tokens and keys are deliberately absent.

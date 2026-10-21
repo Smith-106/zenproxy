@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -304,6 +305,64 @@ func (p *Pool) loadState() {
 		// first flush.
 		p.dirty.Store(false)
 	}
+}
+
+// ReplicaState is one exit-state file in this pool's directory. The admin
+// panel is pinned to replica A, so without this the operator cannot see that
+// replica B has retired a different set.
+type ReplicaState struct {
+	File    string    `json:"file"`
+	SavedAt time.Time `json:"saved_at"`
+	Exits   int       `json:"exits"`
+	Retired int       `json:"retired"`
+	Quota   int       `json:"quota"`
+	Self    bool      `json:"self"`
+}
+
+// StateSnapshots reads every exit-state file next to this pool's own. Counts
+// only: the files also hold failure reasons, which are not needed here and
+// sometimes quote an upstream sentence.
+func (p *Pool) StateSnapshots() []ReplicaState {
+	if p.statePath == "" {
+		return nil
+	}
+	dir := filepath.Dir(p.statePath)
+	matches, err := filepath.Glob(filepath.Join(dir, "exits-state*.json"))
+	if err != nil || len(matches) == 0 {
+		return nil
+	}
+	now := time.Now()
+	out := make([]ReplicaState, 0, len(matches))
+	for _, path := range matches {
+		base := filepath.Base(path)
+		if strings.Contains(base, ".bak-") {
+			continue
+		}
+		b, err := os.ReadFile(path)
+		if err != nil || len(b) > 8<<20 {
+			continue
+		}
+		var st exitsState
+		if json.Unmarshal(b, &st) != nil {
+			continue
+		}
+		snap := ReplicaState{
+			File:    base,
+			SavedAt: st.SavedAt,
+			Exits:   len(st.Exits),
+			Self:    path == p.statePath,
+		}
+		for _, rec := range st.Exits {
+			if rec.Retired {
+				snap.Retired++
+			}
+			if rec.QuotaUntil.After(now) {
+				snap.Quota++
+			}
+		}
+		out = append(out, snap)
+	}
+	return out
 }
 
 // saveLoop flushes the persisted slice while the process runs, and once more
