@@ -2102,6 +2102,88 @@ func (p *Pool) HealthyCount() int {
 	return n
 }
 
+// QuarantineBreakdown counts exits parked right now, by the kind of failure
+// that parked them. The strings are categories, never the raw dial error.
+type QuarantineBreakdown struct {
+	Total       int `json:"total"`
+	Timeout     int `json:"timeout"`
+	Unreachable int `json:"unreachable"`
+	TLS         int `json:"tls"`
+	Other       int `json:"other"`
+}
+
+// QuarantineBreakdown reports the exits that are in a nap at this moment.
+func (p *Pool) QuarantineBreakdown() QuarantineBreakdown {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	var out QuarantineBreakdown
+	for _, m := range p.members {
+		m.mu.Lock()
+		parked := !m.retired && now.Before(m.quarantineUntil)
+		reason := m.lastErr
+		m.mu.Unlock()
+		if !parked {
+			continue
+		}
+		out.Total++
+		switch classifyQuarantine(reason) {
+		case "timeout":
+			out.Timeout++
+		case "unreachable":
+			out.Unreachable++
+		case "tls":
+			out.TLS++
+		default:
+			out.Other++
+		}
+	}
+	return out
+}
+
+// SlowCount reports healthy exits whose last measurement is over the latency
+// ceiling. They stay in rotation, behind the faster ones. A ceiling of zero
+// means the operator did not ask for this distinction.
+func (p *Pool) SlowCount() int {
+	if p.health.MaxLatency <= 0 {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, m := range p.members {
+		m.mu.Lock()
+		slow := m.healthy && !m.retired && !now.Before(m.quarantineUntil) &&
+			m.latencyMS > 0 && time.Duration(m.latencyMS)*time.Millisecond > p.health.MaxLatency
+		m.mu.Unlock()
+		if slow {
+			n++
+		}
+	}
+	return n
+}
+
+// classifyQuarantine folds a dial error into one of four panel words.
+// Order matches a live count on 2026-10-21: certificate and "tls:" first,
+// then timeouts, then connect failures. Anything else stays "other" so a new
+// failure shape shows up instead of being filed under a neighbour.
+func classifyQuarantine(reason string) string {
+	low := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(low, "certificate") || strings.Contains(low, "x509") || strings.Contains(low, "tls:"):
+		return "tls"
+	case strings.Contains(low, "timeout") || strings.Contains(low, "deadline"):
+		return "timeout"
+	case strings.Contains(low, "proxyconnect") || strings.Contains(low, "connection refused") ||
+		strings.Contains(low, "no such host") || strings.HasPrefix(low, "unreachable") ||
+		strings.Contains(low, "socks"):
+		return "unreachable"
+	default:
+		return "other"
+	}
+}
+
 // RetiredCount reports how many exits have been taken out of rotation for good.
 func (p *Pool) RetiredCount() int {
 	p.mu.RLock()

@@ -60,6 +60,27 @@ func createTestPool(t *testing.T, n int, hc config.Health) *Pool {
 	return pool
 }
 
+func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
+	pool := createTestPool(t, 4, config.Health{
+		FailureThreshold: 1,
+		MaxLatency:       3 * time.Second,
+	})
+	pool.MarkFailure("a", "Get \"https://up\": i/o timeout")
+	pool.MarkFailure("b", "proxyconnect tcp: connection refused")
+	pool.MarkFailure("c", "tls: failed to verify certificate: x509: certificate is not valid")
+	pool.byID["d"].mu.Lock()
+	pool.byID["d"].latencyMS = 5000
+	pool.byID["d"].mu.Unlock()
+
+	got := pool.QuarantineBreakdown()
+	if got.Total != 3 || got.Timeout != 1 || got.Unreachable != 1 || got.TLS != 1 || got.Other != 0 {
+		t.Fatalf("breakdown = %+v", got)
+	}
+	if n := pool.SlowCount(); n != 1 {
+		t.Fatalf("slow = %d, want 1", n)
+	}
+}
+
 // socks5Fixture is a minimal RFC 1928/1929 server. The SOCKS5 client in this
 // package is hand-rolled, so it is the riskiest code here and deserves a real
 // peer rather than a mock interface.
