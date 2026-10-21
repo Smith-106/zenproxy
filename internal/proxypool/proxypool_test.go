@@ -79,6 +79,22 @@ func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
 	if got.Total != 3 || got.Timeout != 1 || got.Unreachable != 1 || got.TLS != 1 || got.Other != 0 {
 		t.Fatalf("breakdown = %+v", got)
 	}
+	for _, h := range pool.Health() {
+		switch h.ID {
+		case "a":
+			if h.LastError != "timeout" || strings.Contains(h.LastError, "https") {
+				t.Fatalf("panel last error = %q", h.LastError)
+			}
+		case "b":
+			if h.LastError != "unreachable" {
+				t.Fatalf("panel last error = %q", h.LastError)
+			}
+		case "c":
+			if h.LastError != "tls" {
+				t.Fatalf("panel last error = %q", h.LastError)
+			}
+		}
+	}
 	if n := pool.SlowCount(); n != 1 {
 		t.Fatalf("slow = %d, want 1", n)
 	}

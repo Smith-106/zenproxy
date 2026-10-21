@@ -168,7 +168,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`id="f_upstream"`, `id="f_weight"`, `id="f_headers"`, `id="stat"`,
 		`id="exits"`, `id="accounts"`, `id="gate"`, `id="msg"`,
 		`renderStat(`, `renderFree(`, `renderConfig(`, `renderExits(`, `renderAccounts(`, `replicaLine(`, `accountReplicaLine(`,
-		`尝试失败`, `成功/尝试失败`, `pool_shape`, `隔离原因`, `quarantineWord`,
+		`尝试失败`, `成功/尝试失败`, `pool_shape`, `隔离原因`, `quarantineWord`, `raw === 'timeout'`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,

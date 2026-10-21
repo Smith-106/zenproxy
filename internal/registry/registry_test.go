@@ -458,6 +458,22 @@ func TestStatsSeparatesFailuresFromSuccesses(t *testing.T) {
 	}
 }
 
+func TestListDoesNotHandThePanelADialDump(t *testing.T) {
+	r := New("", poolOf(t, "a"), testLogger())
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	r.Record("zen-01", model.ClassTransport, strErr(`Post "https://secret.example/v1": proxyconnect tcp://user:pass@10.1.2.3:8080: i/o timeout`))
+	got := r.List()[0].Stats.LastError
+	if got != "timeout" || strings.Contains(got, "secret") || strings.Contains(got, "10.1.2.3") {
+		t.Fatalf("list last error = %q", got)
+	}
+}
+
+type strErr string
+
+func (e strErr) Error() string { return string(e) }
+
 func TestEnabledIDsSkipsDisabledAccounts(t *testing.T) {
 	r := New("", poolOf(t, "a"), testLogger())
 	if err := r.Upsert(account("zen-01", "k")); err != nil {

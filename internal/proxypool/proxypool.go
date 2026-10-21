@@ -1925,7 +1925,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 			Failures:    m.failures,
 			SoftFails:   m.softFails,
 			ConsecFails: m.consecFails,
-			LastError:   m.lastErr,
+			LastError:   model.PanelReason(m.lastErr),
 			// Only the live ones: an expired admission is history, and the
 			// panel exists to answer "who can serve free models NOW".
 			GatePasses: m.gatePasses,
@@ -1959,7 +1959,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 			h.BoundAccounts = append(h.BoundAccounts, a)
 		}
 		h.Retired = m.retired
-		h.RetiredReason = m.retiredReason
+		h.RetiredReason = model.ScrubPanel(m.retiredReason)
 		if !m.retiredAt.IsZero() {
 			t := m.retiredAt
 			h.RetiredAt = &t

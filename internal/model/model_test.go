@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // An account id becomes a URL path segment (and a proxy credential username),
 // so anything that would silently produce an unreachable Base URL must be
@@ -28,5 +31,16 @@ func TestValidateAccountID(t *testing.T) {
 		if err := ValidateAccountID(c.id); err == nil {
 			t.Errorf("ValidateAccountID(%q) = nil, want an error (%s)", c.id, c.why)
 		}
+	}
+}
+
+func TestPanelReasonDropsADialAndKeepsAVendorSentence(t *testing.T) {
+	dial := PanelReason(`Post "https://secret.example/v1": proxyconnect tcp://user:pass@10.1.2.3:8080: i/o timeout`)
+	if dial != "timeout" || strings.Contains(dial, "secret") || strings.Contains(dial, "pass") {
+		t.Fatalf("dial = %q", dial)
+	}
+	vendor := PanelReason(`HTTP 400: see https://secret.example/docs user:pass@host`)
+	if strings.Contains(vendor, "secret") || strings.Contains(vendor, "pass") || !strings.Contains(vendor, "HTTP 400") {
+		t.Fatalf("vendor = %q", vendor)
 	}
 }

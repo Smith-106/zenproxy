@@ -343,6 +343,7 @@ func (r *Registry) viewLocked(e *Entry) View {
 		Headers:   e.Headers,
 		Stats:     e.Stats,
 	}
+	v.Stats.LastError = model.PanelReason(v.Stats.LastError)
 	if v.BoundExit != "" && r.pool != nil {
 		for _, h := range r.pool.Health() {
 			if h.ID == v.BoundExit {

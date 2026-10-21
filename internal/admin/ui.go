@@ -311,7 +311,7 @@ function renderExits(list) {
     const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
     let state;
     if (e.retired) {
-      state = '<span class="pill bad" title="' + esc(e.retired_reason || '') + '">已退休</span>';
+      state = '<span class="pill bad" title="' + esc(shortReason(e.retired_reason || '')) + '">已退休</span>';
     } else if (q && q > new Date()) {
       const why = quarantineWord(e.quarantine_class);
       state = '<span class="pill bad" title="' + esc(why ? ('隔离原因：' + why) : '隔离中，原因还没探到') + '">隔离中' +
@@ -347,7 +347,7 @@ function renderExits(list) {
       '<td class="muted" title="上游返回了响应（429/5xx）：出口本身没坏，只换了绑定">' + (e.soft_failures || 0) + '</td>' +
       '<td class="muted">' + (e.retired ? '—' : ((q && q > new Date()) ? q.toLocaleTimeString() : '—')) + '</td>' +
       '<td class="muted">' + esc((e.bound_accounts || []).join(', ') || '—') + '</td>' +
-      '<td class="muted" title="' + esc(scrubReason(e.last_error || '')) + '">' + esc(shortReason(e.last_error)) + '</td>' +
+      '<td class="muted">' + esc(shortReason(e.last_error)) + '</td>' +
       '<td>' + act.join(' ') + '</td>' +
     '</tr>';
   }).join('');
@@ -422,6 +422,10 @@ function scrubReason(msg) {
 function shortReason(msg) {
   const raw = scrubReason(msg);
   if (!raw) return '—';
+  if (raw === 'timeout') return '超时';
+  if (raw === 'unreachable') return '连不上';
+  if (raw === 'tls') return 'TLS 失败';
+  if (raw === 'other') return '其他';
   const low = raw.toLowerCase();
   if (low.indexOf('proxyconnect') >= 0 || low.indexOf('socks5:') >= 0 || low.indexOf('i/o timeout') >= 0 || low.indexOf('connection refused') >= 0 || low.indexOf('no such host') >= 0)
     return '出口连不上游';
@@ -464,8 +468,7 @@ function renderAccounts(list) {
       '<td>' + (st.requests || 0) + '</td>' +
       '<td title="左边是完成的请求，右边是按尝试计的失败">' + (st.success || 0) + ' / ' + (st.failures || 0) + '</td>' +
       '<td>' + (st.rotations || 0) + '</td>' +
-      '<td class="muted" title="' + esc(scrubReason(st.last_error || '')) + '">' +
-        esc(shortReason(st.last_error)) + '</td>' +
+      '<td class="muted">' + esc(shortReason(st.last_error)) + '</td>' +
       '<td style="white-space:normal">' +
         '<button onclick="fillAccount(\'' + esc(a.id) + '\')">编辑</button> ' +
         '<button onclick="toggleAccount(\'' + esc(a.id) + '\')">' + (a.enabled ? '禁用' : '启用') + '</button> ' +

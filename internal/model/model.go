@@ -255,3 +255,54 @@ type PruneReport struct {
 	// operator needs to know the pool is gone rather than guess it.
 	PoolEmpty bool `json:"pool_empty"`
 }
+
+var (
+	panelURL      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>]+`)
+	panelUserinfo = regexp.MustCompile(`[^\s/@]+:[^\s/@]+@`)
+	panelIPv4     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
+)
+
+// DialClass folds a socket dump into the same four words the quarantine
+// counter uses. An HTTP status line is not a dial, so it returns "" and the
+// caller keeps the vendor sentence.
+func DialClass(msg string) string {
+	low := strings.ToLower(strings.TrimSpace(msg))
+	if low == "" || strings.HasPrefix(low, "http ") {
+		return ""
+	}
+	switch {
+	case strings.Contains(low, "certificate") || strings.Contains(low, "x509") || strings.Contains(low, "tls:"):
+		return "tls"
+	case strings.Contains(low, "timeout") || strings.Contains(low, "deadline"):
+		return "timeout"
+	case strings.Contains(low, "proxyconnect") || strings.Contains(low, "connection refused") ||
+		strings.Contains(low, "no such host") || strings.HasPrefix(low, "unreachable") ||
+		strings.Contains(low, "socks"):
+		return "unreachable"
+	default:
+		return ""
+	}
+}
+
+// PanelReason is the only failure text the admin API may return. A dial
+// becomes one of the four words. Anything else loses URLs, proxy userinfo,
+// and IPv4 addresses before it reaches the browser.
+func PanelReason(msg string) string {
+	if class := DialClass(msg); class != "" {
+		return class
+	}
+	return ScrubPanel(msg)
+}
+
+// ScrubPanel removes addresses from a sentence that is still worth reading,
+// such as a retirement count that quotes the last dial.
+func ScrubPanel(msg string) string {
+	msg = panelURL.ReplaceAllString(msg, "<url>")
+	msg = panelUserinfo.ReplaceAllString(msg, "")
+	msg = panelIPv4.ReplaceAllString(msg, "<exit>")
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > 160 {
+		msg = msg[:160] + "…"
+	}
+	return msg
+}
