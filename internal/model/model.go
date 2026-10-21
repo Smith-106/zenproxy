@@ -251,6 +251,11 @@ type ProxyHealth struct {
 	// there is no live peer file.
 	PeerRetired bool `json:"peer_retired,omitempty"`
 	PeerKeeps   bool `json:"peer_keeps,omitempty"`
+	// PeerQuota means the other replica has this exit in a quota cooldown and
+	// this one does not. PeerQuotaHere is the opposite. A missing peer record
+	// counts as not cooled, same as ReplicaSplit.
+	PeerQuota     bool `json:"peer_quota,omitempty"`
+	PeerQuotaHere bool `json:"peer_quota_here,omitempty"`
 	// PeerRetiredClass is timeout, unreachable, tls, or other. It is the other
 	// replica's retirement reason folded to a word, never the dial text.
 	PeerRetiredClass string `json:"peer_retired_class,omitempty"`

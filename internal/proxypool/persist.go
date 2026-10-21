@@ -409,6 +409,7 @@ func (p *Pool) livePeerState() string {
 type peerNote struct {
 	Retired bool
 	Class   string
+	Quota   bool
 }
 
 // peerExitRetired reads the other live replica's file once. The bool is
@@ -424,7 +425,7 @@ func (p *Pool) peerExitRetired() (map[string]peerNote, bool) {
 	}
 	out := make(map[string]peerNote, len(st.Exits))
 	for id, rec := range st.Exits {
-		note := peerNote{Retired: rec.Retired}
+		note := peerNote{Retired: rec.Retired, Quota: rec.QuotaUntil.After(time.Now())}
 		if rec.Retired {
 			note.Class = model.DialClass(rec.RetiredReason)
 			if note.Class == "" && rec.RetiredReason != "" {

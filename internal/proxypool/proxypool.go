@@ -2002,6 +2002,13 @@ func (p *Pool) Health() []model.ProxyHealth {
 			if m.retired && listed && !note.Retired {
 				h.PeerKeeps = true
 			}
+			peerCool := listed && note.Quota
+			if h.QuotaUntil == nil && peerCool {
+				h.PeerQuota = true
+			}
+			if h.QuotaUntil != nil && !peerCool {
+				h.PeerQuotaHere = true
+			}
 		}
 		m.mu.Unlock()
 		out = append(out, h)

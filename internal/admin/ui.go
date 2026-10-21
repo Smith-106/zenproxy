@@ -373,7 +373,7 @@ function exitMatches(e, f) {
   if (f === 'watch') return exitInWatch(e);
   if (f === 'nap') return exitInNap(e);
   if (f === 'prune') return !e.retired && !!e.prunable;
-  if (f === 'split') return !!(e.peer_retired || e.peer_keeps);
+  if (f === 'split') return !!(e.peer_retired || e.peer_keeps || e.peer_quota || e.peer_quota_here);
   if (f === 'gate') return exitInGate(e);
   return true;
 }
@@ -386,7 +386,7 @@ function exitFilterButtons(list) {
     watch: list.filter(exitInWatch).length,
     nap: list.filter(exitInNap).length,
     prune: list.filter(e => e.prunable && !e.retired).length,
-    split: list.filter(e => e.peer_retired || e.peer_keeps).length,
+    split: list.filter(e => e.peer_retired || e.peer_keeps || e.peer_quota || e.peer_quota_here).length,
     gate: list.filter(exitInGate).length,
   };
   const cur = cache.exitFilter || 'all';
@@ -447,6 +447,8 @@ function renderExits(list) {
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
     if (e.peer_retired) state += ' <span class="pill warn" title="' + esc(peerRetiredTitle(e)) + '">另一副本已退役</span>';
     if (e.peer_keeps) state += ' <span class="pill warn" title="这边已经退役。另一边还没退役，挑选时会把它排在干净出口后面">另一副本还在用</span>';
+    if (e.peer_quota) state += ' <span class="pill warn" title="另一边这个出口在额度冷却，这边没有">另一副本在冷却</span>';
+    if (e.peer_quota_here) state += ' <span class="pill warn" title="这边这个出口在额度冷却，另一边没有">另一边没冷却</span>';
     const act = [];
     if (e.retired) {
       act.push('<button onclick="reviveExit(\'' + esc(e.id) + '\')">恢复</button>');
