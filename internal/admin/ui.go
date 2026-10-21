@@ -140,7 +140,7 @@ const dashboardHTML = `<!doctype html>
         <input id="f_proxy" placeholder="auto / direct / 出口ID" value="auto">
       </label>
       <label>权重<input id="f_weight" type="number" value="0" title="这个池轮流用账号，权重不参与挑选"> <span class="muted" id="weight_hint"></span></label>
-      <label>自定义头（JSON）<input id="f_headers" placeholder='{"X-Foo":"bar"}' autocomplete="off"></label>
+      <label>自定义头（JSON）<input id="f_headers" placeholder="空着保存会清空" title="和钥匙不一样：这里空着保存会把自定义头清掉。钥匙留空才是不改。" autocomplete="off"></label>
       <label>启用
         <select id="f_enabled"><option value="true">是</option><option value="false">否</option></select>
       </label>
@@ -155,6 +155,7 @@ const dashboardHTML = `<!doctype html>
       「编辑」把该账号回填到上面表单里，改完点保存即可更新（ID 本身也可以改，改了就是新增）。
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
+      自定义头空着保存会清空。钥匙留空才是不改。
       「成功/请求」的右边是请求数。尝试失败按每一次上游调用计，写在同一格下面：
       一次请求换几个出口就会记几笔，不能拿来当除数。
     </p>
