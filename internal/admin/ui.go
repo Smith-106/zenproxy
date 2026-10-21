@@ -113,6 +113,7 @@ const dashboardHTML = `<!doctype html>
 
   <section>
     <h2>出口池（IP 池）</h2>
+    <p id="exit_filters"></p>
     <table id="exits"><thead><tr>
       <th>出口 ID</th><th>类型</th><th>地址</th><th>出口 IP</th><th>延迟</th>
       <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
@@ -164,7 +165,7 @@ const dashboardHTML = `<!doctype html>
 <script>
 const LS_KEY = 'zenproxy_admin_token';
 let token = localStorage.getItem(LS_KEY) || new URLSearchParams(location.search).get('token') || '';
-const cache = { accounts: [] };
+const cache = { accounts: [], exits: [], exitFilter: 'all' };
 
 function saveToken() {
   token = document.getElementById('token').value.trim();
@@ -356,7 +357,51 @@ function fillUpstreams(list) {
   if (names.indexOf(cur) >= 0) sel.value = cur;
 }
 
+function exitInWatch(e) {
+  const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
+  return !e.retired && e.healthy && e.consecutive_failures > 0 && !(q && q > new Date());
+}
+function exitInNap(e) {
+  const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
+  return !e.retired && q && q > new Date();
+}
+function exitInGate(e) {
+  return e.gate_pass_until && new Date(e.gate_pass_until) > new Date();
+}
+function exitMatches(e, f) {
+  if (f === 'slow') return !!e.slow;
+  if (f === 'watch') return exitInWatch(e);
+  if (f === 'nap') return exitInNap(e);
+  if (f === 'prune') return !e.retired && !!e.prunable;
+  if (f === 'split') return !!(e.peer_retired || e.peer_keeps);
+  if (f === 'gate') return exitInGate(e);
+  return true;
+}
+function exitFilterButtons(list) {
+  const el = document.getElementById('exit_filters');
+  if (!el) return;
+  const n = {
+    all: list.length,
+    slow: list.filter(e => e.slow).length,
+    watch: list.filter(exitInWatch).length,
+    nap: list.filter(exitInNap).length,
+    prune: list.filter(e => e.prunable && !e.retired).length,
+    split: list.filter(e => e.peer_retired || e.peer_keeps).length,
+    gate: list.filter(exitInGate).length,
+  };
+  const cur = cache.exitFilter || 'all';
+  const btn = (id, label) => '<button type="button" onclick="setExitFilter(\'' + id + '\')"' +
+    (cur === id ? ' style="font-weight:bold"' : '') + '>' + label + ' ' + n[id] + '</button>';
+  el.innerHTML = [btn('all', '全部'), btn('slow', '偏慢'), btn('watch', '观察'), btn('nap', '隔离'),
+    btn('prune', '可清理'), btn('split', '两边不一致'), btn('gate', '可走免费')].join(' ');
+}
+function setExitFilter(id) {
+  cache.exitFilter = id;
+  if (cache.exits) renderExits(cache.exits);
+}
 function renderExits(list) {
+  cache.exits = list;
+  exitFilterButtons(list);
   const there = [];
   const keeps = [];
   for (const e of list) {
@@ -366,8 +411,8 @@ function renderExits(list) {
   const peer = document.getElementById('peer_ids');
   if (peer) {
     const bits = [];
-    if (there.length) bits.push('另一副本已退役：' + there.map(esc).join('，'));
-    if (keeps.length) bits.push('另一副本还在用：' + keeps.map(esc).join('，'));
+    if (there.length) bits.push('另一副本已退役：' + there.join('，'));
+    if (keeps.length) bits.push('另一副本还在用：' + keeps.join('，'));
     peer.innerHTML = bits.join('。');
   }
   cache.pruneCount = list.filter(e => e.prunable && !e.retired).length;
@@ -375,7 +420,9 @@ function renderExits(list) {
   if (btn) btn.textContent = '清理垃圾出口（' + cache.pruneCount + '）';
   const tb = document.querySelector('#exits tbody');
   if (!list.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'; return; }
-  tb.innerHTML = list.map(e => {
+  const shown = list.filter(e => exitMatches(e, cache.exitFilter || 'all'));
+  if (!shown.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">这个筛选下没有出口</td></tr>'; return; }
+  tb.innerHTML = shown.map(e => {
     const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
     let state;
     if (e.retired) {
