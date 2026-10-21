@@ -458,6 +458,14 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// measured: a direct dial reached the upstream while the shared 3129
 	// family could not complete a single CONNECT.
 	transportFails := 0
+	// rateLimitFails counts 429s inside this one request. The resin population
+	// can be quota-dead until a shared reset (measured 2026-10-21: every tried
+	// slot answered 429 until midnight) while direct still completes the same
+	// model. Walking the rest of the attempt budget discovers nothing new and
+	// is what turned a fast upstream refusal into a 35s zero-byte client
+	// timeout. Two strikes is enough to leave that population.
+	rateLimitFails := 0
+	quotaFallbackLogged := false
 	// Requests are counted per account actually used, so a pool that had to
 	// switch accounts does not credit the one that failed.
 	counted := ""
@@ -485,6 +493,15 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 		}
 		if proxy != nil {
 			exitID = proxy.ID
+		}
+		if fp := e.quotaFallbackExit(rateLimitFails, exitID); fp != nil && exitID != "direct" {
+			proxy = fp
+			exitID = fp.ID
+			if !quotaFallbackLogged {
+				quotaFallbackLogged = true
+				e.log.Info("quota storm: leaving the spent proxy population for direct",
+					"account", ent.ID, "attempt", attempt, "rate_limits", rateLimitFails)
+			}
 		}
 		if fp := e.stormFallbackExit(transportFails, gated); fp != nil && exitID != "direct" {
 			proxy = fp
@@ -577,7 +594,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// would otherwise re-burn attempts on the flapping proxy layer
 			// before falling back again. The TTL binding self-heals — the
 			// cache-hit path re-checks pool health on every hit.
-			if stormFallbackLogged && exitID == "direct" {
+			if (stormFallbackLogged || quotaFallbackLogged) && exitID == "direct" {
 				e.reg.BindSession(ent.ID, sessionID, askedModel, exitID)
 			}
 			if plan != nil && plan.ReplyAsChat && plan.Stream {
@@ -716,6 +733,9 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			}
 		}
 
+		if class == model.ClassRateLimit {
+			rateLimitFails++
+		}
 		if class == model.ClassTierGate {
 			// A model that is free but missing from the configured list is
 			// discovered here, on its first refusal. The retry is free: the
@@ -822,6 +842,33 @@ const stormFallbackThreshold = 2
 // single most-refused exit in the pool while sitting outside the admission set,
 // and every one of those refusals ended in a failed turn. When direct is not
 // admitted the caller keeps rotating through the normal pool instead.
+// quotaFallbackExit leaves a proxy population that is answering 429. It fires
+// once this request has seen two rate limits, or immediately when the exit
+// just selected is already inside a quota cooldown — retrying that one is a
+// known refusal. Direct is eligible without a fresh gate admission: the
+// alternative is more of the same 429s, and a gate refusal on direct still
+// hits the two-strike red window instead of a client-side hang.
+func (e *Engine) quotaFallbackExit(rateLimitFails int, currentID string) *proxypool.Proxy {
+	if e.pool == nil || currentID == "direct" {
+		return nil
+	}
+	_, _, currentCool := e.pool.QuotaCooled(currentID)
+	if rateLimitFails < stormFallbackThreshold && !currentCool {
+		return nil
+	}
+	p, ok := e.pool.Get("direct")
+	if !ok || p == nil {
+		return nil
+	}
+	if h, known := e.pool.Healthy("direct"); !known || !h {
+		return nil
+	}
+	if _, _, cool := e.pool.QuotaCooled("direct"); cool {
+		return nil
+	}
+	return p
+}
+
 func (e *Engine) stormFallbackExit(transportFails int, gated bool) *proxypool.Proxy {
 	if transportFails < stormFallbackThreshold {
 		return nil
@@ -863,9 +910,12 @@ func freeTierBlockDuration(cfg config.FreeTier) time.Duration {
 // take to produce response headers. The envelope always streams upstream, so
 // a live slot answers in well under a second and a stuck one is dead weight;
 // without this a single hang ran into the 3600s request ctx (measured 773s).
-// Paid/non-stream traffic is untouched: those responses legitimately delay
-// headers until generation finishes.
-const freeAttemptHeaderTimeout = 30 * time.Second
+// 30s was still too long: a client that gives up at 35s saw HTTP 000 and zero
+// bytes, so the attempt never rotated (measured 2026-10-21, deepseek free).
+// 8s matches the health-probe dial cap and leaves room for several switches
+// inside that client budget. Paid/non-stream traffic is untouched: those
+// responses legitimately delay headers until generation finishes.
+const freeAttemptHeaderTimeout = 8 * time.Second
 
 func (e *Engine) clientFor(proxy *proxypool.Proxy, free bool) *http.Client {
 	t := e.direct
