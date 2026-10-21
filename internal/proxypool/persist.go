@@ -319,6 +319,107 @@ func (p *Pool) loadState() {
 	}
 }
 
+// ReplicaSplit is how the two live exit-state files differ, by exit, not by
+// the headline counts. A gap of 12 can hide 18 exits that are not the same set.
+type ReplicaSplit struct {
+	RetiredOnlySelf int `json:"retired_only_self"`
+	RetiredOnlyPeer int `json:"retired_only_peer"`
+	QuotaOnlySelf   int `json:"quota_only_self"`
+	QuotaOnlyPeer   int `json:"quota_only_peer"`
+}
+
+// StateSplit compares this replica's exit-state file with the other live one.
+// A peer file that has not been rewritten for three minutes is ignored, same
+// as StateSnapshots, so a dead container does not count as the other side.
+func (p *Pool) StateSplit() ReplicaSplit {
+	if p.statePath == "" {
+		return ReplicaSplit{}
+	}
+	self, err := readExitsState(p.statePath)
+	if err != nil {
+		return ReplicaSplit{}
+	}
+	peerPath := p.livePeerState()
+	if peerPath == "" {
+		return ReplicaSplit{}
+	}
+	peer, err := readExitsState(peerPath)
+	if err != nil {
+		return ReplicaSplit{}
+	}
+	now := time.Now()
+	var out ReplicaSplit
+	seen := map[string]struct{}{}
+	for id := range self.Exits {
+		seen[id] = struct{}{}
+	}
+	for id := range peer.Exits {
+		seen[id] = struct{}{}
+	}
+	for id := range seen {
+		selfRec := self.Exits[id]
+		peerRec := peer.Exits[id]
+		if selfRec.Retired && !peerRec.Retired {
+			out.RetiredOnlySelf++
+		} else if peerRec.Retired && !selfRec.Retired {
+			out.RetiredOnlyPeer++
+		}
+		selfCool := selfRec.QuotaUntil.After(now)
+		peerCool := peerRec.QuotaUntil.After(now)
+		if selfCool && !peerCool {
+			out.QuotaOnlySelf++
+		} else if peerCool && !selfCool {
+			out.QuotaOnlyPeer++
+		}
+	}
+	return out
+}
+
+func (p *Pool) livePeerState() string {
+	dir := filepath.Dir(p.statePath)
+	matches, err := filepath.Glob(filepath.Join(dir, "exits-state*.json"))
+	if err != nil {
+		return ""
+	}
+	var best string
+	var bestAt time.Time
+	for _, path := range matches {
+		if path == p.statePath {
+			continue
+		}
+		base := filepath.Base(path)
+		if strings.Contains(base, ".bak-") || base == "exits-state.json" {
+			continue
+		}
+		st, err := readExitsState(path)
+		if err != nil || st.SavedAt.IsZero() || time.Since(st.SavedAt) > 3*time.Minute {
+			continue
+		}
+		if best == "" || st.SavedAt.After(bestAt) {
+			best, bestAt = path, st.SavedAt
+		}
+	}
+	return best
+}
+
+func readExitsState(path string) (exitsState, error) {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 8<<20 {
+		if err == nil {
+			err = os.ErrInvalid
+		}
+		return exitsState{}, err
+	}
+	var st exitsState
+	if err := json.Unmarshal(b, &st); err != nil {
+		return exitsState{}, err
+	}
+	if st.Exits == nil {
+		st.Exits = map[string]exitRecord{}
+	}
+	return st, nil
+}
+
 // ReplicaState is one exit-state file in this pool's directory. The admin
 // panel is pinned to replica A, so without this the operator cannot see that
 // replica B has retired a different set.

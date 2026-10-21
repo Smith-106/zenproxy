@@ -223,3 +223,32 @@ func TestExpiredBlockNotRestored(t *testing.T) {
 		t.Fatal("an expired free-tier block survived the restart as active")
 	}
 }
+
+func TestStateSplitCountsExitsNotTheHeadlineGap(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "exits-state-a.json")
+	peer := filepath.Join(dir, "exits-state-b.json")
+	write := func(path string, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	later := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	write(self, `{"version":1,"saved_at":"`+now+`","exits":{`+
+		`"ex-1":{"retired":true},`+
+		`"ex-2":{"retired":true},`+
+		`"ex-3":{"quota_until":"`+later+`"}}}`)
+	write(peer, `{"version":1,"saved_at":"`+now+`","exits":{`+
+		`"ex-2":{"retired":true},`+
+		`"ex-4":{"retired":true}}}`)
+	p, err := NewPool([]Spec{{ID: "ex-1", URL: "http://127.0.0.1:1"}}, config.Health{}, testLogger(), self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := p.StateSplit()
+	if got.RetiredOnlySelf != 1 || got.RetiredOnlyPeer != 1 || got.QuotaOnlySelf != 1 || got.QuotaOnlyPeer != 0 {
+		t.Fatalf("split = %+v, want self-retired 1, peer-retired 1, self-quota 1", got)
+	}
+}

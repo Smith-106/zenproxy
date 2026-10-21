@@ -228,13 +228,12 @@ function replicaLine(s) {
       ' / ' + (r.exits || 0) + '，额度冷却 ' + (r.quota || 0) + '，写于 ' + esc(when);
   }).join(' · ') + accountReplicaLine(s);
   if (rows.length < 2) return line;
+  const split = s.replica_split || {};
   const bits = [];
-  const retired = rows.map(r => r.retired || 0);
-  const quota = rows.map(r => r.quota || 0);
-  const rd = Math.max.apply(null, retired) - Math.min.apply(null, retired);
-  const qd = Math.max.apply(null, quota) - Math.min.apply(null, quota);
-  if (rd) bits.push('退役差 ' + rd);
-  if (qd) bits.push('额度冷却差 ' + qd);
+  if (split.retired_only_self) bits.push('本副本多退役 ' + split.retired_only_self);
+  if (split.retired_only_peer) bits.push('另一副本多退役 ' + split.retired_only_peer);
+  if (split.quota_only_self) bits.push('本副本多冷却 ' + split.quota_only_self);
+  if (split.quota_only_peer) bits.push('另一副本多冷却 ' + split.quota_only_peer);
   if (!bits.length) return line;
   return line + ' · <span class="pill warn" title="两份状态文件不是同一份。这台页面只反映本副本">两边不一致：' +
     bits.join('，') + '</span>';
