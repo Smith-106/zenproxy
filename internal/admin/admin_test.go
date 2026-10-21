@@ -180,6 +180,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`openDetailIds`, `paintRows`,
 		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
+		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,

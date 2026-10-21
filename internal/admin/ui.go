@@ -138,7 +138,7 @@ const dashboardHTML = `<!doctype html>
       <label>出口
         <input id="f_proxy" placeholder="auto / direct / 出口ID" value="auto">
       </label>
-      <label>权重<input id="f_weight" type="number" value="0" title="预留字段：当前轮换不按权重分配，0 = 默认"></label>
+      <label>权重<input id="f_weight" type="number" value="0" title="这个池轮流用账号，权重不参与挑选"> <span class="muted" id="weight_hint"></span></label>
       <label>自定义头（JSON）<input id="f_headers" placeholder='{"X-Foo":"bar"}' autocomplete="off"></label>
       <label>启用
         <select id="f_enabled"><option value="true">是</option><option value="false">否</option></select>
@@ -210,6 +210,11 @@ async function load() {
     renderConfig(status);
     renderPools(status);
     fillUpstreams(status.upstreams || []);
+    cache.poolUsesWeight = (status.pools || []).some(p => p.strategy === 'weighted');
+    const weightHint = document.getElementById('weight_hint');
+    const weightInput = document.getElementById('f_weight');
+    if (weightHint) weightHint.textContent = cache.poolUsesWeight ? '按权重挑' : '不看权重';
+    if (weightInput) weightInput.title = cache.poolUsesWeight ? '这个池按权重挑账号' : '这个池轮流用账号，权重不参与挑选';
     cache.failureThreshold = (status.health || {}).failure_threshold || 0;
     cache.maxLatencyMS = (status.health || {}).max_latency_ms || 0;
     document.getElementById('foot').innerHTML =
@@ -729,7 +734,8 @@ function renderAccounts(list) {
     '</tr>');
     const hdrs = a.headers || a.Headers;
     rows.push('<tr class="detail" id="' + esc(detailId) + '" style="display:' + (open[esc(detailId)] ? '' : 'none') + '"><td colspan="13">' +
-      '权重 <code>' + esc(a.weight || 0) + '</code> · ' +
+      '权重 <code>' + esc(a.weight || 0) + '</code>' +
+        (cache.poolUsesWeight ? '' : ' <span class="muted">不看权重</span>') + ' · ' +
       '自定义头 <code>' + esc(hdrs && Object.keys(hdrs).length ? JSON.stringify(hdrs) : '无') + '</code> · ' +
       '绑定出口 IP ' + accountIPCell(a) + ' · ' +
       '成功 ' + (st.success || 0) + ' · 上游调用 ' + (st.upstream_calls || 0) + ' · ' +
