@@ -1428,57 +1428,53 @@ func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []by
 	w.Header().Del("Content-Length")
 	if class != "" && class != model.ClassOK {
 		w.Header().Set("X-Zen-Error", string(class))
-		body = stampUpstreamClass(body, class)
+		stamped := stampUpstreamClass(body, class)
+		if !bytes.Equal(stamped, body) {
+			body = stamped
+			w.Header().Set("Content-Type", "application/json")
+		}
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
 
-// stampUpstreamClass puts the class into a JSON error body when the vendor
-// did not already name a code. A string error becomes an object, because that
-// is the only shape new-api copies a code out of. Anything else is left as
-// the vendor sent it.
+// stampUpstreamClass puts the class into the JSON shape new-api actually
+// copies. A vendor code already on the error object is left alone. Plain
+// text (Cloudflare "error code: 1010"), an empty body, and a JSON object
+// with no error field become {"error":{"message","type","code"}}.
 func stampUpstreamClass(body []byte, class model.ErrorClass) []byte {
 	if class == "" || class == model.ClassOK {
 		return body
 	}
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return body
+		return wrapUpstreamClass(class, string(trimmed))
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(trimmed, &top); err != nil {
-		return body
+		return wrapUpstreamClass(class, string(trimmed))
 	}
 	raw, ok := top["error"]
 	if !ok {
-		return body
+		return wrapUpstreamClass(class, jsonMessage(top))
 	}
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return body
+		return wrapUpstreamClass(class, jsonMessage(top))
 	}
 	if raw[0] == '"' {
 		var msg string
 		if err := json.Unmarshal(raw, &msg); err != nil || msg == "" {
-			return body
+			return wrapUpstreamClass(class, "")
 		}
-		stamped, err := json.Marshal(map[string]any{"error": map[string]string{
-			"message": msg,
-			"type":    "upstream_error",
-			"code":    string(class),
-		}})
-		if err != nil {
-			return body
-		}
-		return stamped
+		return wrapUpstreamClass(class, msg)
 	}
 	if raw[0] != '{' {
-		return body
+		return wrapUpstreamClass(class, string(raw))
 	}
 	var errObj map[string]any
 	if err := json.Unmarshal(raw, &errObj); err != nil {
-		return body
+		return wrapUpstreamClass(class, string(trimmed))
 	}
 	if code, exists := errObj["code"]; exists && code != nil && code != "" {
 		return body
@@ -1494,6 +1490,36 @@ func stampUpstreamClass(body []byte, class model.ErrorClass) []byte {
 		return body
 	}
 	return stamped
+}
+
+func wrapUpstreamClass(class model.ErrorClass, msg string) []byte {
+	msg = scrubClientText(msg)
+	if msg == "" {
+		msg = "the upstream refused the request"
+	}
+	stamped, err := json.Marshal(map[string]any{"error": map[string]string{
+		"message": msg,
+		"type":    "upstream_error",
+		"code":    string(class),
+	}})
+	if err != nil {
+		return []byte(`{"error":{"message":"the upstream refused the request","type":"upstream_error","code":` + strconv.Quote(string(class)) + `}}`)
+	}
+	return stamped
+}
+
+func jsonMessage(top map[string]json.RawMessage) string {
+	for _, key := range []string{"message", "msg", "error_msg", "detail"} {
+		raw, ok := top[key]
+		if !ok {
+			continue
+		}
+		var msg string
+		if err := json.Unmarshal(bytes.TrimSpace(raw), &msg); err == nil && msg != "" {
+			return msg
+		}
+	}
+	return ""
 }
 
 func writeFoldTerminal(w http.ResponseWriter, foldErr string) {

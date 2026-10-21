@@ -111,9 +111,12 @@ func TestWriteUpstreamResponsePutsTheClassWhereTheNextHopKeepsIt(t *testing.T) {
 	if strings.Contains(string(kept), "rate_limit") || !strings.Contains(string(kept), "vendor_code") {
 		t.Fatalf("vendor code was replaced: %s", kept)
 	}
-	plain := stampUpstreamClass([]byte("not json"), model.ClassRateLimit)
-	if string(plain) != "not json" {
+	plain := stampUpstreamClass([]byte("error code: 1010"), model.ClassAuth)
+	if !strings.Contains(string(plain), `"code":"auth"`) || !strings.Contains(string(plain), "1010") {
 		t.Fatalf("plain = %s", plain)
+	}
+	if rec.Header().Get("Content-Type") != "application/json" {
+		t.Fatalf("content type = %q", rec.Header().Get("Content-Type"))
 	}
 }
 
