@@ -117,6 +117,7 @@ const dashboardHTML = `<!doctype html>
       <th>出口 ID</th><th>类型</th><th>地址</th><th>出口 IP</th><th>延迟</th>
       <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
+    <p class="muted" id="peer_ids"></p>
     <p class="muted" style="margin-top:8px">
       <b>清理垃圾出口</b>按这一页上的「可清理」计数，把这些出口<b>永久移出轮换</b>：
       隔离中的、不健康的、延迟超过上限的。偏慢但还在轮换里的也算。
@@ -356,6 +357,19 @@ function fillUpstreams(list) {
 }
 
 function renderExits(list) {
+  const there = [];
+  const keeps = [];
+  for (const e of list) {
+    if (e.peer_retired) there.push(e.id);
+    if (e.peer_keeps) keeps.push(e.id);
+  }
+  const peer = document.getElementById('peer_ids');
+  if (peer) {
+    const bits = [];
+    if (there.length) bits.push('另一副本已退役：' + there.map(esc).join('，'));
+    if (keeps.length) bits.push('另一副本还在用：' + keeps.map(esc).join('，'));
+    peer.innerHTML = bits.join('。');
+  }
   cache.pruneCount = list.filter(e => e.prunable && !e.retired).length;
   const btn = document.getElementById('prune_btn');
   if (btn) btn.textContent = '清理垃圾出口（' + cache.pruneCount + '）';
