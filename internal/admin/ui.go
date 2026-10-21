@@ -92,6 +92,7 @@ const dashboardHTML = `<!doctype html>
     <h2>总览</h2>
     <div class="cards" id="stat"></div>
     <p class="muted" id="pool_shape"></p>
+    <p class="muted" id="untimed_note"></p>
   </section>
 
   <section>
@@ -410,6 +411,11 @@ function setExitFilter(id) {
 }
 function renderExits(list) {
   cache.exits = list;
+  const note = document.getElementById('untimed_note');
+  if (note) {
+    const untimed = list.filter(e => !e.retired && e.healthy && !e.latency_ms).length;
+    note.textContent = untimed ? ('健康出口里有 ' + untimed + ' 个这次还没量过延迟。格子里写着「还没量过」，不是坏了。') : '';
+  }
   exitFilterButtons(list);
   const peer = document.getElementById('peer_ids');
   if (peer) {
