@@ -224,7 +224,19 @@ func (p *Pool) loadState() {
 	}
 	b, err := os.ReadFile(p.statePath)
 	if err != nil {
-		return // first boot, no file yet: start clean, silently
+		// First boot of a per-host file: take one snapshot from the legacy
+		// shared document, then never write back to it. Both replicas can
+		// seed from the same facts without resuming the last-writer race.
+		legacy := filepath.Join(filepath.Dir(p.statePath), "exits-state.json")
+		if legacy == p.statePath {
+			return
+		}
+		seed, seedErr := os.ReadFile(legacy)
+		if seedErr != nil {
+			return
+		}
+		b = seed
+		p.log.Info("seeded exit health from the shared file", "from", legacy, "own", p.statePath)
 	}
 	var st exitsState
 	if err := json.Unmarshal(b, &st); err != nil {

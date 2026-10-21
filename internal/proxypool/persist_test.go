@@ -72,6 +72,52 @@ func TestExitStatePersistence(t *testing.T) {
 	})
 }
 
+func TestSeedFromSharedFileDoesNotRewriteIt(t *testing.T) {
+	dir := t.TempDir()
+	legacy := filepath.Join(dir, "exits-state.json")
+	own := filepath.Join(dir, "exits-state-replica-a.json")
+	specs := []Spec{{ID: "ex-b", URL: "http://127.0.0.1:58002"}}
+	p1, err := NewPool(specs, config.Health{}, testLogger(), legacy)
+	if err != nil {
+		t.Fatalf("legacy pool: %v", err)
+	}
+	if err := p1.Retire("ex-b", "chronic garbage"); err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	p1.SaveState()
+	before, err := os.ReadFile(legacy)
+	if err != nil {
+		t.Fatalf("read legacy: %v", err)
+	}
+
+	p2, err := NewPool(specs, config.Health{}, testLogger(), own)
+	if err != nil {
+		t.Fatalf("replica pool: %v", err)
+	}
+	if got := p2.RetiredCount(); got != 1 {
+		t.Fatalf("seeded RetiredCount = %d, want 1", got)
+	}
+	after, err := os.ReadFile(legacy)
+	if err != nil {
+		t.Fatalf("reread legacy: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("seeding rewrote the shared file")
+	}
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Fatal("seeding created the replica file before anything changed")
+	}
+	p2.markDirty()
+	p2.SaveState()
+	if _, err := os.Stat(own); err != nil {
+		t.Fatalf("replica file not written: %v", err)
+	}
+	afterSave, _ := os.ReadFile(legacy)
+	if !bytes.Equal(before, afterSave) {
+		t.Fatal("replica save rewrote the shared file")
+	}
+}
+
 func TestExpiredBlockNotRestored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "exits-state.json")
 	specs := []Spec{{ID: "ex-a", URL: "http://127.0.0.1:58001"}}

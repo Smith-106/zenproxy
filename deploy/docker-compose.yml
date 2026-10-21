@@ -17,10 +17,11 @@
 #               docker build -q -f deploy/Dockerfile.slim -t zenproxy:latest . &&
 #               /usr/local/bin/zenproxy-rolling.sh'   ← 见 deploy/rolling-deploy.sh
 #
-# 状态共享：两个副本都以读写挂 ./data；state.json / exits-state.json 的写入
-#   全部走 tmp+rename 原子替换，双写只可能"后写覆盖"，不会撕裂。会话→出口的
-#   亲和表在各自内存里（丢了会自愈重绑）；上游缓存是内容寻址的（实测跨账户
-#   215k 前缀照样 99% 命中），副本切换不伤缓存。
+# 状态：两个副本都以读写挂 ./data。出口健康写成各自的
+#   exits-state-<hostname>.json，避免后写覆盖把另一边刚记下的退役和准入抹掉。
+#   旧的共享 exits-state.json 只在本副本还没有自己的文件时读一次当种子。
+#   会话→出口的亲和表在各自内存里（丢了会自愈重绑）；上游缓存是内容寻址的
+#   （实测跨账户 215k 前缀照样 99% 命中），副本切换不伤缓存。
 #
 # 环境变量：与单副本时代完全一致（ZEN_ADMIN_TOKEN / RESIN_PROXY_TOKEN /
 #   ZEN_KEY_01..05），.env 只做 compose 插值、不进容器。

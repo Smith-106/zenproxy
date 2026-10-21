@@ -69,10 +69,19 @@ def main() -> int:
 
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     shutil.copy2(args.config, args.config + ".bak-" + ts)
-    if os.path.exists(args.state):
-        shutil.copy2(args.state, args.state + ".bak-" + ts)
-        os.remove(args.state)          # 从干净状态开跑：ID 是位置式的，旧标记不能留
-        print("exits-state.json 已备份并清空")
+    state_dir = os.path.dirname(args.state) or "."
+    cleared = 0
+    for name in sorted(os.listdir(state_dir)):
+        if not (name == "exits-state.json" or (name.startswith("exits-state-") and name.endswith(".json"))):
+            continue
+        src = os.path.join(state_dir, name)
+        if not os.path.isfile(src):
+            continue
+        shutil.copy2(src, src + ".bak-" + ts)
+        os.remove(src)          # 从干净状态开跑：ID 是位置式的，旧标记不能留
+        cleared += 1
+    if cleared:
+        print("cleared %d exit-state file(s) under %s" % (cleared, state_dir))
 
     lines = open(args.config, encoding="utf-8").read().split("\n")
     i0 = next(i for i, l in enumerate(lines) if l.rstrip() == "  static:")

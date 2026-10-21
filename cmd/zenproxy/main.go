@@ -43,12 +43,27 @@ func main() {
 }
 
 // poolStatePath puts the exit-health sidecar file next to the registry's
-// state.json so both share the same persistence volume without sharing a file.
+// state.json. The name includes the hostname so two replicas on the same
+// volume do not take turns overwriting each other's retirements and
+// admissions. A missing per-host file is seeded from the old shared
+// exits-state.json once; see proxypool.loadState.
 func poolStatePath(stateFile string) string {
 	if stateFile == "" {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(stateFile), "exits-state.json")
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "local"
+	}
+	host = strings.Map(func(r rune) rune {
+		switch r {
+		case '/', '\\', ':', ' ':
+			return '-'
+		default:
+			return r
+		}
+	}, host)
+	return filepath.Join(filepath.Dir(stateFile), "exits-state-"+host+".json")
 }
 
 // sessionFileSyncPath is the shared sticky-table file: a sibling of the
