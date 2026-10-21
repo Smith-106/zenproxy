@@ -492,6 +492,9 @@ function exitIPWord(note) {
   return '隧道是通的，这次没问到出口地址';
 }
 function exitIPCell(e) {
+  if (!e.exit_ip && !e.exit_ip_note) {
+    return '<code title="还没问过出口地址">还没问过</code>';
+  }
   const ip = e.exit_ip || '—';
   const note = exitIPWord(e.exit_ip_note);
   const title = note ? ' title="' + esc(note) + '"' : '';
