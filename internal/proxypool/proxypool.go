@@ -441,6 +441,9 @@ type member struct {
 	// probe success does not reset it — see poisonRetireAfter.
 	poisonConsec    int
 	quarantineUntil time.Time
+	// quarantineClass is the panel word for why this nap started. It is the
+	// only form that survives a restart; the raw dial error does not.
+	quarantineClass string
 	lastErr         string
 	lastCheck       time.Time
 	boundAccounts   map[string]struct{}
@@ -1127,6 +1130,7 @@ func (p *Pool) MarkSuccess(id string, latency time.Duration) {
 	m.consecFails = 0
 	m.poisonConsec = 0 // real traffic proved the cert path; wipe the poison streak
 	m.quarantineUntil = time.Time{}
+	m.quarantineClass = ""
 	m.lastErr = ""
 	if latency > 0 {
 		m.latencyMS = latency.Milliseconds()
@@ -1182,6 +1186,7 @@ func (p *Pool) MarkFailure(id, reason string) {
 			backoff = p.health.MaxBackoff
 		}
 		m.quarantineUntil = time.Now().Add(backoff)
+		m.quarantineClass = classifyQuarantine(reason)
 		p.log.Warn("egress quarantined",
 			"exit", id, "failures", m.failures, "consecutive", m.consecFails,
 			"poison_consec", m.poisonConsec,
@@ -1307,6 +1312,7 @@ func (p *Pool) Quarantine(id string, d time.Duration, reason string) bool {
 	}
 	if until.After(m.quarantineUntil) {
 		m.quarantineUntil = until
+		m.quarantineClass = classifyQuarantine(reason)
 		m.lastErr = reason
 		m.lastCheck = time.Now()
 		p.log.Info("egress quarantined",
@@ -2030,6 +2036,7 @@ func (p *Pool) Revive(id string) error {
 	m.consecFails = 0
 	m.poisonConsec = 0
 	m.quarantineUntil = time.Time{}
+	m.quarantineClass = ""
 	m.healthy = true
 	m.lastErr = ""
 	p.log.Info("egress revived", "exit", id)
@@ -2121,13 +2128,16 @@ func (p *Pool) QuarantineBreakdown() QuarantineBreakdown {
 	for _, m := range p.members {
 		m.mu.Lock()
 		parked := !m.retired && now.Before(m.quarantineUntil)
-		reason := m.lastErr
+		class := m.quarantineClass
+		if class == "" {
+			class = classifyQuarantine(m.lastErr)
+		}
 		m.mu.Unlock()
 		if !parked {
 			continue
 		}
 		out.Total++
-		switch classifyQuarantine(reason) {
+		switch class {
 		case "timeout":
 			out.Timeout++
 		case "unreachable":
@@ -2362,6 +2372,7 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	// Keep poisonConsec: a probe that happens to pass TLS must not wipe the
 	// MITM strike count, or intermittent poison slots never reach retirement.
 	m.quarantineUntil = time.Time{}
+	m.quarantineClass = ""
 	if exitIP != "" {
 		m.lastErr = ""
 	}

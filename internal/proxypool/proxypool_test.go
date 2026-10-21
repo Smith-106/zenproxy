@@ -1,6 +1,7 @@
 package proxypool
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -8,6 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -78,6 +81,30 @@ func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
 	}
 	if n := pool.SlowCount(); n != 1 {
 		t.Fatalf("slow = %d, want 1", n)
+	}
+
+	path := filepath.Join(t.TempDir(), "exits-state.json")
+	pool.statePath = path
+	pool.SaveState()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if bytes.Contains(raw, []byte("i/o timeout")) || bytes.Contains(raw, []byte("proxyconnect")) {
+		t.Fatal("quarantine state persisted the raw dial error")
+	}
+	restarted, err := NewPool([]Spec{
+		{ID: "a", URL: "http://127.0.0.1:9"},
+		{ID: "b", URL: "http://127.0.0.1:9"},
+		{ID: "c", URL: "http://127.0.0.1:9"},
+		{ID: "d", URL: "http://127.0.0.1:9"},
+	}, config.Health{FailureThreshold: 1, MaxLatency: 3 * time.Second, Timeout: time.Second, Quarantine: time.Minute, MaxBackoff: time.Minute}, testLogger(), path)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	again := restarted.QuarantineBreakdown()
+	if again.Total != 3 || again.Timeout != 1 || again.Unreachable != 1 || again.TLS != 1 || again.Other != 0 {
+		t.Fatalf("after restart breakdown = %+v", again)
 	}
 }
 

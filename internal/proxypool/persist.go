@@ -45,6 +45,10 @@ type exitRecord struct {
 	RetiredReason   string    `json:"retired_reason,omitempty"`
 	RetiredAt       time.Time `json:"retired_at,omitempty"`
 	QuarantineUntil time.Time `json:"quarantine_until,omitempty"`
+	// QuarantineClass is timeout, unreachable, tls, or other. The raw dial
+	// error stays in memory: it can carry an address, and the panel only
+	// needs the word.
+	QuarantineClass string    `json:"quarantine_class,omitempty"`
 	FreeTierUntil   time.Time `json:"free_tier_until,omitempty"`
 	FreeTierReason  string    `json:"free_tier_reason,omitempty"`
 	QuotaUntil      time.Time `json:"quota_until,omitempty"`
@@ -83,6 +87,9 @@ func (r exitRecord) MarshalJSON() ([]byte, error) {
 	}
 	putTime(m, "retired_at", r.RetiredAt)
 	putTime(m, "quarantine_until", r.QuarantineUntil)
+	if r.QuarantineClass != "" {
+		m["quarantine_class"] = r.QuarantineClass
+	}
 	putTime(m, "free_tier_until", r.FreeTierUntil)
 	if r.FreeTierReason != "" {
 		m["free_tier_reason"] = r.FreeTierReason
@@ -168,6 +175,7 @@ func (p *Pool) SaveState() {
 			RetiredReason:   m.retiredReason,
 			RetiredAt:       m.retiredAt,
 			QuarantineUntil: m.quarantineUntil,
+			QuarantineClass: m.quarantineClass,
 			FreeTierUntil:   m.freeTierUntil,
 			FreeTierReason:  m.freeTierReason,
 			QuotaUntil:      m.quotaUntil,
@@ -260,6 +268,10 @@ func (p *Pool) loadState() {
 		m.poisonConsec = rec.PoisonConsec
 		if rec.QuarantineUntil.After(now) {
 			m.quarantineUntil = rec.QuarantineUntil
+			switch rec.QuarantineClass {
+			case "timeout", "unreachable", "tls", "other":
+				m.quarantineClass = rec.QuarantineClass
+			}
 		}
 		if rec.FreeTierUntil.After(now) {
 			m.freeTierUntil = rec.FreeTierUntil
