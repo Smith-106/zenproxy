@@ -43,4 +43,7 @@ func TestPanelReasonDropsADialAndKeepsAVendorSentence(t *testing.T) {
 	if strings.Contains(vendor, "secret") || strings.Contains(vendor, "pass") || !strings.Contains(vendor, "HTTP 400") {
 		t.Fatalf("vendor = %q", vendor)
 	}
+	if got := DialClass("http proxy: network is unreachable"); got != "unreachable" {
+		t.Fatalf("unreachable not at the start = %q", got)
+	}
 }

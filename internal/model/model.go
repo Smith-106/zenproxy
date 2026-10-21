@@ -276,12 +276,21 @@ var (
 	panelIPv4     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
 )
 
+// httpStatusLine is "http 400 ...", a vendor sentence. "http proxy: ..." is a
+// dial that happens to start with the scheme word, and must not be skipped.
+func httpStatusLine(low string) bool {
+	if !strings.HasPrefix(low, "http ") || len(low) < 6 {
+		return false
+	}
+	return low[5] >= '0' && low[5] <= '9'
+}
+
 // DialClass folds a socket dump into the same four words the quarantine
 // counter uses. An HTTP status line is not a dial, so it returns "" and the
 // caller keeps the vendor sentence.
 func DialClass(msg string) string {
 	low := strings.ToLower(strings.TrimSpace(msg))
-	if low == "" || strings.HasPrefix(low, "http ") {
+	if low == "" || httpStatusLine(low) {
 		return ""
 	}
 	switch {
@@ -290,7 +299,7 @@ func DialClass(msg string) string {
 	case strings.Contains(low, "timeout") || strings.Contains(low, "deadline"):
 		return "timeout"
 	case strings.Contains(low, "proxyconnect") || strings.Contains(low, "connection refused") ||
-		strings.Contains(low, "no such host") || strings.HasPrefix(low, "unreachable") ||
+		strings.Contains(low, "no such host") || strings.Contains(low, "unreachable") ||
 		strings.Contains(low, "socks"):
 		return "unreachable"
 	default:
