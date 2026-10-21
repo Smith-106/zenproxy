@@ -136,12 +136,13 @@ func (s *Server) Metrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	accounts := s.reg.List()
 	enabled := 0
-	var totalReq, totalFail, totalRot int64
+	var totalReq, totalOK, totalFail, totalRot int64
 	for _, a := range accounts {
 		if a.Enabled {
 			enabled++
 		}
 		totalReq += a.Stats.Requests
+		totalOK += a.Stats.Success
 		totalFail += a.Stats.Failures
 		totalRot += a.Stats.Rotations
 	}
@@ -174,6 +175,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"threshold":            outageLimit,
 		},
 		"requests":         totalReq,
+		"success":          totalOK,
 		"failures":         totalFail,
 		"rotations":        totalRot,
 		"upstreams":        upstreams,

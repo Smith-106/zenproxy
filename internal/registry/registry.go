@@ -56,6 +56,7 @@ type ReplicaAccounts struct {
 	Name     string    `json:"name"`
 	Self     bool      `json:"self"`
 	Requests int64     `json:"requests"`
+	Success  int64     `json:"success"`
 	Failures int64     `json:"failures"`
 	SavedAt  time.Time `json:"saved_at,omitempty"`
 }
@@ -1026,6 +1027,7 @@ func (r *Registry) ReplicaAccountCounters() []ReplicaAccounts {
 	self := ReplicaAccounts{Name: r.replica, Self: true}
 	for _, e := range r.accounts {
 		self.Requests += e.Stats.Requests
+		self.Success += e.Stats.Success
 		self.Failures += e.Stats.Failures
 	}
 	path, replica := r.path, r.replica
@@ -1058,6 +1060,7 @@ func (r *Registry) ReplicaAccountCounters() []ReplicaAccounts {
 				continue
 			}
 			row.Requests += st.Requests
+			row.Success += st.Success
 			row.Failures += st.Failures
 		}
 		out = append(out, row)

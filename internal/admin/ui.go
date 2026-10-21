@@ -138,12 +138,14 @@ const dashboardHTML = `<!doctype html>
     </form>
     <table id="accounts"><thead><tr>
       <th>账号</th><th>上游</th><th>Key</th><th>策略</th><th>出口</th><th>出口 IP</th><th>状态</th>
-      <th>最近分类</th><th>请求</th><th>失败</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
+      <th>最近分类</th><th>请求</th><th>成功/尝试失败</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" style="margin-top:8px">
       「编辑」把该账号回填到上面表单里，改完点保存即可更新（ID 本身也可以改，改了就是新增）。
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
+      「尝试失败」按每一次上游调用计：一次请求换几个出口就会记几笔，不是失败的请求数。
+      请求有没有完成，看同一格左边的成功数。
     </p>
   </section>
 </main>
@@ -225,7 +227,7 @@ function accountReplicaLine(s) {
   return ' · ' + rows.map(r => {
     const who = r.self ? '本副本账号' : '另一副本账号';
     return who + ' <code>' + esc(r.name || '') + '</code> 请求 ' + (r.requests || 0) +
-      ' 失败 ' + (r.failures || 0);
+      ' 成功 ' + (r.success || 0) + ' 尝试失败 ' + (r.failures || 0);
   }).join(' · ');
 }
 
@@ -235,12 +237,13 @@ function renderStat(s) {
     ['出口', s.exits_healthy + ' / ' + s.exits + ' 健康'],
     ['退休出口', s.exits_retired],
     ['请求', s.requests],
-    ['失败', s.failures],
+    ['成功', (s.success || 0) + ' / ' + (s.requests || 0)],
+    ['尝试失败', s.failures, '一次请求换出口会记多次，不是失败的请求数'],
     ['换 IP 次数', s.rotations],
     ['在线', Math.floor(s.uptime_seconds) + 's'],
   ];
-  document.getElementById('stat').innerHTML = cards.map(([k, v]) =>
-    '<div class="card"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div></div>').join('');
+  document.getElementById('stat').innerHTML = cards.map(c =>
+    '<div class="card"' + (c[2] ? ' title="' + esc(c[2]) + '"' : '') + '><div class="k">' + esc(c[0]) + '</div><div class="v">' + esc(c[1]) + '</div></div>').join('');
 }
 
 function renderConfig(s) {
@@ -442,7 +445,7 @@ function renderAccounts(list) {
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) + '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
-      '<td>' + (st.failures || 0) + '</td>' +
+      '<td title="左边是完成的请求，右边是按尝试计的失败">' + (st.success || 0) + ' / ' + (st.failures || 0) + '</td>' +
       '<td>' + (st.rotations || 0) + '</td>' +
       '<td class="muted" title="' + esc(scrubReason(st.last_error || '')) + '">' +
         esc(shortReason(st.last_error)) + '</td>' +
