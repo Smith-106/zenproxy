@@ -69,19 +69,20 @@ type Entry struct {
 
 // View is the API-safe projection of an account: no credentials.
 type View struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name,omitempty"`
-	Upstream    string            `json:"upstream"`
-	Pool        string            `json:"pool"`
-	Enabled     bool              `json:"enabled"`
-	Proxy       string            `json:"proxy"`
-	Weight      int               `json:"weight"`
-	HasKey      bool              `json:"has_key"`
-	KeyHint     string            `json:"key_hint,omitempty"`
-	BoundExit   string            `json:"bound_exit,omitempty"`
-	BoundExitIP string            `json:"bound_exit_ip,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Stats       model.Stats       `json:"stats"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name,omitempty"`
+	Upstream        string            `json:"upstream"`
+	Pool            string            `json:"pool"`
+	Enabled         bool              `json:"enabled"`
+	Proxy           string            `json:"proxy"`
+	Weight          int               `json:"weight"`
+	HasKey          bool              `json:"has_key"`
+	KeyHint         string            `json:"key_hint,omitempty"`
+	BoundExit       string            `json:"bound_exit,omitempty"`
+	BoundExitIP     string            `json:"bound_exit_ip,omitempty"`
+	BoundExitIPNote string            `json:"bound_exit_ip_note,omitempty"`
+	Headers         map[string]string `json:"headers,omitempty"`
+	Stats           model.Stats       `json:"stats"`
 }
 
 // Registry is the concurrency-safe account table.
@@ -348,6 +349,7 @@ func (r *Registry) viewLocked(e *Entry) View {
 		for _, h := range r.pool.Health() {
 			if h.ID == v.BoundExit {
 				v.BoundExitIP = h.ExitIP
+				v.BoundExitIPNote = h.ExitIPNote
 				break
 			}
 		}

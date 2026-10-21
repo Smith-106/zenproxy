@@ -491,6 +491,10 @@ function exitIPWord(note) {
   if (note.indexOf('status ') === 0) return '隧道是通的，地址探测返回 ' + note.slice(7);
   return '隧道是通的，这次没问到出口地址';
 }
+function accountIPCell(a) {
+  if (!a.bound_exit) return '<code>—</code>';
+  return exitIPCell({exit_ip: a.bound_exit_ip, exit_ip_note: a.bound_exit_ip_note});
+}
 function exitIPCell(e) {
   if (!e.exit_ip && !e.exit_ip_note) {
     return '<code title="还没问过出口地址">还没问过</code>';
@@ -578,7 +582,7 @@ function renderAccounts(list) {
       '<td><code>' + esc(a.key_hint || '未设置') + '</code></td>' +
       '<td><code>' + esc(a.proxy || 'auto') + '</code></td>' +
       '<td><code>' + esc(a.bound_exit || '直连') + '</code></td>' +
-      '<td><code>' + esc(a.bound_exit_ip || '—') + '</code></td>' +
+      '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) + '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
@@ -599,7 +603,7 @@ function renderAccounts(list) {
     rows.push('<tr class="detail" id="' + esc(detailId) + '" style="display:none"><td colspan="13">' +
       '权重 <code>' + esc(a.weight || 0) + '</code> · ' +
       '自定义头 <code>' + esc(hdrs && Object.keys(hdrs).length ? JSON.stringify(hdrs) : '无') + '</code> · ' +
-      '绑定出口 IP <code>' + esc(a.bound_exit_ip || '—') + '</code> · ' +
+      '绑定出口 IP ' + accountIPCell(a) + ' · ' +
       '成功 ' + (st.success || 0) + ' · 上游调用 ' + (st.upstream_calls || 0) + ' · ' +
       '最近使用 ' + esc(fmtTime(st.last_used)) + ' · 最近成功 ' + esc(fmtTime(st.last_success)) +
     '</td></tr>');
