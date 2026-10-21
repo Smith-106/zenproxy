@@ -63,6 +63,22 @@ func createTestPool(t *testing.T, n int, hc config.Health) *Pool {
 	return pool
 }
 
+func TestWatchCountIsAStreakStillInRotation(t *testing.T) {
+	pool := createTestPool(t, 1, config.Health{FailureThreshold: 3})
+	pool.MarkFailure("a", "i/o timeout")
+	if n := pool.WatchCount(); n != 1 {
+		t.Fatalf("watch = %d, want 1", n)
+	}
+	if n := pool.HealthyCount(); n != 1 {
+		t.Fatalf("usable = %d, want 1", n)
+	}
+	pool.MarkFailure("a", "i/o timeout")
+	pool.MarkFailure("a", "i/o timeout")
+	if n := pool.WatchCount(); n != 0 {
+		t.Fatalf("quarantine counted as watch: %d", n)
+	}
+}
+
 func TestExitIPNoteStaysOffTheFailureColumn(t *testing.T) {
 	if got := exitIPNote(noteErr("context canceled")); got != "canceled" {
 		t.Fatalf("canceled = %q", got)

@@ -168,6 +168,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"accounts_enabled": enabled,
 		"exits":            s.pool.Len(),
 		"exits_healthy":    s.pool.HealthyCount(),
+		"exits_watching":   s.pool.WatchCount(),
 		"exits_retired":    s.pool.RetiredCount(),
 		"exits_slow":       s.pool.SlowCount(),
 		"exits_gate":       len(s.pool.GatePassers()),

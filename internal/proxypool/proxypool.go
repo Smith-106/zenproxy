@@ -2116,6 +2116,25 @@ func (p *Pool) HealthyCount() int {
 	return n
 }
 
+// WatchCount reports usable exits whose last checks already failed, but not
+// enough times to start a quarantine. The summary card must not call these
+// simply healthy: the row labels them 观察.
+func (p *Pool) WatchCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, m := range p.members {
+		m.mu.Lock()
+		watch := m.healthy && !m.retired && !now.Before(m.quarantineUntil) && m.consecFails > 0
+		m.mu.Unlock()
+		if watch {
+			n++
+		}
+	}
+	return n
+}
+
 // QuarantineBreakdown counts exits parked right now, by the kind of failure
 // that parked them. The strings are categories, never the raw dial error.
 type QuarantineBreakdown struct {

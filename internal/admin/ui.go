@@ -235,7 +235,7 @@ function accountReplicaLine(s) {
 function renderStat(s) {
   const cards = [
     ['账号', s.accounts + ' / 启用 ' + s.accounts_enabled],
-    ['出口', s.exits_healthy + ' / ' + s.exits + ' 健康'],
+    ['可用', s.exits_healthy + ' / ' + s.exits, '还在轮换里，含观察 ' + (s.exits_watching || 0) + '、偏慢 ' + (s.exits_slow || 0) + '。这两类行上另有标记，隔离和退休不算'],
     ['隔离中', (s.quarantine && s.quarantine.total) || 0],
     ['偏慢', s.exits_slow || 0, '延迟超过上限，挑选时靠后，没有退休'],
     ['可走免费', s.exits_gate || 0, '免费模型现在会挑这些出口，过一会儿这次准入就失效'],
@@ -252,7 +252,7 @@ function renderStat(s) {
   const bits = ['超时 ' + (q.timeout || 0), '连不上 ' + (q.unreachable || 0), 'TLS ' + (q.tls || 0)];
   if (q.other) bits.push('其他 ' + q.other);
   document.getElementById('pool_shape').textContent =
-    '隔离原因：' + bits.join(' · ') + '。偏慢是延迟超过上限，仍在轮换里。';
+    '隔离原因：' + bits.join(' · ') + '。可用里含观察 ' + (s.exits_watching || 0) + '、偏慢 ' + (s.exits_slow || 0) + '，这两类行上不是「健康」。';
 }
 
 function renderConfig(s) {
