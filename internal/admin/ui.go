@@ -139,14 +139,14 @@ const dashboardHTML = `<!doctype html>
     </form>
     <table id="accounts"><thead><tr>
       <th>账号</th><th>上游</th><th>Key</th><th>策略</th><th>出口</th><th>出口 IP</th><th>状态</th>
-      <th>最近分类</th><th>请求</th><th>成功/尝试失败</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
+      <th>最近分类</th><th>请求</th><th>成功/请求</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" style="margin-top:8px">
       「编辑」把该账号回填到上面表单里，改完点保存即可更新（ID 本身也可以改，改了就是新增）。
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
-      「尝试失败」按每一次上游调用计：一次请求换几个出口就会记几笔，不是失败的请求数。
-      请求有没有完成，看同一格左边的成功数。
+      「成功/请求」的右边是请求数。尝试失败按每一次上游调用计，写在同一格下面：
+      一次请求换几个出口就会记几笔，不能拿来当除数。
     </p>
   </section>
 </main>
@@ -488,7 +488,9 @@ function renderAccounts(list) {
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) + '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
-      '<td title="左边是完成的请求，右边是按尝试计的失败">' + (st.success || 0) + ' / ' + (st.failures || 0) + '</td>' +
+      '<td title="左边是完成的请求，右边是请求总数。下面的尝试失败按换出口计，不能拿来当除数">' +
+        (st.success || 0) + ' / ' + (st.requests || 0) +
+        '<div class="muted">尝试失败 ' + (st.failures || 0) + '</div></td>' +
       '<td>' + (st.rotations || 0) + '</td>' +
       '<td class="muted">' + esc(shortReason(st.last_error)) + '</td>' +
       '<td style="white-space:normal">' +
