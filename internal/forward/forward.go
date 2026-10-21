@@ -139,18 +139,19 @@ func New(reg *registry.Registry, pool *proxypool.Pool, opts Options) *Engine {
 func (e *Engine) ServeReverse(w http.ResponseWriter, r *http.Request, accountID, rest string) {
 	ent, ok := e.reg.Get(accountID)
 	if !ok || !ent.Enabled {
-		writeJSONError(w, http.StatusNotFound, "unknown or disabled account: "+accountID)
+		writeClientError(w, http.StatusNotFound, "unknown_account", "unknown or disabled account: "+accountID)
 		return
 	}
 	up, ok := e.ups[ent.Upstream]
 	if !ok {
-		writeJSONError(w, http.StatusInternalServerError,
+		writeClientError(w, http.StatusInternalServerError, "bad_upstream",
 			fmt.Sprintf("account %s references unknown upstream %s", ent.ID, ent.Upstream))
 		return
 	}
 	target, err := joinUpstreamPath(up.BaseURL, rest)
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		e.log.Warn("upstream url rejected", "account", ent.ID, "err", err)
+		writeClientError(w, http.StatusInternalServerError, "bad_upstream", "the account's upstream address is not usable")
 		return
 	}
 	target.RawQuery = r.URL.RawQuery
@@ -261,7 +262,7 @@ func (e *Engine) rotateExitFor(accountID, sessionID, exitID, mdl string) {
 func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *registry.Entry, up model.Upstream, target *url.URL) {
 	body, truncated, err := readBody(r, e.pol.MaxBodyBytes)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+		writeClientError(w, http.StatusBadRequest, "bad_request", "failed to read request body: "+err.Error())
 		return
 	}
 	// The reverse ingress has no account to choose between, so its ledger
@@ -283,7 +284,7 @@ func (e *Engine) proxyWithRotation(w http.ResponseWriter, r *http.Request, ent *
 func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, body []byte, truncated bool) {
 	cur, ok := ch.first()
 	if !ok {
-		writeJSONError(w, http.StatusServiceUnavailable,
+		writeClientError(w, http.StatusServiceUnavailable, "no_account",
 			"no account is available to serve this request")
 		return
 	}
@@ -377,11 +378,11 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			e.log.Warn("refusing request: every healthy exit is quota-cooled",
 				"model", askedModel, "cooled", len(cools), "until", until.UTC().Format(time.RFC3339),
 				"after", cools[0].After)
-			writeJSONError(w, http.StatusTooManyRequests, msg)
+			writeClientError(w, http.StatusTooManyRequests, "quota_cooled", msg)
 			return
 		}
 		e.log.Warn("refusing request: no free-tier-eligible exit available", "model", askedModel)
-		writeJSONError(w, http.StatusForbidden, "OpenCode free tier: no eligible egress exit right now; retry shortly")
+		writeClientError(w, http.StatusForbidden, "no_exit", "OpenCode free tier: no eligible egress exit right now; retry shortly")
 		return
 	}
 	// Conversation-less traffic is the cache killer: relays like new-api pass
@@ -531,7 +532,8 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 
 		req, cancel, err := e.buildRequest(r, target.String(), reader, length, ent, up, plan)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			e.log.Warn("could not build upstream request", "account", ent.ID, "err", err)
+			writeClientError(w, http.StatusInternalServerError, "bad_request", "could not build the upstream request")
 			return
 		}
 		start := time.Now()
@@ -1841,6 +1843,21 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	writeJSONErrorCode(w, status, "", msg)
 }
 
+// writeClientError is the ingress envelope. code is the stable token the next
+// hop branches on. A dial dump never wins: the classifier replaces both the
+// code and the sentence, and whatever remains is scrubbed of URLs and addresses.
+func writeClientError(w http.ResponseWriter, status int, code, msg string) {
+	classified, text := clientFacingFailure(msg)
+	if classified != "upstream_failed" {
+		writeJSONErrorCode(w, status, classified, text)
+		return
+	}
+	if code == "" {
+		code = "upstream_failed"
+	}
+	writeJSONErrorCode(w, status, code, scrubClientText(msg))
+}
+
 // writeJSONErrorCode is the client-facing envelope. code is a stable token the
 // next hop can branch on; an empty code keeps the older two-field shape.
 func writeJSONErrorCode(w http.ResponseWriter, status int, code, msg string) {
@@ -1859,6 +1876,7 @@ func writeJSONErrorCode(w http.ResponseWriter, status int, code, msg string) {
 var (
 	clientIPv4     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b`)
 	clientUserinfo = regexp.MustCompile(`[^\s/@]+:[^\s/@]+@`)
+	clientURL      = regexp.MustCompile(`https?://\S+`)
 )
 
 // clientFacingFailure is what the caller is allowed to see after the exits
@@ -1884,6 +1902,7 @@ func clientFacingFailure(msg string) (code, text string) {
 }
 
 func scrubClientText(msg string) string {
+	msg = clientURL.ReplaceAllString(msg, "<url>")
 	msg = clientUserinfo.ReplaceAllString(msg, "")
 	msg = clientIPv4.ReplaceAllString(msg, "<exit>")
 	msg = strings.Join(strings.Fields(msg), " ")

@@ -35,6 +35,29 @@ func TestScrubClientTextDropsAddressesWhenTheClassIsUnknown(t *testing.T) {
 	}
 }
 
+func TestWriteClientErrorHidesAURLAndKeepsAPlainCode(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeClientError(rec, http.StatusInternalServerError, "bad_upstream",
+		`bad upstream base_url "https://alice:hunter2@proxy.example:3128/v1": parse error`)
+	if rec.Header().Get("X-Zen-Error") != "bad_upstream" {
+		t.Fatalf("header = %q", rec.Header().Get("X-Zen-Error"))
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "hunter2") || strings.Contains(body, "proxy.example") || strings.Contains(body, "https://") {
+		t.Fatalf("body still names the upstream: %s", body)
+	}
+
+	dial := httptest.NewRecorder()
+	writeClientError(dial, http.StatusBadRequest, "bad_request",
+		`Post "https://upstream.example/v1": proxyconnect tcp: dial tcp 10.1.2.3:3129: i/o timeout`)
+	if dial.Header().Get("X-Zen-Error") != "exit_unreachable" {
+		t.Fatalf("dial header = %q", dial.Header().Get("X-Zen-Error"))
+	}
+	if strings.Contains(dial.Body.String(), "10.1.2.3") || strings.Contains(dial.Body.String(), "upstream.example") {
+		t.Fatalf("dial body = %s", dial.Body.String())
+	}
+}
+
 func TestWriteJSONErrorCodeIsWhatTheNextHopPrints(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeJSONErrorCode(rec, http.StatusBadGateway, "exit_unreachable", "all 3 attempt(s) failed for account zen-03: the exit could not reach the upstream")

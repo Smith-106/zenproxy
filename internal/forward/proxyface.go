@@ -60,13 +60,13 @@ func (e *Engine) ServeForward(w http.ResponseWriter, r *http.Request) {
 	accountID := AccountFromProxyAuth(r)
 	if accountID == "" {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="zenproxy"`)
-		writeJSONError(w, http.StatusProxyAuthRequired,
+		writeClientError(w, http.StatusProxyAuthRequired, "proxy_auth",
 			"missing proxy credentials; address an account as http://<account-id>:x@<host>:<port>")
 		return
 	}
 	ent, ok := e.reg.Get(accountID)
 	if !ok || !ent.Enabled {
-		writeJSONError(w, http.StatusForbidden, "unknown or disabled account: "+accountID)
+		writeClientError(w, http.StatusForbidden, "unknown_account", "unknown or disabled account: "+accountID)
 		return
 	}
 
@@ -85,7 +85,7 @@ func (e *Engine) tunnel(w http.ResponseWriter, r *http.Request, ent *registry.En
 		target = r.URL.Host
 	}
 	if target == "" {
-		writeJSONError(w, http.StatusBadRequest, "CONNECT without a target host")
+		writeClientError(w, http.StatusBadRequest, "bad_request", "CONNECT without a target host")
 		return
 	}
 	if !strings.Contains(target, ":") {
@@ -93,7 +93,7 @@ func (e *Engine) tunnel(w http.ResponseWriter, r *http.Request, ent *registry.En
 	}
 	host, _, err := net.SplitHostPort(target)
 	if err != nil || !e.hostAllowed(host) {
-		writeJSONError(w, http.StatusForbidden, "target host not in allowed_hosts: "+host)
+		writeClientError(w, http.StatusForbidden, "host_denied", "target host not in allowed_hosts: "+host)
 		return
 	}
 
@@ -149,12 +149,13 @@ func (e *Engine) tunnel(w http.ResponseWriter, r *http.Request, ent *registry.En
 
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
-		writeJSONError(w, http.StatusInternalServerError, "connection hijacking unavailable")
+		writeClientError(w, http.StatusInternalServerError, "proxy_failed", "connection hijacking unavailable")
 		return
 	}
 	client, rw, err := hijacker.Hijack()
 	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "hijack failed: "+err.Error())
+		e.log.Warn("CONNECT hijack failed", "account", ent.ID, "err", err)
+		writeClientError(w, http.StatusInternalServerError, "proxy_failed", "could not take over the client connection")
 		return
 	}
 	defer client.Close()
@@ -185,17 +186,18 @@ func (e *Engine) tunnel(w http.ResponseWriter, r *http.Request, ent *registry.En
 // transport-level failures trigger an exit rotation.
 func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *registry.Entry) {
 	if !r.URL.IsAbs() {
-		writeJSONError(w, http.StatusBadRequest,
+		writeJSONErrorCode(w, http.StatusBadRequest, "bad_request",
 			"forward-proxy mode expects an absolute request URI, e.g. GET http://host/path HTTP/1.1")
 		return
 	}
 	if !e.hostAllowed(r.URL.Hostname()) {
-		writeJSONError(w, http.StatusForbidden, "target host not in allowed_hosts: "+r.URL.Hostname())
+		writeJSONErrorCode(w, http.StatusForbidden, "host_denied", "target host not in allowed_hosts: "+r.URL.Hostname())
 		return
 	}
 	body, truncated, err := readBody(r, e.pol.MaxBodyBytes)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+		e.log.Warn("forward body read failed", "account", ent.ID, "err", err)
+		writeClientError(w, http.StatusBadRequest, "bad_request", "failed to read request body")
 		return
 	}
 
@@ -230,7 +232,8 @@ func (e *Engine) forwardAbsolute(w http.ResponseWriter, r *http.Request, ent *re
 		req, err := http.NewRequestWithContext(ctx, r.Method, target, reader)
 		if err != nil {
 			cancel()
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			e.log.Warn("could not build forward request", "account", ent.ID, "err", err)
+			writeClientError(w, http.StatusBadRequest, "bad_request", "could not build the upstream request")
 			return
 		}
 		req.ContentLength = length

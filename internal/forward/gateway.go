@@ -40,7 +40,7 @@ const gatewayMaxAttempts = 8
 // never names an account at all.
 func (e *Engine) ServeGateway(w http.ResponseWriter, r *http.Request, rest string) {
 	if !e.gw.Enabled() {
-		writeJSONError(w, http.StatusNotFound,
+		writeClientError(w, http.StatusNotFound, "gateway_disabled",
 			"the unified /v1 ingress is disabled; enable gateway.enabled or use /<account-id>/<path>")
 		return
 	}
@@ -55,7 +55,7 @@ func (e *Engine) ServeGateway(w http.ResponseWriter, r *http.Request, rest strin
 			// WWW-Authenticate is not decoration: several clients only send the
 			// credential after being challenged once.
 			w.Header().Set("WWW-Authenticate", `Bearer realm="zenproxy"`)
-			writeJSONError(w, http.StatusUnauthorized,
+			writeClientError(w, http.StatusUnauthorized, "gateway_unauthorized",
 				"missing or unknown API key; send Authorization: Bearer <key>")
 			return
 		}
@@ -68,30 +68,30 @@ func (e *Engine) ServeGateway(w http.ResponseWriter, r *http.Request, rest strin
 
 	body, truncated, err := readBody(r, e.pol.MaxBodyBytes)
 	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "failed to read request body: "+err.Error())
+		writeClientError(w, http.StatusBadRequest, "bad_request", "failed to read request body")
 		return
 	}
 	if truncated {
 		// Routing needs the model name, which lives in the part that was not
 		// buffered. Refusing is honest; guessing would misroute silently.
-		writeJSONError(w, http.StatusRequestEntityTooLarge,
+		writeClientError(w, http.StatusRequestEntityTooLarge, "body_too_large",
 			"request body is too large for the unified ingress (it must be buffered to resolve the model); use /<account-id>/<path> to stream it through untouched")
 		return
 	}
 
 	asked := modelField(body)
 	if asked == "" {
-		writeJSONError(w, http.StatusBadRequest, `the request body has no "model" field`)
+		writeClientError(w, http.StatusBadRequest, "missing_model", `the request body has no "model" field`)
 		return
 	}
 	route, ok := e.gw.ResolveModel(asked)
 	if !ok {
-		writeJSONError(w, http.StatusNotFound,
+		writeClientError(w, http.StatusNotFound, "unknown_model",
 			fmt.Sprintf("model %q is not in model_list and no \"*\" route accepts unknown names", asked))
 		return
 	}
 	if route.Pool != "" && key.Pool != "" && route.Pool != key.Pool {
-		writeJSONError(w, http.StatusForbidden,
+		writeClientError(w, http.StatusForbidden, "pool_forbidden",
 			fmt.Sprintf("key %q may use pool %q, but model %q is served by pool %q", key.ID, key.Pool, asked, route.Pool))
 		return
 	}
@@ -107,7 +107,8 @@ func (e *Engine) ServeGateway(w http.ResponseWriter, r *http.Request, rest strin
 		if rewritten, err := setModelField(body, route.UpstreamModel); err == nil {
 			body = rewritten
 		} else {
-			writeJSONError(w, http.StatusBadRequest, "could not rewrite the model field: "+err.Error())
+			e.log.Warn("model rewrite failed", "model", asked, "err", err)
+			writeClientError(w, http.StatusBadRequest, "bad_request", "could not rewrite the model field")
 			return
 		}
 	}
