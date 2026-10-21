@@ -40,32 +40,97 @@ const exitsStateVersion = 1
 
 // exitRecord is the persisted slice of one member's liveness state.
 type exitRecord struct {
-	Retired         bool                 `json:"retired,omitempty"`
-	RetiredReason   string               `json:"retired_reason,omitempty"`
-	RetiredAt       time.Time            `json:"retired_at,omitempty"`
-	QuarantineUntil time.Time            `json:"quarantine_until,omitempty"`
-	FreeTierUntil   time.Time            `json:"free_tier_until,omitempty"`
-	FreeTierReason  string               `json:"free_tier_reason,omitempty"`
-	QuotaUntil      time.Time            `json:"quota_until,omitempty"`
-	QuotaReason     string               `json:"quota_reason,omitempty"`
+	Retired         bool      `json:"retired,omitempty"`
+	RetiredReason   string    `json:"retired_reason,omitempty"`
+	RetiredAt       time.Time `json:"retired_at,omitempty"`
+	QuarantineUntil time.Time `json:"quarantine_until,omitempty"`
+	FreeTierUntil   time.Time `json:"free_tier_until,omitempty"`
+	FreeTierReason  string    `json:"free_tier_reason,omitempty"`
+	QuotaUntil      time.Time `json:"quota_until,omitempty"`
+	QuotaReason     string    `json:"quota_reason,omitempty"`
 	// GatePassUntil is the free-tier admission deadline and GatePasses its
 	// lifetime count. Persisted because the whole point of the signal is that
 	// it is scarce: rediscovering the six clean exits in a 1,613-member pool
 	// costs the first ~2% -passing minutes after every restart.
-	GatePassUntil   time.Time            `json:"gate_pass_until,omitempty"`
-	GatePasses      int                  `json:"gate_passes,omitempty"`
+	GatePassUntil time.Time `json:"gate_pass_until,omitempty"`
+	GatePasses    int       `json:"gate_passes,omitempty"`
 	// GateScore ranks admitted exits against each other (see member.gateScore)
 	// and GateDrops counts the streams they failed to carry. Both persist for the
 	// same reason as the admission itself: a restart should not reset the pool's
 	// opinion of which admitted tunnel is the reliable one, or it will re-learn
 	// that by handing clients a few more dead streams.
-	GateScore       int                  `json:"gate_score,omitempty"`
-	GateDrops       int                  `json:"gate_drops,omitempty"`
-	RegionBlocks    map[string]time.Time `json:"region_blocks,omitempty"`
-	Failures        int64                `json:"failures,omitempty"`
-	SoftFails       int64                `json:"soft_fails,omitempty"`
-	ConsecFails     int                  `json:"consec_fails,omitempty"`
-	PoisonConsec    int                  `json:"poison_consec,omitempty"`
+	GateScore    int                  `json:"gate_score,omitempty"`
+	GateDrops    int                  `json:"gate_drops,omitempty"`
+	RegionBlocks map[string]time.Time `json:"region_blocks,omitempty"`
+	Failures     int64                `json:"failures,omitempty"`
+	SoftFails    int64                `json:"soft_fails,omitempty"`
+	ConsecFails  int                  `json:"consec_fails,omitempty"`
+	PoisonConsec int                  `json:"poison_consec,omitempty"`
+}
+
+// MarshalJSON omits zero timestamps. encoding/json's omitempty does not treat
+// time.Time{} as empty, so every live exit was saved with retired_at,
+// quarantine_until and the rest set to year 1. A reader then cannot tell a
+// retired exit from one that has never been retired.
+func (r exitRecord) MarshalJSON() ([]byte, error) {
+	m := map[string]any{}
+	if r.Retired {
+		m["retired"] = true
+	}
+	if r.RetiredReason != "" {
+		m["retired_reason"] = r.RetiredReason
+	}
+	putTime(m, "retired_at", r.RetiredAt)
+	putTime(m, "quarantine_until", r.QuarantineUntil)
+	putTime(m, "free_tier_until", r.FreeTierUntil)
+	if r.FreeTierReason != "" {
+		m["free_tier_reason"] = r.FreeTierReason
+	}
+	putTime(m, "quota_until", r.QuotaUntil)
+	if r.QuotaReason != "" {
+		m["quota_reason"] = r.QuotaReason
+	}
+	putTime(m, "gate_pass_until", r.GatePassUntil)
+	if r.GatePasses != 0 {
+		m["gate_passes"] = r.GatePasses
+	}
+	if r.GateScore != 0 {
+		m["gate_score"] = r.GateScore
+	}
+	if r.GateDrops != 0 {
+		m["gate_drops"] = r.GateDrops
+	}
+	if len(r.RegionBlocks) > 0 {
+		blocks := make(map[string]time.Time, len(r.RegionBlocks))
+		for model, until := range r.RegionBlocks {
+			if !until.IsZero() {
+				blocks[model] = until.UTC()
+			}
+		}
+		if len(blocks) > 0 {
+			m["region_blocks"] = blocks
+		}
+	}
+	if r.Failures != 0 {
+		m["failures"] = r.Failures
+	}
+	if r.SoftFails != 0 {
+		m["soft_fails"] = r.SoftFails
+	}
+	if r.ConsecFails != 0 {
+		m["consec_fails"] = r.ConsecFails
+	}
+	if r.PoisonConsec != 0 {
+		m["poison_consec"] = r.PoisonConsec
+	}
+	return json.Marshal(m)
+}
+
+func putTime(m map[string]any, key string, t time.Time) {
+	if t.IsZero() {
+		return
+	}
+	m[key] = t.UTC()
 }
 
 // exitsState is the on-disk document.
@@ -108,8 +173,8 @@ func (p *Pool) SaveState() {
 			QuotaReason:     m.quotaReason,
 			GatePassUntil:   m.gatePassUntil,
 			GatePasses:      m.gatePasses,
-		GateScore:       m.gateScore,
-		GateDrops:       m.gateDrops,
+			GateScore:       m.gateScore,
+			GateDrops:       m.gateDrops,
 			Failures:        m.failures,
 			SoftFails:       m.softFails,
 			ConsecFails:     m.consecFails,

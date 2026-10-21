@@ -1,6 +1,7 @@
 package proxypool
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -31,8 +32,15 @@ func TestExitStatePersistence(t *testing.T) {
 	p1.Retire("ex-b", "chronic garbage")
 	p1.SaveState()
 
-	if _, err := os.Stat(path); err != nil {
+	raw, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatalf("state file not written: %v", err)
+	}
+	if bytes.Contains(raw, []byte("0001-01-01")) {
+		t.Fatalf("zero timestamps were persisted:\n%s", raw)
+	}
+	if !bytes.Contains(raw, []byte(`"retired":true`)) && !bytes.Contains(raw, []byte(`"retired": true`)) {
+		t.Fatalf("retired exit not marked:\n%s", raw)
 	}
 
 	p2, err := NewPool(specs, config.Health{}, testLogger(), path)

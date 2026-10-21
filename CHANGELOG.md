@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 修复（2026-10-21：状态文件不再把每个出口写成公元元年退役）
+
+- `encoding/json` 的 `omitempty` 不把 `time.Time` 零值当空。`exits-state.json` 里
+  每个还活着的出口都带着 `retired_at: 0001-01-01T00:00:00Z`，读文件的人会以为整池
+  已经退役。现在只有真正有时刻的字段才落盘。旧文件仍能读：退役与否看 `retired`
+  布尔值，不看那个零时间。
+
 ### 修复（2026-10-21：控制台的失败原因不再是拨号串的前 42 个字）
 
 - 账号表把 `last_error` 截成 42 字，看到的永远是 `Post "https://opencode.ai/inference/v1/re`。
