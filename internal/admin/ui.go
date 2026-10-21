@@ -115,7 +115,7 @@ const dashboardHTML = `<!doctype html>
     <h2>出口池（IP 池）</h2>
     <p id="exit_filters"></p>
     <table id="exits"><thead><tr>
-      <th>出口 ID</th><th>类型</th><th>地址</th><th>出口 IP</th><th>延迟</th>
+      <th>出口 ID</th><th>类型</th><th>代理地址</th><th>出口 IP</th><th>延迟</th>
       <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" id="peer_ids"></p>
@@ -465,7 +465,7 @@ function renderExits(list) {
     return '<tr>' +
       '<td><code>' + esc(e.id) + '</code></td>' +
       '<td>' + esc(e.scheme) + '</td>' +
-      '<td><code>' + esc(e.addr) + '</code></td>' +
+      '<td><code title="连这个代理的地址，不是流量出去时的公网 IP">' + esc(e.addr) + '</code></td>' +
       '<td>' + exitIPCell(e) + '</td>' +
       '<td>' + (e.latency_ms ? e.latency_ms + ' ms' : '—') + '</td>' +
       '<td>' + state + '</td>' +
@@ -497,7 +497,10 @@ function quotaCell(e) {
   if (!t) return '<span class="muted">—</span>';
   const mins = Math.round((t - new Date()) / 60000);
   const left = mins >= 90 ? Math.round(mins / 60) + ' 小时' : mins + ' 分钟';
-  return '<span class="pill warn" title="上游说的重置时刻 ' + esc(t.toLocaleString()) + '">还剩 ' + left + '</span>';
+  const known = CLASS_ZH[e.quota_reason];
+  const why = known ? known[1] : '';
+  return '<span class="pill warn" title="上游说的重置时刻 ' + esc(t.toLocaleString()) + '">' +
+    (why ? esc(why) + ' · ' : '') + '还剩 ' + left + '</span>';
 }
 
 function regionCell(e) {

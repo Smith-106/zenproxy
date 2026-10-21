@@ -173,6 +173,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`TLS 累计 `, `连续失败 `, `retireWord`, `还没问过出口地址`, `accountIPCell`, `bound_exit_ip_note`, `bound_slow`, `bound_gate`, `bound_prunable`, `boundFlags`,
 		`setExitFilter`, `exit_filters`, `这个筛选下没有出口`, `peer_quota_here`, `另一边没冷却`,
 		`正在被免费准入的不退休`, `tls_poison_retire_after`,
+		`代理地址`, `不是流量出去时的公网 IP`, `e.quota_reason`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
