@@ -379,7 +379,7 @@ function renderExits(list) {
     const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
     let state;
     if (e.retired) {
-      state = '<span class="pill bad" title="' + esc(shortReason(e.retired_reason || '')) + '">已退休</span>';
+      state = '<span class="pill bad" title="' + esc(retireWord(e.retired_reason || '')) + '">已退休</span>';
     } else if (q && q > new Date()) {
       const why = quarantineWord(e.quarantine_class);
       state = '<span class="pill bad" title="' + esc(why ? ('隔离原因：' + why) : '隔离中，原因还没探到') + '">隔离中' +
@@ -523,6 +523,14 @@ function scrubReason(msg) {
   return String(msg)
     .replace(/[^\s\/@]+:[^\s\/@]+@/g, '')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, '<exit>');
+}
+function retireWord(msg) {
+  const raw = scrubReason(msg);
+  let m = /^tls poison (\d+)$/.exec(raw);
+  if (m) return 'TLS 累计 ' + m[1] + ' 次';
+  m = /^consecutive (\d+)$/.exec(raw);
+  if (m) return '连续失败 ' + m[1] + ' 次';
+  return shortReason(raw);
 }
 function shortReason(msg) {
   const raw = scrubReason(msg);

@@ -708,8 +708,8 @@ func TestMarkFailureRetiresAfterTheConfiguredStreak(t *testing.T) {
 	if !h.Retired {
 		t.Fatalf("not retired after 4 consecutive failures: %+v", h)
 	}
-	if h.RetiredReason == "" {
-		t.Error("a retired exit must record why it was retired")
+	if h.RetiredReason != "consecutive 4" || strings.Contains(h.RetiredReason, "dial") {
+		t.Errorf("retired reason = %q, want the count without the dial", h.RetiredReason)
 	}
 	if h.Prunable {
 		t.Error("an already-retired exit must not also be advertised as prunable")
@@ -738,8 +738,12 @@ func TestPoisonTLSRetiresFasterThanOrdinaryFailures(t *testing.T) {
 		}
 	}
 	pool.MarkFailure("a", "tls: failed to verify certificate")
-	if h := healthOf(t, pool, "a"); !h.Retired {
+	h := healthOf(t, pool, "a")
+	if !h.Retired {
 		t.Fatalf("not retired after %d poison TLS failures: %+v", poisonRetireAfter, h)
+	}
+	if h.RetiredReason != "tls poison 2" || strings.Contains(h.RetiredReason, "certificate") {
+		t.Errorf("retired reason = %q, want the count without the dial", h.RetiredReason)
 	}
 }
 

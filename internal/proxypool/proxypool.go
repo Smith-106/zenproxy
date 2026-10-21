@@ -1987,7 +1987,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 			h.BoundAccounts = append(h.BoundAccounts, a)
 		}
 		h.Retired = m.retired
-		h.RetiredReason = model.ScrubPanel(m.retiredReason)
+		h.RetiredReason = model.PanelRetireReason(m.retiredReason)
 		if !m.retiredAt.IsZero() {
 			t := m.retiredAt
 			h.RetiredAt = &t

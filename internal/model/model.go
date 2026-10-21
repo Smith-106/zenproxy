@@ -307,6 +307,27 @@ func DialClass(msg string) string {
 	}
 }
 
+var (
+	retirePoison = regexp.MustCompile(`^(\d+) TLS poison strikes\b`)
+	retireStreak = regexp.MustCompile(`^(\d+) consecutive failures\b`)
+)
+
+// PanelRetireReason is what the admin API may say about a retirement. The
+// count stays. The dial sentence after "last:" does not: it is the same dump
+// DialClass already folds, and it does not help the operator.
+func PanelRetireReason(reason string) string {
+	if m := retirePoison.FindStringSubmatch(reason); m != nil {
+		return "tls poison " + m[1]
+	}
+	if m := retireStreak.FindStringSubmatch(reason); m != nil {
+		return "consecutive " + m[1]
+	}
+	if class := DialClass(reason); class != "" {
+		return class
+	}
+	return ScrubPanel(reason)
+}
+
 // PanelReason is the only failure text the admin API may return. A dial
 // becomes one of the four words. Anything else loses URLs, proxy userinfo,
 // and IPv4 addresses before it reaches the browser.

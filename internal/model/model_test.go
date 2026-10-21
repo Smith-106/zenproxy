@@ -43,6 +43,13 @@ func TestPanelReasonDropsADialAndKeepsAVendorSentence(t *testing.T) {
 	if strings.Contains(vendor, "secret") || strings.Contains(vendor, "pass") || !strings.Contains(vendor, "HTTP 400") {
 		t.Fatalf("vendor = %q", vendor)
 	}
+	poison := PanelRetireReason("15 TLS poison strikes (probe success does not reset); last: tls: certificate user:pass@10.1.2.3")
+	if poison != "tls poison 15" || strings.Contains(poison, "10.1.2.3") || strings.Contains(poison, "pass") {
+		t.Fatalf("poison = %q", poison)
+	}
+	if got := PanelRetireReason("9 consecutive failures with no success in between; last: i/o timeout"); got != "consecutive 9" {
+		t.Fatalf("streak = %q", got)
+	}
 	if got := DialClass("http proxy: network is unreachable"); got != "unreachable" {
 		t.Fatalf("unreachable not at the start = %q", got)
 	}
