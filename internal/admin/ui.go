@@ -313,7 +313,9 @@ function renderExits(list) {
     if (e.retired) {
       state = '<span class="pill bad" title="' + esc(e.retired_reason || '') + '">已退休</span>';
     } else if (q && q > new Date()) {
-      state = '<span class="pill bad">隔离中</span>';
+      const why = quarantineWord(e.quarantine_class);
+      state = '<span class="pill bad" title="' + esc(why ? ('隔离原因：' + why) : '隔离中，原因还没探到') + '">隔离中' +
+        (why ? ' · ' + esc(why) : '') + '</span>';
     } else if (e.healthy) {
       state = '<span class="pill ok">健康</span>';
     } else {
@@ -403,6 +405,13 @@ function classPill(cls) {
     : cls === 'rate_limit' ? '429：账号或出口额度问题。有重置时刻就等，否则换绑定' : '';
   return '<span class="pill ' + m[0] + '" title="' + esc(tip) + '">' + esc(m[1]) +
          ' <code>' + esc(cls) + '</code></span>';
+}
+function quarantineWord(cls) {
+  if (cls === 'timeout') return '超时';
+  if (cls === 'unreachable') return '连不上';
+  if (cls === 'tls') return 'TLS';
+  if (cls === 'other') return '其他';
+  return '';
 }
 function scrubReason(msg) {
   if (!msg) return '';

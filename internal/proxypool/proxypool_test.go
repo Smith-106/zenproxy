@@ -106,6 +106,19 @@ func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
 	if again.Total != 3 || again.Timeout != 1 || again.Unreachable != 1 || again.TLS != 1 || again.Other != 0 {
 		t.Fatalf("after restart breakdown = %+v", again)
 	}
+	seen := map[string]string{}
+	for _, h := range restarted.Health() {
+		if h.QuarantinedTill == nil {
+			continue
+		}
+		seen[h.ID] = h.QuarantineClass
+		if h.LastError != "" {
+			t.Fatalf("%s still exposes the dial error after restart: %q", h.ID, h.LastError)
+		}
+	}
+	if seen["a"] != "timeout" || seen["b"] != "unreachable" || seen["c"] != "tls" {
+		t.Fatalf("health classes = %v", seen)
+	}
 }
 
 // socks5Fixture is a minimal RFC 1928/1929 server. The SOCKS5 client in this

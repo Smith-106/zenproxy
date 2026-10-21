@@ -1939,6 +1939,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 		if !m.quarantineUntil.IsZero() && time.Now().Before(m.quarantineUntil) {
 			t := m.quarantineUntil
 			h.QuarantinedTill = &t
+			h.QuarantineClass = m.quarantineClass
 		}
 		if until, reason, cool := p.quotaCooledLocked(m, time.Now()); cool {
 			t := until

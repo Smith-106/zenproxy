@@ -190,6 +190,10 @@ type ProxyHealth struct {
 	SoftFails       int64      `json:"soft_failures"`
 	ConsecFails     int        `json:"consecutive_failures"`
 	QuarantinedTill *time.Time `json:"quarantined_until,omitempty"`
+	// QuarantineClass is timeout, unreachable, tls, or other while the nap is
+	// still running. It is the word the panel can show after a restart, when
+	// the raw dial error is gone on purpose.
+	QuarantineClass string `json:"quarantine_class,omitempty"`
 	// QuotaUntil is when the upstream said this exit's allowance returns. It is
 	// separate from QuarantinedTill because the two mean opposite things about
 	// the exit: quarantine says the exit is broken, quota says the exit is fine
