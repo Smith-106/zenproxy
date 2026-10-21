@@ -176,6 +176,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`代理地址`, `不是流量出去时的公网 IP`, `e.quota_reason`,
 		`failureThreshold`, `次就隔离`, `隔离还剩`, `不到 1 分钟`, `napLeft`,
 		`proxyCell`, `粘住`, `还能服务当前模型时不换`, `还没粘住`,
+		`overCap`, `maxLatencyMS`, `超出 `,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
@@ -194,7 +195,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 	for obj, keys := range map[string][]string{
 		"policy": {"max_attempts", "rotate_on_status", "rotate_on_transport", "max_body_bytes", "stream_idle_timeout", "upstream_timeout"},
-		"health": {"interval", "timeout", "failure_threshold", "quarantine", "max_backoff", "max_latency", "retire_after", "tls_poison_retire_after"},
+		"health": {"interval", "timeout", "failure_threshold", "quarantine", "max_backoff", "max_latency", "max_latency_ms", "retire_after", "tls_poison_retire_after"},
 	} {
 		sub, _ := status[obj].(map[string]any)
 		if sub == nil {

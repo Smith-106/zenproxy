@@ -210,6 +210,7 @@ async function load() {
     renderPools(status);
     fillUpstreams(status.upstreams || []);
     cache.failureThreshold = (status.health || {}).failure_threshold || 0;
+    cache.maxLatencyMS = (status.health || {}).max_latency_ms || 0;
     document.getElementById('foot').innerHTML =
       '监听 <code>' + esc(status.listen || '') + '</code> · 上游 <code>' +
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
@@ -444,7 +445,11 @@ function renderExits(list) {
     } else {
       state = '<span class="pill warn">降级</span>';
     }
-    if (e.slow) state += ' <span class="pill warn" title="延迟超过上限，挑选时靠后，没有退休">偏慢</span>';
+    if (e.slow) {
+      const extra = overCap(e.latency_ms);
+      state += ' <span class="pill warn" title="延迟超过上限，挑选时靠后，没有退休">偏慢' +
+        (extra ? ' · ' + extra : '') + '</span>';
+    }
     if (e.gate_pass_until && new Date(e.gate_pass_until) > new Date()) {
       state += ' <span class="pill ok" title="免费模型现在会挑它。别的出口看起来一样健康，但这次还没被准入">可走免费</span>';
     }
@@ -489,6 +494,13 @@ function renderExits(list) {
 // Kept separate from health on purpose: an exit the upstream has spent is
 // working perfectly, it just will not be served. Showing it as unwell would send
 // an operator to debug a healthy proxy.
+function overCap(ms) {
+  const cap = cache.maxLatencyMS || 0;
+  if (!ms || !cap || ms <= cap) return '';
+  const extra = ms - cap;
+  if (extra < 1000) return '超出 ' + extra + ' ms';
+  return '超出 ' + (Math.round(extra / 100) / 10) + ' 秒';
+}
 function timeLeft(t) {
   const mins = Math.round((t - new Date()) / 60000);
   if (mins >= 90) return Math.round(mins / 60) + ' 小时';

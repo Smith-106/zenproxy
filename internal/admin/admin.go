@@ -206,6 +206,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"quarantine":              s.cfg.Health.Quarantine.String(),
 			"max_backoff":             s.cfg.Health.MaxBackoff.String(),
 			"max_latency":             s.cfg.Health.MaxLatency.String(),
+			"max_latency_ms":          s.cfg.Health.MaxLatency.Milliseconds(),
 			"retire_after":            s.cfg.Health.RetireAfter,
 			"tls_poison_retire_after": proxypool.PoisonRetireAfter,
 		},
