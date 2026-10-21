@@ -238,6 +238,7 @@ function renderStat(s) {
     ['出口', s.exits_healthy + ' / ' + s.exits + ' 健康'],
     ['隔离中', (s.quarantine && s.quarantine.total) || 0],
     ['偏慢', s.exits_slow || 0, '延迟超过上限，挑选时靠后，没有退休'],
+    ['可走免费', s.exits_gate || 0, '免费模型现在会挑这些出口，过一会儿这次准入就失效'],
     ['退休出口', s.exits_retired],
     ['请求', s.requests],
     ['成功', (s.success || 0) + ' / ' + (s.requests || 0)],
@@ -326,6 +327,9 @@ function renderExits(list) {
       state = '<span class="pill warn">降级</span>';
     }
     if (e.slow) state += ' <span class="pill warn" title="延迟超过上限，挑选时靠后，没有退休">偏慢</span>';
+    if (e.gate_pass_until && new Date(e.gate_pass_until) > new Date()) {
+      state += ' <span class="pill ok" title="免费模型现在会挑它。别的出口看起来一样健康，但这次还没被准入">可走免费</span>';
+    }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
     const act = [];
     if (e.retired) {

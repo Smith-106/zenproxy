@@ -170,6 +170,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"exits_healthy":    s.pool.HealthyCount(),
 		"exits_retired":    s.pool.RetiredCount(),
 		"exits_slow":       s.pool.SlowCount(),
+		"exits_gate":       len(s.pool.GatePassers()),
 		"quarantine":       s.pool.QuarantineBreakdown(),
 		"outage_breaker": map[string]any{
 			"open":                 tripped,
