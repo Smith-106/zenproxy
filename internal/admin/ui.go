@@ -219,6 +219,7 @@ async function load() {
     if (weightInput) weightInput.title = cache.poolUsesWeight ? '这个池按权重挑账号' : '这个池轮流用账号，权重不参与挑选';
     cache.failureThreshold = (status.health || {}).failure_threshold || 0;
     cache.maxLatencyMS = (status.health || {}).max_latency_ms || 0;
+    cache.sessionPins = status.session_pins || {};
     document.getElementById('foot').innerHTML =
       '监听 <code>' + esc(status.listen || '') + '</code> · 上游 <code>' +
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
@@ -736,7 +737,7 @@ function renderAccounts(list) {
       '<td style="white-space:normal">' +
         '<button onclick="fillAccount(\'' + esc(a.id) + '\')">编辑</button> ' +
         '<button onclick="toggleAccount(\'' + esc(a.id) + '\')">' + (a.enabled ? '禁用' : '启用') + '</button> ' +
-        '<button onclick="rotate(\'' + esc(a.id) + '\')">换出口</button> ' +
+        '<button onclick="rotate(\'' + esc(a.id) + '\')" title="只改这个账号当前这一条。别的对话如果还钉在旧出口上，下次说话会把它拽回去">换出口</button> ' +
         '<button onclick="toggleDetail(\'' + esc(a.id) + '\')">详情</button> ' +
         '<button class="danger" onclick="del(\'' + esc(a.id) + '\')">删</button>' +
       '</td>' +
@@ -773,6 +774,12 @@ function stickyLine(list) {
   if (worst > 1) text += '。最挤的一个上面有 ' + worst + ' 个账号';
   if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
   else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
+  const pins = cache.sessionPins || {};
+  if (pins.live > 0) {
+    text += '。另有 ' + pins.live + ' 个对话钉在 ' + pins.exits + ' 个出口上';
+    if (pins.accounts_on_several_exits) text += '，其中 ' + pins.accounts_on_several_exits + ' 个账号被钉在不只一个出口';
+    text += '。点换出口只改账号这一条，别的对话下次还会把它拽回去';
+  }
   el.textContent = text;
 }
 

@@ -68,6 +68,53 @@ func (c *SessionExitCache) Enabled() bool {
 	return c != nil && c.ttl > 0
 }
 
+// SessionPinStats is the count the panel may show. It never includes a
+// session id or an exit id.
+type SessionPinStats struct {
+	Live                   int
+	Exits                  int
+	AccountsOnSeveralExits int
+}
+
+// PinStats counts live pins. A hit rewrites the account's displayed binding,
+// so an account pinned to several exits will be pulled back to whichever
+// conversation speaks next.
+func (c *SessionExitCache) PinStats() SessionPinStats {
+	if c == nil || !c.Enabled() {
+		return SessionPinStats{}
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exits := map[string]struct{}{}
+	perAccount := map[string]map[string]struct{}{}
+	live := 0
+	for key, ent := range c.entries {
+		if now.After(ent.expiresAt) {
+			continue
+		}
+		live++
+		account := key
+		if i := strings.Index(key, "::"); i >= 0 {
+			account = key[:i]
+		}
+		exits[ent.exit] = struct{}{}
+		set := perAccount[account]
+		if set == nil {
+			set = map[string]struct{}{}
+			perAccount[account] = set
+		}
+		set[ent.exit] = struct{}{}
+	}
+	split := 0
+	for _, set := range perAccount {
+		if len(set) > 1 {
+			split++
+		}
+	}
+	return SessionPinStats{Live: live, Exits: len(exits), AccountsOnSeveralExits: split}
+}
+
 func sessionExitKey(accountID, sessionID, model string) string {
 	return accountID + "::" + sessionID + "::" + canonicalModelKey(model)
 }

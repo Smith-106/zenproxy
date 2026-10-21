@@ -146,6 +146,15 @@ func (r *Registry) SetReplica(name string) {
 
 // SetSessionExitCache installs the session→exit sticky table. Safe to call
 // once at startup; a nil cache disables session stickiness.
+// SessionPinStats counts live conversation pins. The panel uses it to say
+// that 换出口 only moves the account's current binding.
+func (r *Registry) SessionPinStats() SessionPinStats {
+	if r == nil || r.sessions == nil {
+		return SessionPinStats{}
+	}
+	return r.sessions.PinStats()
+}
+
 func (r *Registry) SetSessionExitCache(c *SessionExitCache) {
 	r.mu.Lock()
 	r.sessions = c

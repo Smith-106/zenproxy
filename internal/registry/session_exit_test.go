@@ -223,3 +223,14 @@ func TestExitForSessionEmptyFallsThrough(t *testing.T) {
 		t.Fatalf("empty session must use account affinity, got %v", got)
 	}
 }
+
+func TestSessionPinStatsCountsSplitAccounts(t *testing.T) {
+	c := NewSessionExitCache(time.Hour, 64)
+	c.Set("zen-01", "s1", "m", "a")
+	c.Set("zen-01", "s2", "m", "b")
+	c.Set("zen-02", "s3", "m", "a")
+	got := c.PinStats()
+	if got.Live != 3 || got.Exits != 2 || got.AccountsOnSeveralExits != 1 {
+		t.Fatalf("stats = %+v", got)
+	}
+}

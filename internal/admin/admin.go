@@ -161,6 +161,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Computed once: asking twice would allocate twice and could report a count
 	// that does not match the list under a concurrent write.
 	blocks := s.pool.RegionBlocks()
+	pins := s.reg.SessionPinStats()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"uptime_seconds":   time.Since(s.started).Seconds(),
 		"listen":           s.cfg.Server.Listen,
@@ -178,10 +179,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"consecutive_failures": outageFails,
 			"threshold":            outageLimit,
 		},
-		"requests":         totalReq,
-		"success":          totalOK,
-		"failures":         totalFail,
-		"rotations":        totalRot,
+		"requests":  totalReq,
+		"success":   totalOK,
+		"failures":  totalFail,
+		"rotations": totalRot,
+		"session_pins": map[string]any{
+			"live":                      pins.Live,
+			"exits":                     pins.Exits,
+			"accounts_on_several_exits": pins.AccountsOnSeveralExits,
+		},
 		"upstreams":        upstreams,
 		"allowed_hosts":    s.cfg.Policy.AllowedHosts,
 		"state_file":       s.cfg.StateFile,

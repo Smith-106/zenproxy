@@ -211,6 +211,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`openDetailIds`, `paintRows`,
 		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
+		`sessionPins`, `别的对话下次还会把它拽回去`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
@@ -227,7 +228,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 
 	status := decode(t, authed(s, http.MethodGet, "/admin/api/status", ""))
-	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "replica_split", "account_replicas", "success", "free_tier", "policy", "health", "exits_retired", "exits_slow", "exits_watching", "exits_gate", "quarantine", "quota", "region", "outage_breaker"} {
+	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "replica_split", "account_replicas", "success", "free_tier", "policy", "health", "exits_retired", "exits_slow", "exits_watching", "exits_gate", "quarantine", "quota", "region", "outage_breaker", "session_pins"} {
 		if _, ok := status[key]; !ok {
 			t.Errorf("status is missing %q", key)
 		}
