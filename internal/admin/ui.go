@@ -422,10 +422,10 @@ function renderExits(list) {
   const btn = document.getElementById('prune_btn');
   if (btn) btn.textContent = '清理垃圾出口（' + cache.pruneCount + '）';
   const tb = document.querySelector('#exits tbody');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'; return; }
+  if (!list.length) { paintRows(tb, '<tr><td colspan="14" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'); return; }
   const shown = list.filter(e => exitMatches(e, cache.exitFilter || 'all'));
-  if (!shown.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">这个筛选下没有出口</td></tr>'; return; }
-  tb.innerHTML = shown.map(e => {
+  if (!shown.length) { paintRows(tb, '<tr><td colspan="14" class="muted">这个筛选下没有出口</td></tr>'); return; }
+  paintRows(tb, shown.map(e => {
     const q = e.quarantined_until ? new Date(e.quarantined_until) : null;
     let state;
     if (e.retired) {
@@ -486,7 +486,19 @@ function renderExits(list) {
       '<td class="muted">' + esc(shortReason(e.last_error)) + '</td>' +
       '<td>' + act.join(' ') + '</td>' +
     '</tr>';
-  }).join('');
+  }).join(''));
+}
+function paintRows(tb, html) {
+  const y = window.scrollY;
+  tb.innerHTML = html;
+  if (window.scrollY !== y) window.scrollTo(0, y);
+}
+function openDetailIds() {
+  const open = {};
+  document.querySelectorAll('#accounts tr.detail').forEach(el => {
+    if (el.style.display !== 'none') open[el.id] = true;
+  });
+  return open;
 }
 
 // quotaLeft returns the remaining quota cooldown, or null.
@@ -675,8 +687,9 @@ function boundWord(a) {
 }
 function renderAccounts(list) {
   const tb = document.querySelector('#accounts tbody');
-  if (!list.length) { tb.innerHTML = '<tr><td colspan="13" class="muted">还没有账号，用上面的表单加一个</td></tr>'; return; }
-  tb.innerHTML = list.map(a => {
+  const open = openDetailIds();
+  if (!list.length) { paintRows(tb, '<tr><td colspan="13" class="muted">还没有账号，用上面的表单加一个</td></tr>'); return; }
+  paintRows(tb, list.map(a => {
     const st = a.stats || {};
     const detailId = 'detail_' + a.id;
     const rows = [];
@@ -705,7 +718,7 @@ function renderAccounts(list) {
       '</td>' +
     '</tr>');
     const hdrs = a.headers || a.Headers;
-    rows.push('<tr class="detail" id="' + esc(detailId) + '" style="display:none"><td colspan="13">' +
+    rows.push('<tr class="detail" id="' + esc(detailId) + '" style="display:' + (open[esc(detailId)] ? '' : 'none') + '"><td colspan="13">' +
       '权重 <code>' + esc(a.weight || 0) + '</code> · ' +
       '自定义头 <code>' + esc(hdrs && Object.keys(hdrs).length ? JSON.stringify(hdrs) : '无') + '</code> · ' +
       '绑定出口 IP ' + accountIPCell(a) + ' · ' +
@@ -713,7 +726,7 @@ function renderAccounts(list) {
       '最近使用 ' + esc(fmtTime(st.last_used)) + ' · 最近成功 ' + esc(fmtTime(st.last_success)) +
     '</td></tr>');
     return rows.join('');
-  }).join('');
+  }).join(''));
 }
 
 function toggleDetail(id) {

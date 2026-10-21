@@ -177,6 +177,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`failureThreshold`, `次就隔离`, `隔离还剩`, `不到 1 分钟`, `napLeft`,
 		`proxyCell`, `粘住`, `还能服务当前模型时不换`, `还没粘住`,
 		`overCap`, `maxLatencyMS`, `超出 `,
+		`openDetailIds`, `paintRows`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,
