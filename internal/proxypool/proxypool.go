@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -433,6 +434,7 @@ type member struct {
 	mu          sync.Mutex
 	healthy     bool
 	exitIP      string
+	exitIPNote  string
 	latencyMS   int64
 	failures    int64
 	softFails   int64
@@ -1921,6 +1923,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 			Scheme:      m.Scheme,
 			Healthy:     m.healthy,
 			ExitIP:      m.exitIP,
+			ExitIPNote:  m.exitIPNote,
 			LatencyMS:   m.latencyMS,
 			Failures:    m.failures,
 			SoftFails:   m.softFails,
@@ -2356,9 +2359,11 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	if p.health.ProbeURL != "" {
 		if ip, err := p.fetchExitIP(pctx, m); err != nil {
 			// A failed IP probe is informative, not fatal: the tunnels that
-			// matter already proved themselves above.
+			// matter already proved themselves above. Keep it off lastErr,
+			// which the panel reads as "this exit is broken".
 			m.mu.Lock()
-			m.lastErr = "exit-ip probe: " + err.Error()
+			m.exitIPNote = exitIPNote(err)
+			m.lastErr = ""
 			m.mu.Unlock()
 		} else {
 			exitIP = ip
@@ -2376,6 +2381,7 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	m.quarantineClass = ""
 	if exitIP != "" {
 		m.lastErr = ""
+		m.exitIPNote = ""
 	}
 	m.lastCheck = time.Now()
 	m.mu.Unlock()
@@ -2384,6 +2390,27 @@ func (p *Pool) probe(ctx context.Context, m *member) {
 	// breaker directly: recovery is detected at probe cadence, not request
 	// cadence.
 	p.noteSuccessOutcome()
+}
+
+// exitIPNote reduces an address-lookup failure to a fixed word. The panel
+// says the tunnel is fine and the lookup was not; it never sees the raw error.
+func exitIPNote(err error) string {
+	msg := strings.TrimSpace(err.Error())
+	if rest, ok := strings.CutPrefix(msg, "status "); ok {
+		if n, conv := strconv.Atoi(rest); conv == nil && n >= 100 && n <= 599 {
+			return "status " + rest
+		}
+		return "status"
+	}
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "canceled"):
+		return "canceled"
+	case strings.Contains(low, "deadline") || strings.Contains(low, "timeout"):
+		return "timeout"
+	default:
+		return "failed"
+	}
 }
 
 func (p *Pool) fetchExitIP(ctx context.Context, m *member) (string, error) {

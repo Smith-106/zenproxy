@@ -63,6 +63,38 @@ func createTestPool(t *testing.T, n int, hc config.Health) *Pool {
 	return pool
 }
 
+func TestExitIPNoteStaysOffTheFailureColumn(t *testing.T) {
+	if got := exitIPNote(noteErr("context canceled")); got != "canceled" {
+		t.Fatalf("canceled = %q", got)
+	}
+	if got := exitIPNote(noteErr("status 403")); got != "status 403" {
+		t.Fatalf("status = %q", got)
+	}
+	if got := exitIPNote(noteErr("status nope")); got != "status" {
+		t.Fatalf("bad status = %q", got)
+	}
+	pool := createTestPool(t, 1, config.Health{})
+	m := pool.byID["a"]
+	m.mu.Lock()
+	m.healthy = true
+	m.exitIPNote = exitIPNote(noteErr("context canceled"))
+	m.lastErr = ""
+	m.mu.Unlock()
+	var found model.ProxyHealth
+	for _, h := range pool.Health() {
+		if h.ID == "a" {
+			found = h
+		}
+	}
+	if found.ExitIPNote != "canceled" || found.LastError != "" || !found.Healthy {
+		t.Fatalf("health note=%q err=%q healthy=%v", found.ExitIPNote, found.LastError, found.Healthy)
+	}
+}
+
+type noteErr string
+
+func (e noteErr) Error() string { return string(e) }
+
 func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
 	pool := createTestPool(t, 4, config.Health{
 		FailureThreshold: 1,

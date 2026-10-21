@@ -338,7 +338,7 @@ function renderExits(list) {
       '<td><code>' + esc(e.id) + '</code></td>' +
       '<td>' + esc(e.scheme) + '</td>' +
       '<td><code>' + esc(e.addr) + '</code></td>' +
-      '<td><code>' + esc(e.exit_ip || '—') + '</code></td>' +
+      '<td>' + exitIPCell(e) + '</td>' +
       '<td>' + (e.latency_ms ? e.latency_ms + ' ms' : '—') + '</td>' +
       '<td>' + state + '</td>' +
       '<td>' + quotaCell(e) + '</td>' +
@@ -405,6 +405,19 @@ function classPill(cls) {
     : cls === 'rate_limit' ? '429：账号或出口额度问题。有重置时刻就等，否则换绑定' : '';
   return '<span class="pill ' + m[0] + '" title="' + esc(tip) + '">' + esc(m[1]) +
          ' <code>' + esc(cls) + '</code></span>';
+}
+function exitIPWord(note) {
+  if (!note) return '';
+  if (note === 'canceled') return '隧道是通的，这次地址探测被取消';
+  if (note === 'timeout') return '隧道是通的，这次地址探测超时';
+  if (note.indexOf('status ') === 0) return '隧道是通的，地址探测返回 ' + note.slice(7);
+  return '隧道是通的，这次没问到出口地址';
+}
+function exitIPCell(e) {
+  const ip = e.exit_ip || '—';
+  const note = exitIPWord(e.exit_ip_note);
+  const title = note ? ' title="' + esc(note) + '"' : '';
+  return '<code' + title + '>' + esc(ip) + '</code>';
 }
 function quarantineWord(cls) {
   if (cls === 'timeout') return '超时';

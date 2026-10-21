@@ -180,11 +180,14 @@ type Stats struct {
 
 // ProxyHealth is the runtime health record of one egress exit.
 type ProxyHealth struct {
-	ID              string     `json:"id"`
-	Addr            string     `json:"addr"`
-	Scheme          string     `json:"scheme"`
-	Healthy         bool       `json:"healthy"`
-	ExitIP          string     `json:"exit_ip,omitempty"`
+	ID      string `json:"id"`
+	Addr    string `json:"addr"`
+	Scheme  string `json:"scheme"`
+	Healthy bool   `json:"healthy"`
+	ExitIP  string `json:"exit_ip,omitempty"`
+	// ExitIPNote is a fixed word for why the address cell is empty even though
+	// the tunnel just succeeded. It is not a health failure.
+	ExitIPNote      string     `json:"exit_ip_note,omitempty"`
 	LatencyMS       int64      `json:"latency_ms"`
 	Failures        int64      `json:"failures"`
 	SoftFails       int64      `json:"soft_failures"`
