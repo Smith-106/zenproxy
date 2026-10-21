@@ -107,6 +107,11 @@ const dashboardHTML = `<!doctype html>
   </section>
 
   <section>
+    <h2>账号池与统一入口</h2>
+    <div id="pools"></div>
+  </section>
+
+  <section>
     <h2>出口池（IP 池）</h2>
     <table id="exits"><thead><tr>
       <th>出口 ID</th><th>类型</th><th>地址</th><th>出口 IP</th><th>延迟</th>
@@ -199,6 +204,7 @@ async function load() {
     renderStat(status);
     renderFree(status);
     renderConfig(status);
+    renderPools(status);
     fillUpstreams(status.upstreams || []);
     document.getElementById('foot').innerHTML =
       '监听 <code>' + esc(status.listen || '') + '</code> · 上游 <code>' +
@@ -282,6 +288,36 @@ function renderConfig(s) {
     '<p class="muted" style="margin-top:8px">这里只展示、不修改：要调参数改 YAML 后重启生效。</p>';
 }
 
+function renderPools(s) {
+  const strat = {
+    'round-robin': '轮流用账号',
+    'weighted': '按权重挑账号',
+  };
+  const limit = {
+    'rotate-exit': '限流时只换出口',
+    'rotate-account': '限流时只换账号',
+    'rotate-both': '限流时先换出口，再换账号',
+  };
+  const rows = (s.pools || []).map(p => {
+    const who = (p.accounts || []).join(', ') || '没有账号';
+    const named = (p.models || []).length;
+    const models = p.wildcard && !named ? '未点名的模型也走这个池'
+      : p.wildcard ? ('列出 ' + named + ' 个，其余也放行')
+      : ('只放行 ' + ((p.models || []).join(', ') || '空名单'));
+    return '<tr><td><code>' + esc(p.id) + '</code></td><td>' + esc(who) + '</td><td>' +
+      esc(strat[p.strategy] || p.strategy || '—') + '</td><td>' +
+      esc(limit[p.on_rate_limit] || p.on_rate_limit || '—') + '</td><td>' + esc(models) + '</td></tr>';
+  }).join('') || '<tr><td colspan="5" class="muted">没有池子</td></tr>';
+  const gw = s.gateway || {};
+  const gate = gw.enabled
+    ? ('<p>统一入口开着' + (gw.require_key ? '，必须带钥匙' : '') + '。钥匙：' +
+        ((gw.keys || []).map(k => esc(k.id || k.name || '未命名') + ' → ' + esc(k.pool || '—')).join('，') || '没有钥匙') +
+        '。</p>')
+    : '<p class="muted">统一入口关着。下游现在还是按账号路径进来，不是一把钥匙挑整个池。</p>';
+  document.getElementById('pools').innerHTML =
+    '<table><thead><tr><th>池</th><th>账号</th><th>怎么挑</th><th>限流时</th><th>模型</th></tr></thead><tbody>' +
+    rows + '</tbody></table>' + gate;
+}
 function renderFree(s) {
   const f = s.free_tier || {};
   document.getElementById('free').innerHTML =
