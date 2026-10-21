@@ -85,7 +85,7 @@ func TestWriteJSONErrorCodeIsWhatTheNextHopPrints(t *testing.T) {
 	}
 }
 
-func TestWriteUpstreamResponseStampsTheClassWithoutRewritingTheBody(t *testing.T) {
+func TestWriteUpstreamResponsePutsTheClassWhereTheNextHopKeepsIt(t *testing.T) {
 	rec := httptest.NewRecorder()
 	resp := &http.Response{
 		StatusCode: http.StatusTooManyRequests,
@@ -102,8 +102,18 @@ func TestWriteUpstreamResponseStampsTheClassWithoutRewritingTheBody(t *testing.T
 	if rec.Header().Get("X-Zen-Error") != "rate_limit" {
 		t.Fatalf("header = %q", rec.Header().Get("X-Zen-Error"))
 	}
-	if !strings.Contains(rec.Body.String(), "slow down") {
-		t.Fatalf("body = %s", rec.Body.String())
+	body := rec.Body.String()
+	if !strings.Contains(body, "slow down") || !strings.Contains(body, `"code":"rate_limit"`) {
+		t.Fatalf("body = %s", body)
+	}
+
+	kept := stampUpstreamClass([]byte(`{"error":{"message":"nope","code":"vendor_code"}}`), model.ClassRateLimit)
+	if strings.Contains(string(kept), "rate_limit") || !strings.Contains(string(kept), "vendor_code") {
+		t.Fatalf("vendor code was replaced: %s", kept)
+	}
+	plain := stampUpstreamClass([]byte("not json"), model.ClassRateLimit)
+	if string(plain) != "not json" {
+		t.Fatalf("plain = %s", plain)
 	}
 }
 

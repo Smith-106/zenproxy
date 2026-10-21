@@ -1418,18 +1418,82 @@ func readAllKeepalive(r io.Reader, limit int64, every time.Duration, onTick func
 	return io.ReadAll(io.LimitReader(r, limit))
 }
 
-// writeUpstreamResponse replays a buffered error response verbatim and stamps
-// the class we already computed. The body stays the upstream's own words —
-// the next hop still has the vendor sentence — but X-Zen-Error tells it
-// whether to retry, rotate, or stop without parsing that sentence.
+// writeUpstreamResponse replays a buffered error response and stamps the class
+// we already computed. The vendor sentence stays. The class goes in two places
+// the next hop can see: X-Zen-Error, and error.code inside a JSON body.
+// new-api keeps the JSON code and drops the header, so the header alone never
+// reaches CPA or pi.
 func writeUpstreamResponse(w http.ResponseWriter, resp *http.Response, body []byte, class model.ErrorClass) {
 	copyHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
 	if class != "" && class != model.ClassOK {
 		w.Header().Set("X-Zen-Error", string(class))
+		body = stampUpstreamClass(body, class)
 	}
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+// stampUpstreamClass puts the class into a JSON error body when the vendor
+// did not already name a code. A string error becomes an object, because that
+// is the only shape new-api copies a code out of. Anything else is left as
+// the vendor sent it.
+func stampUpstreamClass(body []byte, class model.ErrorClass) []byte {
+	if class == "" || class == model.ClassOK {
+		return body
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &top); err != nil {
+		return body
+	}
+	raw, ok := top["error"]
+	if !ok {
+		return body
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return body
+	}
+	if raw[0] == '"' {
+		var msg string
+		if err := json.Unmarshal(raw, &msg); err != nil || msg == "" {
+			return body
+		}
+		stamped, err := json.Marshal(map[string]any{"error": map[string]string{
+			"message": msg,
+			"type":    "upstream_error",
+			"code":    string(class),
+		}})
+		if err != nil {
+			return body
+		}
+		return stamped
+	}
+	if raw[0] != '{' {
+		return body
+	}
+	var errObj map[string]any
+	if err := json.Unmarshal(raw, &errObj); err != nil {
+		return body
+	}
+	if code, exists := errObj["code"]; exists && code != nil && code != "" {
+		return body
+	}
+	errObj["code"] = string(class)
+	encoded, err := json.Marshal(errObj)
+	if err != nil {
+		return body
+	}
+	top["error"] = encoded
+	stamped, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return stamped
 }
 
 func writeFoldTerminal(w http.ResponseWriter, foldErr string) {
