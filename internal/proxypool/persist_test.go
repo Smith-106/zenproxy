@@ -159,6 +159,27 @@ func TestStateSnapshotsSeeTheOtherReplica(t *testing.T) {
 	}
 }
 
+func TestStateSnapshotsHideStaleReplicas(t *testing.T) {
+	dir := t.TempDir()
+	specs := []Spec{{ID: "ex-b", URL: "http://127.0.0.1:58002"}}
+	a, err := NewPool(specs, config.Health{}, testLogger(), filepath.Join(dir, "exits-state-a.json"))
+	if err != nil {
+		t.Fatalf("a: %v", err)
+	}
+	a.markDirty()
+	a.SaveState()
+	stale := []byte(`{"version":1,"saved_at":"2020-01-01T00:00:00Z","exits":{"ex-b":{"retired":true}}}`)
+	for _, name := range []string{"exits-state-dead.json", "exits-state.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), stale, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snaps := a.StateSnapshots()
+	if len(snaps) != 1 || !snaps[0].Self {
+		t.Fatalf("snapshots = %+v, want only the live self file", snaps)
+	}
+}
+
 func TestExpiredBlockNotRestored(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "exits-state.json")
 	specs := []Spec{{ID: "ex-a", URL: "http://127.0.0.1:58001"}}

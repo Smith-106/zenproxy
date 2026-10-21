@@ -85,12 +85,14 @@ x-zenproxy: &base
 services:
   zenproxy-a:
     <<: *base
+    hostname: zenproxy-a
     ports:
       # 只发布到宿主回环（控制台/预检/本机自检）。公网入口是 new-api。
       - "127.0.0.1:9000:9000"
 
   zenproxy-b:
     <<: *base
+    hostname: zenproxy-b
     # 没有宿主端口：两个副本不能抢绑 127.0.0.1:9000；服务走 docker 网络。
 
 networks:

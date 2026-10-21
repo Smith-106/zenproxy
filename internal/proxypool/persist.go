@@ -346,11 +346,18 @@ func (p *Pool) StateSnapshots() []ReplicaState {
 		if json.Unmarshal(b, &st) != nil {
 			continue
 		}
+		self := path == p.statePath
+		// The shared exits-state.json is only a seed. A per-host file that
+		// has not been rewritten for three minutes belongs to a container
+		// that is gone; the panel would otherwise report it as a live peer.
+		if !self && (base == "exits-state.json" || st.SavedAt.IsZero() || time.Since(st.SavedAt) > 3*time.Minute) {
+			continue
+		}
 		snap := ReplicaState{
 			File:    base,
 			SavedAt: st.SavedAt,
 			Exits:   len(st.Exits),
-			Self:    path == p.statePath,
+			Self:    self,
 		}
 		for _, rec := range st.Exits {
 			if rec.Retired {
@@ -384,9 +391,9 @@ func (p *Pool) saveLoop(ctx context.Context, every time.Duration) {
 			}
 			return
 		case <-t.C:
-			if p.dirty.Load() {
-				p.SaveState()
-			}
+			// Flush even when nothing changed. saved_at is how the other
+			// replica tells a live peer from a file left by a dead container.
+			p.SaveState()
 		}
 	}
 }
