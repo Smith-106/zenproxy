@@ -83,7 +83,7 @@ const dashboardHTML = `<!doctype html>
   <h1>zenproxy 出口池控制台</h1>
   <span class="spacer"></span>
   <button onclick="probe()">探活所有出口</button>
-  <button class="danger" onclick="prune()">清理垃圾出口</button>
+  <button class="danger" id="prune_btn" onclick="prune()">清理垃圾出口</button>
   <button onclick="load()">刷新</button>
   <button class="danger" onclick="logout()">退出</button>
 </header>
@@ -118,8 +118,9 @@ const dashboardHTML = `<!doctype html>
       <th>状态</th><th>额度</th><th>地区</th><th>连续失败</th><th>软失败</th><th>隔离至</th><th>绑定账号</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" style="margin-top:8px">
-      <b>清理垃圾出口</b>会把「隔离中 / 降级 / 延迟超过 max_latency / 连续失败达 retire_after」的出口
-      <b>永久移出轮换</b>——不像隔离那样到点自动复活。误清了就用「恢复」放回来。
+      <b>清理垃圾出口</b>按这一页上的「可清理」计数，把这些出口<b>永久移出轮换</b>：
+      隔离中的、不健康的、延迟超过上限的。偏慢但还在轮换里的也算。
+      只是连续失败、还没隔离的（观察）不算。误清了用该行的「恢复」。
     </p>
   </section>
 
@@ -345,6 +346,9 @@ function fillUpstreams(list) {
 }
 
 function renderExits(list) {
+  cache.pruneCount = list.filter(e => e.prunable && !e.retired).length;
+  const btn = document.getElementById('prune_btn');
+  if (btn) btn.textContent = '清理垃圾出口（' + cache.pruneCount + '）';
   const tb = document.querySelector('#exits tbody');
   if (!list.length) { tb.innerHTML = '<tr><td colspan="14" class="muted">未配置出口（proxies.resin / proxies.static 均为空）</td></tr>'; return; }
   tb.innerHTML = list.map(e => {
@@ -633,7 +637,9 @@ async function probe() {
 }
 
 async function prune() {
-  if (!confirm('把当前「隔离中 / 降级 / 延迟过高」的出口永久移出轮换？\n（误清了可以用该行的「恢复」放回来）')) return;
+  const n = cache.pruneCount || 0;
+  if (!n) { toast('现在没有可清理的出口'); return; }
+  if (!confirm('把 ' + n + ' 个带「可清理」的出口永久移出轮换？\n偏慢但还在用的也算。误清了可以用该行的「恢复」放回来。')) return;
   try {
     const r = await api('/proxies/prune', { method: 'POST' });
     const rep = r.report || {};
