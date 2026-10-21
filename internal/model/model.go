@@ -251,6 +251,9 @@ type ProxyHealth struct {
 	// there is no live peer file.
 	PeerRetired bool `json:"peer_retired,omitempty"`
 	PeerKeeps   bool `json:"peer_keeps,omitempty"`
+	// PeerRetiredClass is timeout, unreachable, tls, or other. It is the other
+	// replica's retirement reason folded to a word, never the dial text.
+	PeerRetiredClass string `json:"peer_retired_class,omitempty"`
 }
 
 // PruneReport is the outcome of one prune pass over the egress pool.

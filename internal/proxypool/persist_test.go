@@ -265,7 +265,7 @@ func TestHealthMarksTheExitsTheOtherReplicaDoesNotShare(t *testing.T) {
 	if err := os.WriteFile(self, []byte(body(`"ex-1":{"retired":true},"ex-2":{},"ex-3":{}`)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(peer, []byte(body(`"ex-1":{},"ex-2":{"retired":true},"ex-3":{}`)), 0o644); err != nil {
+	if err := os.WriteFile(peer, []byte(body(`"ex-1":{},"ex-2":{"retired":true,"retired_reason":"i/o timeout"},"ex-3":{}`)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	p, err := NewPool([]Spec{
@@ -283,7 +283,7 @@ func TestHealthMarksTheExitsTheOtherReplicaDoesNotShare(t *testing.T) {
 	if !got["ex-1"].Retired || !got["ex-1"].PeerKeeps || got["ex-1"].PeerRetired {
 		t.Fatalf("ex-1 = retired %v peer_keeps %v peer_retired %v", got["ex-1"].Retired, got["ex-1"].PeerKeeps, got["ex-1"].PeerRetired)
 	}
-	if got["ex-2"].Retired || !got["ex-2"].PeerRetired || got["ex-2"].PeerKeeps {
+	if got["ex-2"].Retired || !got["ex-2"].PeerRetired || got["ex-2"].PeerKeeps || got["ex-2"].PeerRetiredClass != "timeout" {
 		t.Fatalf("ex-2 = retired %v peer_retired %v peer_keeps %v", got["ex-2"].Retired, got["ex-2"].PeerRetired, got["ex-2"].PeerKeeps)
 	}
 	if got["ex-3"].PeerRetired || got["ex-3"].PeerKeeps {

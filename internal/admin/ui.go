@@ -360,8 +360,8 @@ function renderExits(list) {
   const there = [];
   const keeps = [];
   for (const e of list) {
-    if (e.peer_retired) there.push(e.id);
-    if (e.peer_keeps) keeps.push(e.id);
+    if (e.peer_retired) there.push(peerBit(e));
+    if (e.peer_keeps) keeps.push(esc(e.id));
   }
   const peer = document.getElementById('peer_ids');
   if (peer) {
@@ -496,6 +496,15 @@ function exitIPCell(e) {
   const note = exitIPWord(e.exit_ip_note);
   const title = note ? ' title="' + esc(note) + '"' : '';
   return '<code' + title + '>' + esc(ip) + '</code>';
+}
+function peerBit(e) {
+  const parts = [];
+  const word = quarantineWord(e.peer_retired_class);
+  if (word) parts.push(word);
+  if (e.quarantined_until) parts.push('这边隔离中');
+  else if (e.healthy) parts.push('这边仍健康');
+  else if (!e.retired) parts.push('这边不健康');
+  return esc(e.id) + (parts.length ? '（' + parts.join('，') + '）' : '');
 }
 function quarantineWord(cls) {
   if (cls === 'timeout') return '超时';

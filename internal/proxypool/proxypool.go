@@ -1973,11 +1973,12 @@ func (p *Pool) Health() []model.ProxyHealth {
 		}
 		h.Prunable = p.pruneWorthyLocked(m)
 		if peerOK {
-			retiredThere, listed := peer[m.ID]
-			if !m.retired && retiredThere {
+			note, listed := peer[m.ID]
+			if !m.retired && note.Retired {
 				h.PeerRetired = true
+				h.PeerRetiredClass = note.Class
 			}
-			if m.retired && listed && !retiredThere {
+			if m.retired && listed && !note.Retired {
 				h.PeerKeeps = true
 			}
 		}

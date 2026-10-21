@@ -35,6 +35,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"zenproxy/internal/model"
 )
 
 const exitsStateVersion = 1
@@ -402,9 +404,16 @@ func (p *Pool) livePeerState() string {
 	return best
 }
 
+// peerNote is one exit in the other replica's file. Class is a dial word,
+// never the stored sentence.
+type peerNote struct {
+	Retired bool
+	Class   string
+}
+
 // peerExitRetired reads the other live replica's file once. The bool is
 // false when there is no peer, so a missing file is not "nobody is retired".
-func (p *Pool) peerExitRetired() (map[string]bool, bool) {
+func (p *Pool) peerExitRetired() (map[string]peerNote, bool) {
 	path := p.livePeerState()
 	if path == "" {
 		return nil, false
@@ -413,9 +422,16 @@ func (p *Pool) peerExitRetired() (map[string]bool, bool) {
 	if err != nil {
 		return nil, false
 	}
-	out := make(map[string]bool, len(st.Exits))
+	out := make(map[string]peerNote, len(st.Exits))
 	for id, rec := range st.Exits {
-		out[id] = rec.Retired
+		note := peerNote{Retired: rec.Retired}
+		if rec.Retired {
+			note.Class = model.DialClass(rec.RetiredReason)
+			if note.Class == "" && rec.RetiredReason != "" {
+				note.Class = "other"
+			}
+		}
+		out[id] = note
 	}
 	return out, true
 }
