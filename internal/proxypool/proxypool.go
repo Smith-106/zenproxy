@@ -1912,6 +1912,7 @@ func (p *Pool) Unbind(exitID, accountID string) {
 
 // Health snapshots the pool for the admin API.
 func (p *Pool) Health() []model.ProxyHealth {
+	peer, peerOK := p.peerExitRetired()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make([]model.ProxyHealth, 0, len(p.members))
@@ -1971,6 +1972,15 @@ func (p *Pool) Health() []model.ProxyHealth {
 			h.RetiredAt = &t
 		}
 		h.Prunable = p.pruneWorthyLocked(m)
+		if peerOK {
+			retiredThere, listed := peer[m.ID]
+			if !m.retired && retiredThere {
+				h.PeerRetired = true
+			}
+			if m.retired && listed && !retiredThere {
+				h.PeerKeeps = true
+			}
+		}
 		m.mu.Unlock()
 		out = append(out, h)
 	}

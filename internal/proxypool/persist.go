@@ -402,6 +402,24 @@ func (p *Pool) livePeerState() string {
 	return best
 }
 
+// peerExitRetired reads the other live replica's file once. The bool is
+// false when there is no peer, so a missing file is not "nobody is retired".
+func (p *Pool) peerExitRetired() (map[string]bool, bool) {
+	path := p.livePeerState()
+	if path == "" {
+		return nil, false
+	}
+	st, err := readExitsState(path)
+	if err != nil {
+		return nil, false
+	}
+	out := make(map[string]bool, len(st.Exits))
+	for id, rec := range st.Exits {
+		out[id] = rec.Retired
+	}
+	return out, true
+}
+
 func readExitsState(path string) (exitsState, error) {
 	b, err := os.ReadFile(path)
 	if err != nil || len(b) > 8<<20 {

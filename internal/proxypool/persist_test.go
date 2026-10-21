@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"zenproxy/internal/config"
+	"zenproxy/internal/model"
 )
 
 // A restart must not amnesty the pool: the retire verdict and the clocked
@@ -250,5 +251,42 @@ func TestStateSplitCountsExitsNotTheHeadlineGap(t *testing.T) {
 	got := p.StateSplit()
 	if got.RetiredOnlySelf != 1 || got.RetiredOnlyPeer != 1 || got.QuotaOnlySelf != 1 || got.QuotaOnlyPeer != 0 {
 		t.Fatalf("split = %+v, want self-retired 1, peer-retired 1, self-quota 1", got)
+	}
+}
+
+func TestHealthMarksTheExitsTheOtherReplicaDoesNotShare(t *testing.T) {
+	dir := t.TempDir()
+	self := filepath.Join(dir, "exits-state-a.json")
+	peer := filepath.Join(dir, "exits-state-b.json")
+	now := time.Now().UTC().Format(time.RFC3339)
+	body := func(exits string) string {
+		return `{"version":1,"saved_at":"` + now + `","exits":{` + exits + `}}`
+	}
+	if err := os.WriteFile(self, []byte(body(`"ex-1":{"retired":true},"ex-2":{},"ex-3":{}`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(peer, []byte(body(`"ex-1":{},"ex-2":{"retired":true},"ex-3":{}`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := NewPool([]Spec{
+		{ID: "ex-1", URL: "http://127.0.0.1:1"},
+		{ID: "ex-2", URL: "http://127.0.0.1:2"},
+		{ID: "ex-3", URL: "http://127.0.0.1:3"},
+	}, config.Health{}, testLogger(), self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]model.ProxyHealth{}
+	for _, h := range p.Health() {
+		got[h.ID] = h
+	}
+	if !got["ex-1"].Retired || !got["ex-1"].PeerKeeps || got["ex-1"].PeerRetired {
+		t.Fatalf("ex-1 = retired %v peer_keeps %v peer_retired %v", got["ex-1"].Retired, got["ex-1"].PeerKeeps, got["ex-1"].PeerRetired)
+	}
+	if got["ex-2"].Retired || !got["ex-2"].PeerRetired || got["ex-2"].PeerKeeps {
+		t.Fatalf("ex-2 = retired %v peer_retired %v peer_keeps %v", got["ex-2"].Retired, got["ex-2"].PeerRetired, got["ex-2"].PeerKeeps)
+	}
+	if got["ex-3"].PeerRetired || got["ex-3"].PeerKeeps {
+		t.Fatalf("ex-3 should be unmarked, got %+v", got["ex-3"])
 	}
 }

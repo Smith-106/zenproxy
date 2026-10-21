@@ -384,6 +384,8 @@ function renderExits(list) {
       state += ' <span class="pill ok" title="免费模型现在会挑它。别的出口看起来一样健康，但这次还没被准入">可走免费</span>';
     }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
+    if (e.peer_retired) state += ' <span class="pill warn" title="另一份状态文件里它已经退役。这边还在轮换">另一副本已退役</span>';
+    if (e.peer_keeps) state += ' <span class="pill warn" title="这边已经退役，另一份状态文件里它还在轮换">另一副本还在用</span>';
     const act = [];
     if (e.retired) {
       act.push('<button onclick="reviveExit(\'' + esc(e.id) + '\')">恢复</button>');

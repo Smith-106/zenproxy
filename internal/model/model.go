@@ -246,6 +246,11 @@ type ProxyHealth struct {
 	// Prunable mirrors what a prune pass would retire right now, so the panel
 	// can show the operator the damage before they commit to it.
 	Prunable bool `json:"prunable"`
+	// PeerRetired means the other replica's state file has retired this exit
+	// and this one has not. PeerKeeps is the opposite. Both are omitted when
+	// there is no live peer file.
+	PeerRetired bool `json:"peer_retired,omitempty"`
+	PeerKeeps   bool `json:"peer_keeps,omitempty"`
 }
 
 // PruneReport is the outcome of one prune pass over the egress pool.
