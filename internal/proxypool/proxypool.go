@@ -1929,6 +1929,9 @@ func (p *Pool) Health() []model.ProxyHealth {
 			SoftFails:   m.softFails,
 			ConsecFails: m.consecFails,
 			LastError:   model.PanelReason(m.lastErr),
+			Slow: p.health.MaxLatency > 0 && m.healthy && !m.retired &&
+				!time.Now().Before(m.quarantineUntil) && m.latencyMS > 0 &&
+				time.Duration(m.latencyMS)*time.Millisecond > p.health.MaxLatency,
 			// Only the live ones: an expired admission is history, and the
 			// panel exists to answer "who can serve free models NOW".
 			GatePasses: m.gatePasses,

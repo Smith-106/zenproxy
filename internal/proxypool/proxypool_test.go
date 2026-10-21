@@ -130,6 +130,14 @@ func TestQuarantineBreakdownSortsTheLiveShapes(t *testing.T) {
 	if n := pool.SlowCount(); n != 1 {
 		t.Fatalf("slow = %d, want 1", n)
 	}
+	for _, h := range pool.Health() {
+		if h.ID == "d" && !h.Slow {
+			t.Fatal("the slow exit is not marked on the row")
+		}
+		if h.ID == "a" && h.Slow {
+			t.Fatal("a timed-out exit was marked slow")
+		}
+	}
 
 	path := filepath.Join(t.TempDir(), "exits-state.json")
 	pool.statePath = path

@@ -325,6 +325,7 @@ function renderExits(list) {
     } else {
       state = '<span class="pill warn">降级</span>';
     }
+    if (e.slow) state += ' <span class="pill warn" title="延迟超过上限，挑选时靠后，没有退休">偏慢</span>';
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
     const act = [];
     if (e.retired) {

@@ -187,8 +187,11 @@ type ProxyHealth struct {
 	ExitIP  string `json:"exit_ip,omitempty"`
 	// ExitIPNote is a fixed word for why the address cell is empty even though
 	// the tunnel just succeeded. It is not a health failure.
-	ExitIPNote      string     `json:"exit_ip_note,omitempty"`
-	LatencyMS       int64      `json:"latency_ms"`
+	ExitIPNote string `json:"exit_ip_note,omitempty"`
+	LatencyMS  int64  `json:"latency_ms"`
+	// Slow is the same cut as the summary card: still in rotation, picked after
+	// the exits that answered inside max_latency.
+	Slow            bool       `json:"slow,omitempty"`
 	Failures        int64      `json:"failures"`
 	SoftFails       int64      `json:"soft_failures"`
 	ConsecFails     int        `json:"consecutive_failures"`
