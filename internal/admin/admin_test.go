@@ -178,6 +178,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`proxyCell`, `粘住`, `还能服务当前模型时不换`, `还没粘住`,
 		`overCap`, `maxLatencyMS`, `超出 `,
 		`openDetailIds`, `paintRows`,
+		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
 		`onclick="fillAccount(`, `onclick="toggleAccount(`, `onclick="toggleDetail(`,
 		`onclick="rotate(`, `onclick="del(`, `onclick="probe()`, `onclick="prune()`,
 		`onclick="retireExit(`, `onclick="reviveExit(`,

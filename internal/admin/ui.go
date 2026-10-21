@@ -149,7 +149,8 @@ const dashboardHTML = `<!doctype html>
       <th>账号</th><th>上游</th><th>Key</th><th>策略</th><th>出口</th><th>出口 IP</th><th>状态</th>
       <th>最近分类</th><th>请求</th><th>成功/请求</th><th>换 IP 次数</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
-    <p class="muted" style="margin-top:8px">
+    <p class="muted" id="sticky_line" style="margin-top:8px"></p>
+    <p class="muted">
       「编辑」把该账号回填到上面表单里，改完点保存即可更新（ID 本身也可以改，改了就是新增）。
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
@@ -727,6 +728,28 @@ function renderAccounts(list) {
     '</td></tr>');
     return rows.join('');
   }).join(''));
+  stickyLine(list);
+}
+function stickyLine(list) {
+  const el = document.getElementById('sticky_line');
+  if (!el) return;
+  const counts = {};
+  let bound = 0;
+  for (const a of list) {
+    if (!a.bound_exit) continue;
+    bound++;
+    counts[a.bound_exit] = (counts[a.bound_exit] || 0) + 1;
+  }
+  if (!bound) { el.textContent = ''; return; }
+  const used = Object.keys(counts).length;
+  let worst = 0;
+  for (const n of Object.values(counts)) if (n > worst) worst = n;
+  const gate = (cache.exits || []).filter(exitInGate).length;
+  let text = bound + ' 个账号粘在 ' + used + ' 个出口上';
+  if (worst > 1) text += '。最挤的一个上面有 ' + worst + ' 个账号';
+  if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
+  else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
+  el.textContent = text;
 }
 
 function toggleDetail(id) {
