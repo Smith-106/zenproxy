@@ -212,7 +212,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
 		`sessionPins`, `点换出口会把这个账号的对话钉一起改到新出口`, `pins_moved`,
-		`session_pins`, `个对话钉在`, `不在可走免费的出口上`, `免费请求会改钉`,
+		`session_pins`, `个对话钉在`, `不在可走免费的出口上`, `免费请求会改钉`, `座位也会跟着`,
 		`exitsSame`, `refreshTicks`, `nap-tick`, `quota-tick`,
 		`exitGen`, `exits_fingerprint`, `fetchedExits`,
 		`bound_share`, `个账号共用`, `不会自动拆开`, `exits_clear`, `exits_unmeasured`, `够快`,
