@@ -292,7 +292,7 @@ function renderStat(s) {
     ['退休出口', s.exits_retired],
     ['请求', s.requests],
     ['成功', (s.success || 0) + ' / ' + (s.requests || 0)],
-    ['尝试失败', s.failures, '一次请求换出口会记多次，不是失败的请求数'],
+    ['尝试失败', (s.failures || 0) + ' 次', '一次请求换出口会记多次，不是失败的请求数'],
     ['换出口', s.rotations, '每成功换一次绑定的出口记一笔。公网 IP 不一定变了'],
     ['在线', uptimeWord(s.uptime_seconds)],
   ];
@@ -306,6 +306,9 @@ function renderStat(s) {
     ' 行上仍写健康，旁边另标偏慢。';
   if (s.exits_pending) {
     shape = '这轮还没探到 ' + s.exits_pending + ' 个。探活走完之前，够快会偏小，不是这些出口变慢了。' + shape;
+  }
+  if ((s.failures || 0) > (s.requests || 0)) {
+    shape += '尝试失败 ' + s.failures + ' 次，比请求 ' + (s.requests || 0) + ' 个多。一次请求换出口会记多次，不是失败的请求数。';
   }
   document.getElementById('pool_shape').textContent = shape;
 }

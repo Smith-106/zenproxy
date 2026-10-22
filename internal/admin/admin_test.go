@@ -216,7 +216,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`exitsSame`, `refreshTicks`, `nap-tick`, `quota-tick`,
 		`exitGen`, `exits_fingerprint`, `fetchedExits`,
 		`bound_share`, `个账号共用`, `不会自动拆开`, `exits_clear`, `exits_unmeasured`, `够快`,
-		`exitFast`, `exitUntimed`, `exitPending`, `和上面的够快不是同一批`, `行上仍写健康`, `这轮还没探到`, `够快会偏小`, `最空的一个上面有`, `不会自动拆开`,
+		`exitFast`, `exitUntimed`, `exitPending`, `和上面的够快不是同一批`, `行上仍写健康`, `这轮还没探到`, `够快会偏小`, `最空的一个上面有`, `不会自动拆开`, `次，比请求`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
