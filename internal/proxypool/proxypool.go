@@ -9,8 +9,10 @@ package proxypool
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1986,6 +1988,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 		for a := range m.boundAccounts {
 			h.BoundAccounts = append(h.BoundAccounts, a)
 		}
+		sort.Strings(h.BoundAccounts)
 		h.Retired = m.retired
 		h.RetiredReason = model.PanelRetireReason(m.retiredReason)
 		if !m.retiredAt.IsZero() {
@@ -2014,6 +2017,26 @@ func (p *Pool) Health() []model.ProxyHealth {
 		out = append(out, h)
 	}
 	return out
+}
+
+// ExitTableFingerprint is a short hash of the exit table the panel draws.
+// LastCheck is left out: a probe that did not change a visible cell must not
+// make the browser download the table again. Bound account names are sorted
+// in Health, so a map walk cannot change the hash by itself.
+func (p *Pool) ExitTableFingerprint() string {
+	if p == nil {
+		return ""
+	}
+	rows := p.Health()
+	for i := range rows {
+		rows[i].LastCheck = nil
+	}
+	body, err := json.Marshal(rows)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:8])
 }
 
 // pruneWorthyLocked reports whether an exit has earned permanent removal.

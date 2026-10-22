@@ -204,9 +204,17 @@ function esc(v) {
 
 async function load() {
   try {
-    const [status, exits, accounts] = await Promise.all([
-      api('/status'), api('/proxies'), api('/accounts')
-    ]);
+    const accountsP = api('/accounts');
+    const status = await api('/status');
+    let exitList = cache.exits;
+    let fetchedExits = false;
+    if (!status.exits_fingerprint || status.exits_fingerprint !== cache.exitGen || !exitList) {
+      const exits = await api('/proxies');
+      exitList = exits.exits || [];
+      fetchedExits = true;
+      if (status.exits_fingerprint) cache.exitGen = status.exits_fingerprint;
+    }
+    const accounts = await accountsP;
     renderStat(status);
     renderFree(status);
     renderConfig(status);
@@ -225,15 +233,15 @@ async function load() {
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
       esc((status.allowed_hosts || []).join(', ') || '（仅回环监听时可为空）') + '</code> · ' +
       replicaLine(status);
-    const exitKey = JSON.stringify(exits.exits || []);
+    const exitKey = JSON.stringify(exitList || []);
     const accountKey = JSON.stringify(accounts.accounts || []);
-    const sameTables = exitKey === cache.exitKey && accountKey === cache.accountKey;
-    cache.exitKey = exitKey;
+    const exitsSame = !fetchedExits || exitKey === cache.exitKey;
+    const accountsSame = accountKey === cache.accountKey;
+    if (fetchedExits) cache.exitKey = exitKey;
     cache.accountKey = accountKey;
-    if (sameTables) {
-      refreshTicks();
-    } else {
-      renderExits(exits.exits || []);
+    if (exitsSame) refreshTicks();
+    else renderExits(exitList || []);
+    if (!accountsSame) {
       cache.accounts = accounts.accounts || [];
       renderAccounts(cache.accounts);
     }

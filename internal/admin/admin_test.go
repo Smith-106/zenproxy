@@ -213,7 +213,8 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
 		`sessionPins`, `点换出口会把这个账号的对话钉一起改到新出口`, `pins_moved`,
 		`session_pins`, `个对话钉在`, `不在可走免费的出口上`, `免费请求会改钉`,
-		`sameTables`, `refreshTicks`, `nap-tick`, `quota-tick`,
+		`exitsSame`, `refreshTicks`, `nap-tick`, `quota-tick`,
+		`exitGen`, `exits_fingerprint`, `fetchedExits`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
@@ -230,7 +231,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 	}
 
 	status := decode(t, authed(s, http.MethodGet, "/admin/api/status", ""))
-	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "replica_split", "account_replicas", "success", "free_tier", "policy", "health", "exits_retired", "exits_slow", "exits_watching", "exits_gate", "quarantine", "quota", "region", "outage_breaker", "session_pins"} {
+	for _, key := range []string{"upstreams", "listen", "allowed_hosts", "state_file", "replicas", "replica_split", "account_replicas", "success", "free_tier", "policy", "health", "exits_retired", "exits_slow", "exits_watching", "exits_gate", "exits_fingerprint", "quarantine", "quota", "region", "outage_breaker", "session_pins"} {
 		if _, ok := status[key]; !ok {
 			t.Errorf("status is missing %q", key)
 		}

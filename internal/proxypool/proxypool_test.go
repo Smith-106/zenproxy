@@ -24,6 +24,30 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestExitTableFingerprintIgnoresLastCheck(t *testing.T) {
+	p := createTestPool(t, 1, config.Health{})
+	p.members[0].mu.Lock()
+	p.members[0].boundAccounts = map[string]struct{}{"b": {}, "a": {}}
+	p.members[0].mu.Unlock()
+	before := p.ExitTableFingerprint()
+	p.members[0].mu.Lock()
+	p.members[0].lastCheck = time.Now()
+	p.members[0].mu.Unlock()
+	if got := p.ExitTableFingerprint(); got == "" || got != before {
+		t.Fatalf("last check changed the table fingerprint: %q vs %q", before, got)
+	}
+	names := p.Health()[0].BoundAccounts
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		t.Fatalf("bound account names are not sorted: %v", names)
+	}
+	p.members[0].mu.Lock()
+	p.members[0].latencyMS = 50
+	p.members[0].mu.Unlock()
+	if got := p.ExitTableFingerprint(); got == before {
+		t.Fatal("latency did not change the table fingerprint")
+	}
+}
+
 // outageStateOf packs the breaker's tri-state for compact assertions.
 type outageState struct {
 	tripped bool
