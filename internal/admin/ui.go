@@ -293,7 +293,7 @@ function renderStat(s) {
     ['请求', s.requests],
     ['成功', (s.success || 0) + ' / ' + (s.requests || 0)],
     ['尝试失败', (s.failures || 0) + ' 次', '一次请求换出口会记多次，不是失败的请求数'],
-    ['换出口', s.rotations, '每成功换一次绑定的出口记一笔。公网 IP 不一定变了'],
+    ['换出口', (s.rotations || 0) + ' 次', '失败后自动改绑定记一笔，不是按钮点出来的。公网 IP 不一定变了'],
     ['在线', uptimeWord(s.uptime_seconds)],
   ];
   document.getElementById('stat').innerHTML = cards.map(c =>
@@ -309,6 +309,9 @@ function renderStat(s) {
   }
   if ((s.failures || 0) > (s.requests || 0)) {
     shape += '尝试失败 ' + s.failures + ' 次，比请求 ' + (s.requests || 0) + ' 个多。一次请求换出口会记多次，不是失败的请求数。';
+  }
+  if ((s.rotations || 0) > (s.requests || 0)) {
+    shape += '换出口 ' + s.rotations + ' 次，比请求 ' + (s.requests || 0) + ' 个多。这是失败后自动改绑定，不是按钮点出来的，公网 IP 也不一定变了。';
   }
   document.getElementById('pool_shape').textContent = shape;
 }
