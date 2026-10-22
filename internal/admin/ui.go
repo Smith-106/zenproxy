@@ -810,6 +810,7 @@ function waitVersusProbe(a) {
   const st = a.stats || {};
   const total = st.last_duration_ms || 0;
   const probe = a.bound_latency_ms || 0;
+  if (st.last_class && st.last_class !== 'ok') return '';
   if (total < 10000 || probe < 1 || total < probe * 3) return '';
   if ((st.last_attempts || 0) > 1 && st.last_fail_before_ms >= 1000) {
     const rest = total - st.last_fail_before_ms;
@@ -858,7 +859,8 @@ function renderAccounts(list) {
           (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') +
           (st.last_attempts > 1 && st.last_fail_before_ms >= 1000 ? '，前面没走通的用了 ' + durationWord(st.last_fail_before_ms) : '') +
           (st.last_via_direct ? '，这次是直接连上的' : '') +
-          (st.last_attempts === 1 && st.last_duration_ms >= 10000 ? '，一次就通' : '') +
+          (st.last_attempts === 1 && st.last_duration_ms >= 10000 && st.last_class === 'ok' ? '，一次就通' : '') +
+          (st.last_class && st.last_class !== 'ok' && st.last_duration_ms >= 10000 ? '，这次没走通' : '') +
           (!st.last_attempts ? '，次数没记上' : '') +
           headerNote(st) +
           (st.last_duration_ms >= 10000 && st.last_attempts >= 1 && !(st.last_header_ms > 0) ? '，第一个字的时间没记上' : '') +
