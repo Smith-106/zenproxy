@@ -39,10 +39,11 @@ import (
 // harmless, because every cache hit re-checks pool health and falls through
 // to a reselect the moment the bound exit is unusable.
 type SessionExitCache struct {
-	mu      sync.Mutex
-	ttl     time.Duration
-	max     int
-	entries map[string]sessionExitEntry
+	mu       sync.Mutex
+	ttl      time.Duration
+	max      int
+	entries  map[string]sessionExitEntry
+	syncPath string
 }
 
 type sessionExitEntry struct {
@@ -113,6 +114,36 @@ func (c *SessionExitCache) PinStats() SessionPinStats {
 		}
 	}
 	return SessionPinStats{Live: live, Exits: len(exits), AccountsOnSeveralExits: split}
+}
+
+// RebindAccount moves this account's live pins onto exitID and refreshes
+// their TTL, so the next conversation cannot pull the account back to the
+// exit it just left. Other accounts are left alone. Pins already on exitID
+// are not counted. When a sync file is configured the table is written
+// immediately; a sibling with an older expiry adopts the new exit.
+func (c *SessionExitCache) RebindAccount(accountID, exitID string) int {
+	if c == nil || !c.Enabled() || strings.TrimSpace(accountID) == "" || strings.TrimSpace(exitID) == "" {
+		return 0
+	}
+	now := time.Now()
+	prefix := accountID + "::"
+	c.mu.Lock()
+	n := 0
+	for key, ent := range c.entries {
+		if now.After(ent.expiresAt) || !strings.HasPrefix(key, prefix) || ent.exit == exitID {
+			continue
+		}
+		ent.exit = exitID
+		ent.expiresAt = now.Add(c.ttl)
+		c.entries[key] = ent
+		n++
+	}
+	path := c.syncPath
+	c.mu.Unlock()
+	if n > 0 && path != "" {
+		_ = c.SyncOnce(path)
+	}
+	return n
 }
 
 func sessionExitKey(accountID, sessionID, model string) string {
@@ -417,6 +448,9 @@ func (c *SessionExitCache) StartFileSync(path string, interval time.Duration, lo
 	if c == nil || !c.Enabled() || path == "" || interval <= 0 {
 		return
 	}
+	c.mu.Lock()
+	c.syncPath = path
+	c.mu.Unlock()
 	// Warm start: adopt whatever a previous or sibling replica saved.
 	if err := c.WarmFromDisk(path); err != nil && log != nil {
 		log.Warn("session-sync: initial merge failed", "path", path, "err", err)

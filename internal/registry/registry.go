@@ -148,6 +148,16 @@ func (r *Registry) SetReplica(name string) {
 // once at startup; a nil cache disables session stickiness.
 // SessionPinStats counts live conversation pins. The panel uses it to say
 // that 换出口 only moves the account's current binding.
+// RebindSessionPins moves one account's conversation pins onto exitID.
+// Automatic rotation must not call this: it would drag every conversation
+// off the exit that was still serving it.
+func (r *Registry) RebindSessionPins(accountID, exitID string) int {
+	if r == nil || r.sessions == nil {
+		return 0
+	}
+	return r.sessions.RebindAccount(accountID, exitID)
+}
+
 func (r *Registry) SessionPinStats() SessionPinStats {
 	if r == nil || r.sessions == nil {
 		return SessionPinStats{}

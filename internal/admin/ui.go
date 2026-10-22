@@ -737,7 +737,7 @@ function renderAccounts(list) {
       '<td style="white-space:normal">' +
         '<button onclick="fillAccount(\'' + esc(a.id) + '\')">编辑</button> ' +
         '<button onclick="toggleAccount(\'' + esc(a.id) + '\')">' + (a.enabled ? '禁用' : '启用') + '</button> ' +
-        '<button onclick="rotate(\'' + esc(a.id) + '\')" title="只改这个账号当前这一条。别的对话如果还钉在旧出口上，下次说话会把它拽回去">换出口</button> ' +
+        '<button onclick="rotate(\'' + esc(a.id) + '\')" title="把这个账号上的对话钉一起改到新出口。公网 IP 不一定变了">换出口</button> ' +
         '<button onclick="toggleDetail(\'' + esc(a.id) + '\')">详情</button> ' +
         '<button class="danger" onclick="del(\'' + esc(a.id) + '\')">删</button>' +
       '</td>' +
@@ -778,7 +778,7 @@ function stickyLine(list) {
   if (pins.live > 0) {
     text += '。另有 ' + pins.live + ' 个对话钉在 ' + pins.exits + ' 个出口上';
     if (pins.accounts_on_several_exits) text += '，其中 ' + pins.accounts_on_several_exits + ' 个账号被钉在不只一个出口';
-    text += '。点换出口只改账号这一条，别的对话下次还会把它拽回去';
+    text += '。点换出口会把这个账号的对话钉一起改到新出口';
   }
   el.textContent = text;
 }
@@ -848,7 +848,8 @@ async function saveAccount(ev) {
 
 async function rotate(id) {
   try { const r = await api('/accounts/' + encodeURIComponent(id) + '/rotate', { method: 'POST' });
-        toast(id + ' 已切换到 ' + boundWord(r.account)); await load(); }
+        const moved = r.pins_moved ? '，并把 ' + r.pins_moved + ' 个对话钉改到同一出口' : '';
+        toast(id + ' 已切换到 ' + boundWord(r.account) + moved); await load(); }
   catch (e) { toast(e.message, true); }
 }
 

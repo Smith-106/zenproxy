@@ -412,9 +412,10 @@ func (s *Server) handleRotateAccount(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "no exit available to rotate to"})
 		return
 	}
-	s.log.Info("manual rotation", "account", ent.ID, "exit", px.ID)
+	moved := s.reg.RebindSessionPins(id, px.ID)
+	s.log.Info("manual rotation", "account", ent.ID, "exit", px.ID, "pins_moved", moved)
 	v, _ := s.reg.View(id)
-	writeJSON(w, http.StatusOK, map[string]any{"account": v})
+	writeJSON(w, http.StatusOK, map[string]any{"account": v, "pins_moved": moved})
 }
 
 func (s *Server) handleListProxies(w http.ResponseWriter, r *http.Request) {

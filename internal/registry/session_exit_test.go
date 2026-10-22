@@ -234,3 +234,22 @@ func TestSessionPinStatsCountsSplitAccounts(t *testing.T) {
 		t.Fatalf("stats = %+v", got)
 	}
 }
+
+func TestRebindAccountMovesOnlyThatAccount(t *testing.T) {
+	c := NewSessionExitCache(time.Hour, 64)
+	c.Set("zen-01", "s1", "m", "a")
+	c.Set("zen-01", "s2", "m", "b")
+	c.Set("zen-02", "s3", "m", "c")
+	if n := c.RebindAccount("zen-01", "b"); n != 1 {
+		t.Fatalf("moved %d, want 1", n)
+	}
+	if got, ok := c.GetAndRefresh("zen-01", "s1", "m"); !ok || got != "b" {
+		t.Fatalf("zen-01 s1 = %q ok=%v", got, ok)
+	}
+	if got, ok := c.GetAndRefresh("zen-02", "s3", "m"); !ok || got != "c" {
+		t.Fatalf("zen-02 was moved: %q ok=%v", got, ok)
+	}
+	if n := c.RebindAccount("zen-01", "b"); n != 0 {
+		t.Fatalf("second rebind moved %d", n)
+	}
+}
