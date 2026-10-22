@@ -802,8 +802,9 @@ function renderAccounts(list) {
       '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) +
-        (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间。试了多次就是第一次没走通，不是上游一直在生成">最近一次 ' + durationWord(st.last_duration_ms) +
-          (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') + '</div>' : '') +
+        (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间。试了多次就是第一次没走通，不是上游一直在生成。次数没记上是更早的记录，不是试了一次">最近一次 ' + durationWord(st.last_duration_ms) +
+          (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') +
+          (!st.last_attempts ? '，次数没记上' : '') + '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
       '<td title="左边是完成的请求，右边是请求总数。下面的尝试失败按换出口计，不能拿来当除数">' +
