@@ -175,6 +175,9 @@ type Stats struct {
 	LastClass    ErrorClass `json:"last_class,omitempty"`
 	LastUsed     *time.Time `json:"last_used,omitempty"`
 	LastSuccess  *time.Time `json:"last_success,omitempty"`
+	// LastDurationMS is how long the client waited on the last request,
+	// including any exit changes in that request. It is not a probe latency.
+	LastDurationMS int64 `json:"last_duration_ms,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 

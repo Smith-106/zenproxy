@@ -777,6 +777,11 @@ function boundWord(a) {
   if (mode === 'direct' || mode === 'none') return '直连';
   return '还没粘住';
 }
+function durationWord(ms) {
+  const s = ms / 1000;
+  if (s < 10) return s.toFixed(1) + ' 秒';
+  return Math.round(s) + ' 秒';
+}
 function renderAccounts(list) {
   const tb = document.querySelector('#accounts tbody');
   const open = openDetailIds();
@@ -796,7 +801,9 @@ function renderAccounts(list) {
       '<td><code>' + esc(boundWord(a)) + '</code> ' + boundFlags(a) + '</td>' +
       '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
-      '<td>' + classPill(st.last_class) + '</td>' +
+      '<td>' + classPill(st.last_class) +
+        (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间，含中途换出口。不是探活延迟">最近一次 ' + durationWord(st.last_duration_ms) + '</div>' : '') +
+        '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
       '<td title="左边是完成的请求，右边是请求总数。下面的尝试失败按换出口计，不能拿来当除数">' +
         (st.success || 0) + ' / ' + (st.requests || 0) +

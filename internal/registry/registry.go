@@ -843,6 +843,18 @@ func (r *Registry) Record(accountID string, class model.ErrorClass, err error) {
 	}
 }
 
+// NoteRequestDuration records how long the client waited on the last request.
+func (r *Registry) NoteRequestDuration(accountID string, ms int64) {
+	if ms < 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.accounts[accountID]; ok {
+		e.Stats.LastDurationMS = ms
+	}
+}
+
 // BeginRequest counts a request against an account before it is sent.
 func (r *Registry) BeginRequest(accountID string) {
 	r.mu.Lock()

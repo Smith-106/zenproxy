@@ -127,7 +127,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.Server.Listen,
-		Handler:           logRequests(logger, mux),
+		Handler:           logRequests(logger, reg, mux),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       cfg.Server.IdleTimeout,
 		// No write timeout: SSE responses are intentionally long-lived.
@@ -290,7 +290,7 @@ func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return h.Hijack()
 }
 
-func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
+func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Admin and health traffic is noise in the request log.
 		if strings.HasPrefix(r.URL.Path, "/admin") || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
@@ -307,11 +307,15 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 		if rec.status >= 500 {
 			level = slog.LevelWarn
 		}
+		waited := time.Since(start).Milliseconds()
+		if id, _ := splitAccount(r.URL.Path); id != "" && reg != nil {
+			reg.NoteRequestDuration(id, waited)
+		}
 		logger.Log(r.Context(), level, "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"bytes", rec.bytes,
-			"duration_ms", time.Since(start).Milliseconds())
+			"duration_ms", waited)
 	})
 }
