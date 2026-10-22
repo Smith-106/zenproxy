@@ -359,22 +359,31 @@ func (r *Registry) exitForSession(accountID, sessionID, model string, preferGate
 							// staying put only repeats the failure.
 							if altPassing || sick || blocked {
 								r.sessions.Set(accountID, sessionID, model, alt.ID)
-								r.setBinding(accountID, alt.ID)
-								r.pool.Bind(alt.ID, accountID)
+								seat := "moved"
+								if !r.seatAlreadyAdmitted(accountID, alt.ID) {
+									r.setBinding(accountID, alt.ID)
+									r.pool.Bind(alt.ID, accountID)
+								} else {
+									seat = "kept"
+								}
 								if r.log != nil {
 									r.log.Info("session-exit: rebinding to a free-tier admitted exit",
 										"account", accountID, "session", truncateSession(sessionID),
-										"from", bound, "to", alt.ID, "model", model)
+										"from", bound, "to", alt.ID, "model", model, "seat", seat)
 								}
 								return alt
 							}
 						}
 					}
 				}
-				// Keep the account binding aligned so avoidSpentExit / admin
-				// views still see the live exit.
-				r.setBinding(accountID, bound)
-				r.pool.Bind(bound, accountID)
+				// A conversation stays on its own exit. The account seat stays
+				// where it is when that seat is already a live admission:
+				// measured when one old chat dragged zen-03 off the exit
+				// it shared with the other accounts.
+				if !r.seatAlreadyAdmitted(accountID, bound) {
+					r.setBinding(accountID, bound)
+					r.pool.Bind(bound, accountID)
+				}
 				if r.log != nil {
 					r.log.Debug("session-exit: cache hit",
 						"account", accountID, "session", truncateSession(sessionID), "exit", bound, "model", model)
@@ -408,6 +417,28 @@ func (r *Registry) exitForSession(accountID, sessionID, model string, preferGate
 // cache-hit path still checks pool health on every hit, so when direct turns
 // sick (or its natural TTL lapses) the session flows back to rotation with
 // no extra machinery.
+// seatAlreadyAdmitted reports that the account is already parked on a
+// different live free-tier admission. One conversation must not drag
+// that seat along.
+func (r *Registry) seatAlreadyAdmitted(accountID, nextID string) bool {
+	if r.pool == nil {
+		return false
+	}
+	cur := r.BoundExit(accountID)
+	if cur == "" || cur == nextID {
+		return false
+	}
+	passing, _ := r.pool.GatePassing(cur)
+	if !passing {
+		return false
+	}
+	healthy, known := r.pool.Healthy(cur)
+	if !known || !healthy || r.pool.FreeTierBlocked(cur) || r.pool.RequestSick(cur) {
+		return false
+	}
+	return true
+}
+
 func (r *Registry) BindSession(accountID, sessionID, model, exitID string) bool {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || r.sessions == nil || !r.sessions.Enabled() || exitID == "" {

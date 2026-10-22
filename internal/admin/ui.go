@@ -819,8 +819,8 @@ function renderAccounts(list) {
     const rows = [];
     rows.push('<tr>' +
       '<td><code>' + esc(a.id) + '</code>' + (a.name ? ' <span class="muted">' + esc(a.name) + '</span>' : '') +
-        (a.session_pins ? '<div class="muted" title="这些对话下次说话会把账号拽回各自的出口。不在免费出口上的对话一说话，账号现在坐着的出口也会跟着换。点换出口会把它们一起改到新出口">' + a.session_pins + ' 个对话钉在 ' + a.session_exits + ' 个出口' +
-          (a.session_not_gate ? '，其中 ' + a.session_not_gate + ' 个不在可走免费的出口上，免费请求会改钉，座位也会跟着' : '') + '</div>' : '') +
+        (a.session_pins ? '<div class="muted" title="这些对话下次说话还在各自的出口上。不在免费出口上的对话会改钉到一条免费出口。账号已经坐在免费出口上时，座位不动。点换出口会把它们一起改到新出口">' + a.session_pins + ' 个对话钉在 ' + a.session_exits + ' 个出口' +
+          (a.session_not_gate ? '，其中 ' + a.session_not_gate + ' 个不在可走免费的出口上，免费请求会改钉，座位不动' : '') + '</div>' : '') +
         (a.has_key ? '' : ' <span class="pill warn" title="没有 key，这个账号发出去的请求上游会直接拒收">无 key</span>') + '</td>' +
       '<td>' + esc(a.upstream) + '</td>' +
       '<td><code>' + esc(a.key_hint || '未设置') + '</code></td>' +

@@ -92,3 +92,50 @@ func TestGatedSessionMovesOffRefusedExit(t *testing.T) {
 		t.Fatalf("refused exit kept the binding, got %v", px)
 	}
 }
+
+func TestGatedSessionRebindKeepsAccountSeat(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	pool.MarkGatePass("b")
+	pool.MarkGatePass("c")
+	if err := r.Bind("zen-01", "b"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if !r.BindSession("zen-01", "old", "muse-spark", "a") {
+		t.Fatal("BindSession failed")
+	}
+	px := r.ExitForSessionGated("zen-01", "old", "muse-spark")
+	if px == nil || px.ID == "a" {
+		t.Fatalf("session stayed off the admission set, got %v", px)
+	}
+	if got := r.BoundExit("zen-01"); got != "b" {
+		t.Fatalf("account seat moved from b to %s", got)
+	}
+}
+
+func TestGatedSessionHitDoesNotDragAccountSeat(t *testing.T) {
+	pool := poolOf(t, "a", "b", "c")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	pool.MarkGatePass("b")
+	pool.MarkGatePass("c")
+	if err := r.Bind("zen-01", "b"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if !r.BindSession("zen-01", "sess", "muse-spark", "c") {
+		t.Fatal("BindSession failed")
+	}
+	if px := r.ExitForSessionGated("zen-01", "sess", "muse-spark"); px == nil || px.ID != "c" {
+		t.Fatalf("session left its admitted exit, got %v", px)
+	}
+	if got := r.BoundExit("zen-01"); got != "b" {
+		t.Fatalf("account seat moved from b to %s", got)
+	}
+}
