@@ -692,6 +692,8 @@ function boundFlags(a) {
   const bits = [];
   if (a.bound_slow) bits.push('<span class="pill warn" title="绑定的出口延迟超过上限，挑选时靠后">偏慢</span>');
   if (a.bound_gate) bits.push('<span class="pill ok" title="绑定的出口正在被免费模型使用">可走免费</span>');
+  if (a.bound_pending) bits.push('<span class="pill warn" title="这轮探活还没走到这个出口。不是变慢了">这轮还没探到</span>');
+  if (a.bound_untimed) bits.push('<span class="pill warn" title="探过了，但没有一次成功计时。不是坏了">还没量过</span>');
   if (a.bound_prunable) bits.push('<span class="pill warn" title="下一次清理会把这个账号正在用的出口移出轮换">可清理</span>');
   if (a.bound_quarantine) bits.push('<span class="pill bad" title="绑定的出口在隔离，现在不参与轮换">隔离中</span>');
   if (a.bound_peer_retired) bits.push('<span class="pill warn" title="绑定的出口在另一副本已退役，这边排在干净出口后面">另一副本已退役</span>');

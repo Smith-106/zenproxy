@@ -85,6 +85,11 @@ type View struct {
 	// the exit table is the whole pool, and the marks were only on the exit.
 	BoundSlow        bool              `json:"bound_slow,omitempty"`
 	BoundGate        bool              `json:"bound_gate,omitempty"`
+	// BoundPending means this process has not probed the bound exit yet.
+	// BoundUntimed means the probe ran and did not get a latency. Neither is
+	// a slow exit. Both clear once a latency is recorded.
+	BoundPending bool `json:"bound_pending,omitempty"`
+	BoundUntimed bool `json:"bound_untimed,omitempty"`
 	BoundPrunable    bool              `json:"bound_prunable,omitempty"`
 	BoundQuarantine  bool              `json:"bound_quarantine,omitempty"`
 	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
@@ -441,6 +446,13 @@ func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins, byID
 		v.BoundExitIPNote = h.ExitIPNote
 		v.BoundSlow = h.Slow
 		v.BoundGate = h.GatePassUntil != nil
+		if h.Healthy && !h.Retired && h.QuarantinedTill == nil && h.LatencyMS == 0 {
+			if h.LastCheck == nil || h.LastCheck.IsZero() {
+				v.BoundPending = true
+			} else {
+				v.BoundUntimed = true
+			}
+		}
 		v.BoundPrunable = h.Prunable
 		v.BoundQuarantine = h.QuarantinedTill != nil
 		v.BoundPeerRetired = h.PeerRetired

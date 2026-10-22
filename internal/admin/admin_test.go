@@ -201,7 +201,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`renderStat(`, `renderFree(`, `renderConfig(`, `renderExits(`, `renderAccounts(`, `replicaLine(`, `accountReplicaLine(`,
 		`尝试失败`, `成功/请求`, `pool_shape`, `隔离原因`, `quarantineWord`, `raw === 'timeout'`, `exitIPWord`, `观察 · `, `e.slow`, `可走免费`, `不写健康`, `到点自己回来`, `outage_breaker`, `统一入口关着`, `限流时先换出口`, `prune_btn`, `偏慢但还在用的也算`, `两边不一致`, `另一副本多退役`, `另一副本已退役`, `另一副本还在用`, `id="peer_ids"`, `这边还健康，但排在干净出口后面`, `peer_retired_class`,
 		`这边隔离中，现在不参与轮换`, `挑选时会把它排在干净出口后面`,
-		`TLS 累计 `, `连续失败 `, `retireWord`, `还没问过出口地址`, `accountIPCell`, `bound_exit_ip_note`, `bound_slow`, `bound_gate`, `bound_prunable`, `boundFlags`,
+		`TLS 累计 `, `连续失败 `, `retireWord`, `还没问过出口地址`, `accountIPCell`, `bound_exit_ip_note`, `bound_slow`, `bound_gate`, `bound_pending`, `bound_untimed`, `bound_prunable`, `boundFlags`,
 		`setExitFilter`, `exit_filters`, `这个筛选下没有出口`, `peer_quota_here`, `另一边没冷却`,
 		`正在被免费准入的不退休`, `tls_poison_retire_after`,
 		`代理地址`, `不是流量出去时的公网 IP`, `e.quota_reason`,
