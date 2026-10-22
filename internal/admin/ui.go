@@ -302,7 +302,9 @@ function renderStat(s) {
   const bits = ['超时 ' + (q.timeout || 0), '连不上 ' + (q.unreachable || 0), 'TLS ' + (q.tls || 0)];
   if (q.other) bits.push('其他 ' + q.other);
   document.getElementById('pool_shape').textContent =
-    '隔离原因：' + bits.join(' · ') + '。可用里含观察 ' + (s.exits_watching || 0) + '、偏慢 ' + (s.exits_slow || 0) + '，这两类行上不是「健康」。';
+    '隔离原因：' + bits.join(' · ') + '。观察 ' + (s.exits_watching || 0) +
+    ' 行上写的是观察，不写健康。偏慢 ' + (s.exits_slow || 0) +
+    ' 行上仍写健康，旁边另标偏慢。';
 }
 
 function renderConfig(s) {
