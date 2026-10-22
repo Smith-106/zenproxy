@@ -517,7 +517,9 @@ function renderExits(list) {
         (extra ? ' · ' + extra : '') + '</span>';
     }
     if (e.gate_pass_until && new Date(e.gate_pass_until) > new Date()) {
-      state += ' <span class="pill ok" title="免费模型现在会挑它。别的出口看起来一样健康，但这次还没被准入">可走免费</span>';
+      state += ' <span class="pill ok" title="免费模型现在会挑它。分是挑中的机会，不是延迟。准入是这次进程里通过的次数">可走免费 · 分 ' +
+        (e.gate_score || 0) + ' · 准入 ' + (e.gate_passes || 0) +
+        (e.gate_drops ? ' · 丢流 ' + e.gate_drops : '') + '</span>';
     }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
     if (e.peer_retired) state += ' <span class="pill warn" title="' + esc(peerRetiredTitle(e)) + '">另一副本已退役</span>';
