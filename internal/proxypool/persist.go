@@ -337,7 +337,7 @@ func (p *Pool) StateSplit() ReplicaSplit {
 	if p.statePath == "" {
 		return ReplicaSplit{}
 	}
-	self, err := readExitsState(p.statePath)
+	self, err := p.readExitsCached(p.statePath)
 	if err != nil {
 		return ReplicaSplit{}
 	}
@@ -345,7 +345,7 @@ func (p *Pool) StateSplit() ReplicaSplit {
 	if peerPath == "" {
 		return ReplicaSplit{}
 	}
-	peer, err := readExitsState(peerPath)
+	peer, err := p.readExitsCached(peerPath)
 	if err != nil {
 		return ReplicaSplit{}
 	}
@@ -393,7 +393,7 @@ func (p *Pool) livePeerState() string {
 		if strings.Contains(base, ".bak-") || base == "exits-state.json" {
 			continue
 		}
-		st, err := readExitsState(path)
+		st, err := p.readExitsCached(path)
 		if err != nil || st.SavedAt.IsZero() || time.Since(st.SavedAt) > 3*time.Minute {
 			continue
 		}
@@ -419,7 +419,7 @@ func (p *Pool) peerExitRetired() (map[string]peerNote, bool) {
 	if path == "" {
 		return nil, false
 	}
-	st, err := readExitsState(path)
+	st, err := p.readExitsCached(path)
 	if err != nil {
 		return nil, false
 	}
@@ -435,6 +435,40 @@ func (p *Pool) peerExitRetired() (map[string]peerNote, bool) {
 		out[id] = note
 	}
 	return out, true
+}
+
+type cachedExitFile struct {
+	mod  time.Time
+	size int64
+	st   exitsState
+}
+
+// readExitsCached parses an exit-state file, or returns the previous parse
+// when the path's mtime and size have not changed. Callers only read the
+// result. A rewrite that keeps the same size still misses once mtime moves.
+func (p *Pool) readExitsCached(path string) (exitsState, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return exitsState{}, err
+	}
+	p.stateFileMu.Lock()
+	if c, ok := p.stateFiles[path]; ok && c.size == fi.Size() && c.mod.Equal(fi.ModTime()) {
+		st := c.st
+		p.stateFileMu.Unlock()
+		return st, nil
+	}
+	p.stateFileMu.Unlock()
+	st, err := readExitsState(path)
+	if err != nil {
+		return exitsState{}, err
+	}
+	p.stateFileMu.Lock()
+	if p.stateFiles == nil {
+		p.stateFiles = map[string]cachedExitFile{}
+	}
+	p.stateFiles[path] = cachedExitFile{mod: fi.ModTime(), size: fi.Size(), st: st}
+	p.stateFileMu.Unlock()
+	return st, nil
 }
 
 func readExitsState(path string) (exitsState, error) {
@@ -486,12 +520,8 @@ func (p *Pool) StateSnapshots() []ReplicaState {
 		if strings.Contains(base, ".bak-") {
 			continue
 		}
-		b, err := os.ReadFile(path)
-		if err != nil || len(b) > 8<<20 {
-			continue
-		}
-		var st exitsState
-		if json.Unmarshal(b, &st) != nil {
+		st, err := p.readExitsCached(path)
+		if err != nil {
 			continue
 		}
 		self := path == p.statePath

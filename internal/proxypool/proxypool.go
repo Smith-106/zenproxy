@@ -570,6 +570,11 @@ type Pool struct {
 	// (see persist.go). Empty disables persistence.
 	statePath string
 	dirty     atomic.Bool
+	// stateFiles caches a parsed exit-state file while its mtime and size
+	// stay the same. One status call otherwise parses the same files several
+	// times: the peer marks, the replica list, and the split.
+	stateFileMu sync.Mutex
+	stateFiles  map[string]cachedExitFile
 
 	rr atomic.Uint64
 

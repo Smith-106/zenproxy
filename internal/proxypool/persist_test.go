@@ -324,3 +324,32 @@ func TestPickLeavesAPeerRetiredExitBehindACleanOne(t *testing.T) {
 		t.Fatalf("with the clean exit excluded, got %v, want ex-b", got)
 	}
 }
+
+func TestExitStateCacheFollowsARewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "exits-state-a.json")
+	first := []byte(`{"version":1,"saved_at":"2026-10-22T00:00:00Z","exits":{"e":{"retired":true}}}`)
+	if err := os.WriteFile(path, first, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := &Pool{}
+	st, err := p.readExitsCached(path)
+	if err != nil || len(st.Exits) != 1 || !st.Exits["e"].Retired {
+		t.Fatalf("first read: %+v %v", st.Exits["e"], err)
+	}
+	again, err := p.readExitsCached(path)
+	if err != nil || len(again.Exits) != 1 {
+		t.Fatal(err)
+	}
+	second := []byte(`{"version":1,"saved_at":"2026-10-22T00:01:00Z","exits":{"e":{},"f":{}}}`)
+	if err := os.WriteFile(path, second, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	next, err := p.readExitsCached(path)
+	if err != nil || len(next.Exits) != 2 || next.Exits["e"].Retired {
+		t.Fatalf("rewrite was not read: exits=%d retired=%v err=%v", len(next.Exits), next.Exits["e"].Retired, err)
+	}
+}
