@@ -793,7 +793,15 @@ function cacheNote(st) {
   const total = st.last_duration_ms || 0;
   if (total < 10000) return '';
   let s = '';
-  if (st.last_completion_tokens > 0) s += '，写出了 ' + st.last_completion_tokens + ' 个 token';
+  if (st.last_completion_tokens > 0) {
+    s += '，写出了 ' + st.last_completion_tokens + ' 个 token';
+    let span = total;
+    if (st.last_fail_before_ms >= 1000 && st.last_fail_before_ms < span) span -= st.last_fail_before_ms;
+    if (span >= 10000) {
+      const per = Math.round(st.last_completion_tokens / (span / 1000));
+      s += per < 1 ? '，大约每秒不到 1 个' : '，大约每秒 ' + per + ' 个';
+    }
+  }
   if (st.last_cache_pct == null) return s;
   if (st.last_cache_pct === 0 && st.last_prompt_tokens > 0) return s + '，前文 ' + st.last_prompt_tokens + ' 个 token 都没命中';
   return s + '，缓存命中 ' + st.last_cache_pct + '%';
