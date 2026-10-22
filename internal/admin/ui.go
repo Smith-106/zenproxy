@@ -850,7 +850,14 @@ function stickyLine(list) {
     if (least && least < worst) text += '，最空的一个上面有 ' + least + ' 个';
     text += '。不会自动拆开';
   }
-  if (gateEmpty) text += '。可走免费的出口有 ' + gate + ' 个，其中 ' + gateEmpty + ' 个上面没有账号';
+  if (gateEmpty) {
+    text += '。可走免费的出口有 ' + gate + ' 个，其中 ' + gateEmpty + ' 个上面没有账号';
+    let occupiedScore = 0;
+    for (const e of gateExits) if (counts[e.id]) occupiedScore = Math.max(occupiedScore, e.gate_score || 0);
+    let emptyNotWorse = 0;
+    for (const e of gateExits) if (!counts[e.id] && (e.gate_score || 0) >= occupiedScore) emptyNotWorse++;
+    if (emptyNotWorse) text += '。空着的里面有 ' + emptyNotWorse + ' 条分数并不更低，账号是粘住的，不是因为它更差';
+  }
   else if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
   else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
   const pins = cache.sessionPins || {};
