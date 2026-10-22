@@ -801,6 +801,7 @@ function headerNote(st) {
   const head = st.last_header_ms || 0;
   if (head < 1 || total < 10000 || head > total) return '';
   if (total - head >= 5000) return '，响应头 ' + durationWord(head) + '，剩下是在往下传';
+  if (total >= 45000) return '，超过 45 秒还是结束才看到字，要的是整包';
   return '，第一个字也是这时候';
 }
 function durationWord(ms) {
@@ -906,6 +907,7 @@ function stickyLine(list) {
     for (const e of gateExits) {
       const lat = e.latency_ms || 0;
       if (counts[e.id] || lat < 1 || satLatency < 1 || lat >= satLatency) continue;
+      if (satLatency - lat < 500 && lat * 2 > satLatency) continue;
       fasterEmpty++;
       if (!fasterMs || lat < fasterMs) fasterMs = lat;
     }
