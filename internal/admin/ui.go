@@ -803,7 +803,11 @@ function waitVersusProbe(a) {
   const total = st.last_duration_ms || 0;
   const probe = a.bound_latency_ms || 0;
   if (total < 10000 || probe < 1 || total < probe * 3) return '';
-  if ((st.last_attempts || 0) > 1 && st.last_fail_before_ms >= 1000) return '，探活 ' + durationWord(probe);
+  if ((st.last_attempts || 0) > 1 && st.last_fail_before_ms >= 1000) {
+    const rest = total - st.last_fail_before_ms;
+    if (rest >= 10000 && rest >= probe * 3) return '，探活 ' + durationWord(probe) + '，剩下 ' + durationWord(rest) + ' 不是这条出口在拨号';
+    return '，探活 ' + durationWord(probe);
+  }
   if ((st.last_attempts || 0) > 1) return '，探活 ' + durationWord(probe) + '，多出来的含前面没走通的尝试';
   return '，探活 ' + durationWord(probe) + '，多出来的不是这条出口在拨号';
 }
