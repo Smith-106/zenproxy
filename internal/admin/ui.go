@@ -301,10 +301,13 @@ function renderStat(s) {
   const q = s.quarantine || {};
   const bits = ['超时 ' + (q.timeout || 0), '连不上 ' + (q.unreachable || 0), 'TLS ' + (q.tls || 0)];
   if (q.other) bits.push('其他 ' + q.other);
-  document.getElementById('pool_shape').textContent =
-    '隔离原因：' + bits.join(' · ') + '。观察 ' + (s.exits_watching || 0) +
+  let shape = '隔离原因：' + bits.join(' · ') + '。观察 ' + (s.exits_watching || 0) +
     ' 行上写的是观察，不写健康。偏慢 ' + (s.exits_slow || 0) +
     ' 行上仍写健康，旁边另标偏慢。';
+  if (s.exits_pending) {
+    shape = '这轮还没探到 ' + s.exits_pending + ' 个。探活走完之前，够快会偏小，不是这些出口变慢了。' + shape;
+  }
+  document.getElementById('pool_shape').textContent = shape;
 }
 
 function renderConfig(s) {
