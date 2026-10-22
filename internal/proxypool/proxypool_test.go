@@ -48,6 +48,20 @@ func TestExitTableFingerprintIgnoresLastCheck(t *testing.T) {
 	}
 }
 
+func TestPanelSnapshotMatchesTheSeparateCounts(t *testing.T) {
+	p := createTestPool(t, 3, config.Health{MaxLatency: time.Second})
+	_, st := p.PanelSnapshot()
+	q := p.QuarantineBreakdown()
+	if st.Healthy != p.HealthyCount() || st.Watching != p.WatchCount() || st.Retired != p.RetiredCount() || st.Slow != p.SlowCount() || st.Gate != len(p.GatePassers()) || st.Quarantine != q {
+		t.Fatalf("snapshot healthy=%d watch=%d retired=%d slow=%d gate=%d q=%+v; separate healthy=%d watch=%d retired=%d slow=%d gate=%d q=%+v",
+			st.Healthy, st.Watching, st.Retired, st.Slow, st.Gate, st.Quarantine,
+			p.HealthyCount(), p.WatchCount(), p.RetiredCount(), p.SlowCount(), len(p.GatePassers()), q)
+	}
+	if st.Fingerprint == "" || st.Fingerprint != p.ExitTableFingerprint() {
+		t.Fatal("fingerprint diverged from the exit table")
+	}
+}
+
 // outageStateOf packs the breaker's tri-state for compact assertions.
 type outageState struct {
 	tripped bool

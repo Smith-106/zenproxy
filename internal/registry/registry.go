@@ -338,12 +338,33 @@ func (r *Registry) Get(id string) (*Entry, bool) {
 
 // List snapshots every account for the admin API, sorted by id.
 func (r *Registry) List() []View {
+	return r.listFrom(r.healthByID(nil))
+}
+
+// ListFromHealth decorates accounts from an exit snapshot the caller already
+// built. The status handler walks the pool once and reuses that walk here.
+func (r *Registry) ListFromHealth(rows []model.ProxyHealth) []View {
+	return r.listFrom(r.healthByID(rows))
+}
+
+func (r *Registry) healthByID(rows []model.ProxyHealth) map[string]model.ProxyHealth {
+	if rows == nil && r.pool != nil {
+		rows = r.pool.Health()
+	}
+	byID := make(map[string]model.ProxyHealth, len(rows))
+	for _, h := range rows {
+		byID[h.ID] = h
+	}
+	return byID
+}
+
+func (r *Registry) listFrom(byID map[string]model.ProxyHealth) []View {
 	pins := r.accountPins()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]View, 0, len(r.accounts))
 	for _, e := range r.accounts {
-		out = append(out, r.viewLocked(e, pins))
+		out = append(out, r.viewLocked(e, pins, byID))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -352,13 +373,14 @@ func (r *Registry) List() []View {
 // View projects a single account without credentials.
 func (r *Registry) View(id string) (View, bool) {
 	pins := r.accountPins()
+	byID := r.healthByID(nil)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.accounts[id]
 	if !ok {
 		return View{}, false
 	}
-	return r.viewLocked(e, pins), true
+	return r.viewLocked(e, pins, byID), true
 }
 
 func (r *Registry) accountPins() map[string]SessionAccountPins {
@@ -383,7 +405,7 @@ func (r *Registry) accountPins() map[string]SessionAccountPins {
 	return out
 }
 
-func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View {
+func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins, byID map[string]model.ProxyHealth) View {
 	v := View{
 		ID:        e.ID,
 		Name:      e.Name,
@@ -414,19 +436,14 @@ func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View
 		}
 	}
 	v.Stats.LastError = model.PanelReason(v.Stats.LastError)
-	if v.BoundExit != "" && r.pool != nil {
-		for _, h := range r.pool.Health() {
-			if h.ID == v.BoundExit {
-				v.BoundExitIP = h.ExitIP
-				v.BoundExitIPNote = h.ExitIPNote
-				v.BoundSlow = h.Slow
-				v.BoundGate = h.GatePassUntil != nil
-				v.BoundPrunable = h.Prunable
-				v.BoundQuarantine = h.QuarantinedTill != nil
-				v.BoundPeerRetired = h.PeerRetired
-				break
-			}
-		}
+	if h, ok := byID[v.BoundExit]; ok && v.BoundExit != "" {
+		v.BoundExitIP = h.ExitIP
+		v.BoundExitIPNote = h.ExitIPNote
+		v.BoundSlow = h.Slow
+		v.BoundGate = h.GatePassUntil != nil
+		v.BoundPrunable = h.Prunable
+		v.BoundQuarantine = h.QuarantinedTill != nil
+		v.BoundPeerRetired = h.PeerRetired
 	}
 	return v
 }

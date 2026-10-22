@@ -1933,9 +1933,47 @@ func (p *Pool) Unbind(exitID, accountID string) {
 	m.mu.Unlock()
 }
 
+// PanelPoolStats is the summary card. It is collected in the same walk as
+// Health so the status call does not traverse the pool once per number.
+type PanelPoolStats struct {
+	Healthy     int
+	Watching    int
+	Retired     int
+	Slow        int
+	Gate        int
+	Quarantine  QuarantineBreakdown
+	Fingerprint string
+}
+
 // Health snapshots the pool for the admin API.
 func (p *Pool) Health() []model.ProxyHealth {
+	rows, _ := p.collect()
+	return rows
+}
+
+// PanelSnapshot returns the exit rows and the summary from one walk.
+func (p *Pool) PanelSnapshot() ([]model.ProxyHealth, PanelPoolStats) {
+	rows, tally := p.collect()
+	st := PanelPoolStats{
+		Healthy:    tally.healthy,
+		Watching:   tally.watching,
+		Retired:    tally.retired,
+		Slow:       tally.slow,
+		Gate:       tally.gate,
+		Quarantine: tally.q,
+	}
+	st.Fingerprint = hashHealth(rows)
+	return rows, st
+}
+
+type panelTally struct {
+	healthy, watching, retired, slow, gate int
+	q                                      QuarantineBreakdown
+}
+
+func (p *Pool) collect() ([]model.ProxyHealth, panelTally) {
 	peer, peerOK := p.peerExitRetired()
+	var tally panelTally
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	out := make([]model.ProxyHealth, 0, len(p.members))
@@ -1989,6 +2027,38 @@ func (p *Pool) Health() []model.ProxyHealth {
 			h.BoundAccounts = append(h.BoundAccounts, a)
 		}
 		sort.Strings(h.BoundAccounts)
+		now := time.Now()
+		switch {
+		case m.retired:
+			tally.retired++
+		case now.Before(m.quarantineUntil):
+			tally.q.Total++
+			class := m.quarantineClass
+			if class == "" {
+				class = classifyQuarantine(m.lastErr)
+			}
+			switch class {
+			case "timeout":
+				tally.q.Timeout++
+			case "unreachable":
+				tally.q.Unreachable++
+			case "tls":
+				tally.q.TLS++
+			default:
+				tally.q.Other++
+			}
+		case m.healthy:
+			tally.healthy++
+			if m.consecFails > 0 {
+				tally.watching++
+			}
+			if h.Slow {
+				tally.slow++
+			}
+		}
+		if h.GatePassUntil != nil {
+			tally.gate++
+		}
 		h.Retired = m.retired
 		h.RetiredReason = model.PanelRetireReason(m.retiredReason)
 		if !m.retiredAt.IsZero() {
@@ -2016,7 +2086,7 @@ func (p *Pool) Health() []model.ProxyHealth {
 		m.mu.Unlock()
 		out = append(out, h)
 	}
-	return out
+	return out, tally
 }
 
 // ExitTableFingerprint is a short hash of the exit table the panel draws.
@@ -2027,7 +2097,10 @@ func (p *Pool) ExitTableFingerprint() string {
 	if p == nil {
 		return ""
 	}
-	rows := p.Health()
+	return hashHealth(p.Health())
+}
+
+func hashHealth(rows []model.ProxyHealth) string {
 	for i := range rows {
 		rows[i].LastCheck = nil
 	}

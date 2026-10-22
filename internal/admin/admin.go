@@ -134,7 +134,8 @@ func (s *Server) Metrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
-	accounts := s.reg.List()
+	rows, panel := s.pool.PanelSnapshot()
+	accounts := s.reg.ListFromHealth(rows)
 	enabled := 0
 	var totalReq, totalOK, totalFail, totalRot int64
 	for _, a := range accounts {
@@ -168,13 +169,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"accounts":          len(accounts),
 		"accounts_enabled":  enabled,
 		"exits":             s.pool.Len(),
-		"exits_healthy":     s.pool.HealthyCount(),
-		"exits_watching":    s.pool.WatchCount(),
-		"exits_retired":     s.pool.RetiredCount(),
-		"exits_slow":        s.pool.SlowCount(),
-		"exits_gate":        len(s.pool.GatePassers()),
-		"exits_fingerprint": s.pool.ExitTableFingerprint(),
-		"quarantine":        s.pool.QuarantineBreakdown(),
+		"exits_healthy":     panel.Healthy,
+		"exits_watching":    panel.Watching,
+		"exits_retired":     panel.Retired,
+		"exits_slow":        panel.Slow,
+		"exits_gate":        panel.Gate,
+		"exits_fingerprint": panel.Fingerprint,
+		"quarantine":        panel.Quarantine,
 		"outage_breaker": map[string]any{
 			"open":                 tripped,
 			"consecutive_failures": outageFails,
