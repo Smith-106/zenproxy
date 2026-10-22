@@ -196,6 +196,10 @@ type Stats struct {
 	// LastWholeBody is true when the client asked for one JSON object, so the
 	// first byte waits for the whole answer. Nil means this process did not record it.
 	LastWholeBody *bool `json:"last_whole_body,omitempty"`
+	// LastFailBeforeMS is how long the tries before the last one had already
+	// used. Nil means this request did not retry. The last try's own wait is
+	// LastDurationMS minus this.
+	LastFailBeforeMS *int `json:"last_fail_before_ms,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 

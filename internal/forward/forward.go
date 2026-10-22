@@ -472,6 +472,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// switch accounts does not credit the one that failed.
 	counted := ""
 	tries := 0
+	begun := time.Now()
 	defer func() {
 		if counted != "" {
 			e.reg.NoteRequestAttempts(counted, tries)
@@ -479,6 +480,9 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	}()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		tries++
+		if attempt > 1 {
+			registry.RememberFailedWait(r.Context(), int(time.Since(begun).Milliseconds()))
+		}
 		ent := cur.ent
 		if counted != ent.ID {
 			e.reg.BeginRequest(ent.ID)

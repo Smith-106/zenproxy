@@ -803,6 +803,7 @@ function waitVersusProbe(a) {
   const total = st.last_duration_ms || 0;
   const probe = a.bound_latency_ms || 0;
   if (total < 10000 || probe < 1 || total < probe * 3) return '';
+  if ((st.last_attempts || 0) > 1 && st.last_fail_before_ms >= 1000) return '，探活 ' + durationWord(probe);
   if ((st.last_attempts || 0) > 1) return '，探活 ' + durationWord(probe) + '，多出来的含前面没走通的尝试';
   return '，探活 ' + durationWord(probe) + '，多出来的不是这条出口在拨号';
 }
@@ -843,6 +844,7 @@ function renderAccounts(list) {
       '<td>' + classPill(st.last_class) +
         (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间。响应头是第一个字什么时候出来。剩下是在往下传，不是又换了出口">最近一次 ' + durationWord(st.last_duration_ms) +
           (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') +
+          (st.last_attempts > 1 && st.last_fail_before_ms >= 1000 ? '，前面没走通的用了 ' + durationWord(st.last_fail_before_ms) : '') +
           (st.last_attempts === 1 && st.last_duration_ms >= 10000 ? '，一次就通' : '') +
           (!st.last_attempts ? '，次数没记上' : '') +
           headerNote(st) +
