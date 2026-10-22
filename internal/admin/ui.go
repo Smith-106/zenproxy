@@ -225,9 +225,18 @@ async function load() {
       esc((status.upstreams || []).join(', ')) + '</code> · 白名单 <code>' +
       esc((status.allowed_hosts || []).join(', ') || '（仅回环监听时可为空）') + '</code> · ' +
       replicaLine(status);
-    renderExits(exits.exits || []);
-    cache.accounts = accounts.accounts || [];
-    renderAccounts(cache.accounts);
+    const exitKey = JSON.stringify(exits.exits || []);
+    const accountKey = JSON.stringify(accounts.accounts || []);
+    const sameTables = exitKey === cache.exitKey && accountKey === cache.accountKey;
+    cache.exitKey = exitKey;
+    cache.accountKey = accountKey;
+    if (sameTables) {
+      refreshTicks();
+    } else {
+      renderExits(exits.exits || []);
+      cache.accounts = accounts.accounts || [];
+      renderAccounts(cache.accounts);
+    }
   } catch (e) { toast(e.message, true); }
 }
 
@@ -493,16 +502,30 @@ function renderExits(list) {
       '<td>' + exitIPCell(e) + '</td>' +
       '<td>' + latencyCell(e) + '</td>' +
       '<td>' + state + '</td>' +
-      '<td>' + quotaCell(e) + '</td>' +
+      '<td class="quota-tick"' + (quotaLeft(e) ? ' data-until="' + esc(e.quota_until) + '" data-reason="' + esc(e.quota_reason || '') + '"' : '') + '>' + quotaCell(e) + '</td>' +
       '<td>' + regionCell(e) + '</td>' +
       '<td>' + e.consecutive_failures + '</td>' +
       '<td class="muted" title="上游返回了响应（429/5xx）：出口本身没坏，只换了绑定">' + (e.soft_failures || 0) + '</td>' +
-      '<td class="muted">' + (e.retired ? '—' : napLeft(q)) + '</td>' +
+      '<td class="muted nap-tick"' + (q && q > new Date() ? ' data-until="' + esc(e.quarantined_until) + '"' : '') + '>' + (e.retired ? '—' : napLeft(q)) + '</td>' +
       '<td class="muted">' + esc((e.bound_accounts || []).join(', ') || '—') + '</td>' +
       '<td class="muted">' + esc(shortReason(e.last_error)) + '</td>' +
       '<td>' + act.join(' ') + '</td>' +
     '</tr>';
   }).join(''));
+}
+function refreshTicks() {
+  document.querySelectorAll('#exits td.nap-tick[data-until]').forEach(td => {
+    const html = napLeft(new Date(td.getAttribute('data-until')));
+    if (td.getAttribute('data-shown') === html) return;
+    td.innerHTML = html;
+    td.setAttribute('data-shown', html);
+  });
+  document.querySelectorAll('#exits td.quota-tick[data-until]').forEach(td => {
+    const html = quotaCell({ quota_until: td.getAttribute('data-until'), quota_reason: td.getAttribute('data-reason') || '' });
+    if (td.getAttribute('data-shown') === html) return;
+    td.innerHTML = html;
+    td.setAttribute('data-shown', html);
+  });
 }
 function paintRows(tb, html) {
   const y = window.scrollY;
