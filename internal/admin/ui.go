@@ -823,7 +823,9 @@ function renderAccounts(list) {
           (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') +
           (st.last_attempts === 1 && st.last_duration_ms >= 10000 ? '，一次就通' : '') +
           (!st.last_attempts ? '，次数没记上' : '') +
-          headerNote(st) + '</div>' : '') +
+          headerNote(st) +
+          (st.last_duration_ms >= 10000 && st.last_attempts >= 1 && !(st.last_header_ms > 0) ? '，第一个字的时间没记上' : '') +
+          '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
       '<td title="左边是完成的请求，右边是请求总数。下面的尝试失败按换出口计，不能拿来当除数">' +
