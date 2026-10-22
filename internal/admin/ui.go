@@ -828,10 +828,18 @@ function stickyLine(list) {
   if (!bound) { el.textContent = ''; return; }
   const used = Object.keys(counts).length;
   let worst = 0;
-  for (const n of Object.values(counts)) if (n > worst) worst = n;
+  let least = 0;
+  for (const n of Object.values(counts)) {
+    if (n > worst) worst = n;
+    if (!least || n < least) least = n;
+  }
   const gate = (cache.exits || []).filter(exitInGate).length;
   let text = bound + ' 个账号粘在 ' + used + ' 个出口上';
-  if (worst > 1) text += '。最挤的一个上面有 ' + worst + ' 个账号';
+  if (worst > 1) {
+    text += '。最挤的一个上面有 ' + worst + ' 个账号';
+    if (least && least < worst) text += '，最空的一个上面有 ' + least + ' 个';
+    text += '。不会自动拆开';
+  }
   if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
   else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
   const pins = cache.sessionPins || {};
