@@ -216,7 +216,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`exitsSame`, `refreshTicks`, `nap-tick`, `quota-tick`,
 		`exitGen`, `exits_fingerprint`, `fetchedExits`,
 		`bound_share`, `个账号共用`, `不会自动拆开`, `exits_clear`, `exits_unmeasured`, `够快`,
-		`exitFast`, `exitUntimed`, `exitPending`, `和上面的够快不是同一批`, `行上仍写健康`, `这轮还没探到`, `够快会偏小`, `最空的一个上面有`, `不会自动拆开`, `次，比请求`, `不是按钮点出来的`, `本副本累计请求`, `本副本累计成功`, `另一副本另有请求`, `个上面没有账号`, `分数并不更低`, `条探活更短`, `satLatency - lat < 500`, `要的是整包`, `last_cache_pct`, `缓存命中`, `可走免费 · 分`, `e.gate_score`, `e.gate_passes`, `gate-tick`, `last_duration_ms`, `最近一次`, `last_attempts`, `试了`, `次数没记上`, `一次就通`, `last_header_ms`, `响应头`, `第一个字也是这时候`, `第一个字的时间没记上`, `bound_latency_ms`, `多出来的不是这条出口在拨号`,
+		`exitFast`, `exitUntimed`, `exitPending`, `和上面的够快不是同一批`, `行上仍写健康`, `这轮还没探到`, `够快会偏小`, `最空的一个上面有`, `不会自动拆开`, `次，比请求`, `不是按钮点出来的`, `本副本累计请求`, `本副本累计成功`, `另一副本另有请求`, `个上面没有账号`, `分数并不更低`, `条探活更短`, `satLatency - lat < 500`, `要的是整包`, `last_cache_pct`, `缓存命中`, `可走免费 · 分`, `e.gate_score`, `e.gate_passes`, `gate-tick`, `last_duration_ms`, `最近一次`, `last_attempts`, `试了`, `次数没记上`, `一次就通`, `last_header_ms`, `响应头`, `第一个字也是这时候`, `第一个字的时间没记上`, `bound_latency_ms`, `多出来的不是这条出口在拨号`, `多出来的含前面没走通的尝试`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,
