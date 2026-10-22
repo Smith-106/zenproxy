@@ -285,3 +285,29 @@ func TestListCountsPinsOffTheGate(t *testing.T) {
 		t.Fatalf("pins=%d exits=%d not_gate=%d", got.SessionPins, got.SessionExits, got.SessionNotGate)
 	}
 }
+
+func TestViewCountsAccountsSharingAnExit(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	r := New("", pool, testLogger())
+	for _, id := range []string{"zen-01", "zen-02", "zen-03"} {
+		if err := r.Upsert(account(id, "k")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Bind("zen-01", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Bind("zen-02", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Bind("zen-03", "b"); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]int{}
+	for _, v := range r.List() {
+		got[v.ID] = v.BoundShare
+	}
+	if got["zen-01"] != 1 || got["zen-02"] != 1 || got["zen-03"] != 0 {
+		t.Fatalf("share = %v", got)
+	}
+}

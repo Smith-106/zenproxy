@@ -215,6 +215,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`session_pins`, `个对话钉在`, `不在可走免费的出口上`, `免费请求会改钉`,
 		`exitsSame`, `refreshTicks`, `nap-tick`, `quota-tick`,
 		`exitGen`, `exits_fingerprint`, `fetchedExits`,
+		`bound_share`, `个账号共用`, `不会自动拆开`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,

@@ -88,6 +88,7 @@ type View struct {
 	BoundPrunable    bool              `json:"bound_prunable,omitempty"`
 	BoundQuarantine  bool              `json:"bound_quarantine,omitempty"`
 	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
+	BoundShare       int               `json:"bound_share,omitempty"`
 	SessionPins      int               `json:"session_pins,omitempty"`
 	SessionExits     int               `json:"session_exits,omitempty"`
 	SessionNotGate   int               `json:"session_not_gate,omitempty"`
@@ -401,6 +402,16 @@ func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View
 		v.SessionPins = p.Pins
 		v.SessionExits = p.Exits
 		v.SessionNotGate = p.NotGate
+	}
+	if v.BoundExit != "" {
+		for id, exitID := range r.bindings {
+			if id == e.ID || exitID != v.BoundExit {
+				continue
+			}
+			if _, ok := r.accounts[id]; ok {
+				v.BoundShare++
+			}
+		}
 	}
 	v.Stats.LastError = model.PanelReason(v.Stats.LastError)
 	if v.BoundExit != "" && r.pool != nil {

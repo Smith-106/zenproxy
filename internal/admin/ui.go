@@ -650,6 +650,7 @@ function boundFlags(a) {
   if (a.bound_prunable) bits.push('<span class="pill warn" title="下一次清理会把这个账号正在用的出口移出轮换">可清理</span>');
   if (a.bound_quarantine) bits.push('<span class="pill bad" title="绑定的出口在隔离，现在不参与轮换">隔离中</span>');
   if (a.bound_peer_retired) bits.push('<span class="pill warn" title="绑定的出口在另一副本已退役，这边排在干净出口后面">另一副本已退役</span>');
+  if (a.bound_share) bits.push('<span class="pill warn" title="可走免费的出口很少，共用一个是正常的，不会自动拆开">和另外 ' + a.bound_share + ' 个账号共用</span>');
   return bits.join(' ');
 }
 function accountIPCell(a) {
