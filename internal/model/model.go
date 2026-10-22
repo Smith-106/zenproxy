@@ -200,6 +200,10 @@ type Stats struct {
 	// used. Nil means this request did not retry. The last try's own wait is
 	// LastDurationMS minus this.
 	LastFailBeforeMS *int `json:"last_fail_before_ms,omitempty"`
+	// LastViaDirect is true when the reply that finished was the direct
+	// fallback, not the proxy the account had been sitting on. Nil means this
+	// request did not take that path.
+	LastViaDirect *bool `json:"last_via_direct,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 

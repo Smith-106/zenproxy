@@ -893,6 +893,7 @@ type cacheNote struct {
 	completion *int
 	whole      *bool
 	failBefore *int
+	viaDirect  *bool
 }
 
 // WithCacheNote returns a context the forward path can fill with the
@@ -935,17 +936,25 @@ func RememberFailedWait(ctx context.Context, ms int) {
 
 // CacheNoteParts returns the usage and reply shape stored for this request.
 // A nil pointer means that part was not recorded.
-func CacheNoteParts(ctx context.Context) (pct, prompt, completion *int, whole *bool, failBefore *int) {
+func RememberViaDirect(ctx context.Context, via bool) {
 	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
 	if note == nil {
-		return nil, nil, nil, nil, nil
+		return
 	}
-	return note.pct, note.prompt, note.completion, note.whole, note.failBefore
+	note.viaDirect = &via
+}
+
+func CacheNoteParts(ctx context.Context) (pct, prompt, completion *int, whole *bool, failBefore *int, viaDirect *bool) {
+	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
+	if note == nil {
+		return nil, nil, nil, nil, nil, nil
+	}
+	return note.pct, note.prompt, note.completion, note.whole, note.failBefore, note.viaDirect
 }
 
 // NoteRequestCache records the last reply's cache hit and token counts, or
 // clears them when this request did not report usage.
-func (r *Registry) NoteRequestCache(accountID string, pct, prompt, completion *int, whole *bool, failBefore *int) {
+func (r *Registry) NoteRequestCache(accountID string, pct, prompt, completion *int, whole *bool, failBefore *int, viaDirect *bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e, ok := r.accounts[accountID]; ok {
@@ -954,6 +963,7 @@ func (r *Registry) NoteRequestCache(accountID string, pct, prompt, completion *i
 		e.Stats.LastCompletionTokens = completion
 		e.Stats.LastWholeBody = whole
 		e.Stats.LastFailBeforeMS = failBefore
+		e.Stats.LastViaDirect = viaDirect
 	}
 }
 

@@ -612,6 +612,8 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			// cache-hit path re-checks pool health on every hit.
 			if (stormFallbackLogged || quotaFallbackLogged) && exitID == "direct" {
 				e.reg.BindSession(ent.ID, sessionID, askedModel, exitID)
+				e.reg.SeatFollowsFallback(ent.ID, exitID)
+				registry.RememberViaDirect(r.Context(), true)
 			}
 			if plan != nil && plan.ReplyAsChat && plan.Stream {
 				registry.RememberWholeBody(r.Context(), false)

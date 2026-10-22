@@ -326,8 +326,8 @@ func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler)
 		if id, _ := splitAccount(r.URL.Path); id != "" && reg != nil {
 			reg.NoteRequestDuration(id, waited)
 			reg.NoteRequestHeader(id, rec.first)
-			pct, prompt, completion, whole, failBefore := registry.CacheNoteParts(r.Context())
-			reg.NoteRequestCache(id, pct, prompt, completion, whole, failBefore)
+			pct, prompt, completion, whole, failBefore, viaDirect := registry.CacheNoteParts(r.Context())
+			reg.NoteRequestCache(id, pct, prompt, completion, whole, failBefore, viaDirect)
 		}
 		logger.Log(r.Context(), level, "request",
 			"method", r.Method,

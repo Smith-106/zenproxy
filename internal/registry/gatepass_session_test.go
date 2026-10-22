@@ -13,6 +13,31 @@ import (
 // therefore break a binding that is no longer admitted, while plain traffic
 // keeps the stickiness it has always had.
 
+func TestSeatFollowsFallbackLeavesAdmittedSeat(t *testing.T) {
+	pool := poolOf(t, "a", "direct")
+	r := New("", pool, testLogger())
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	r.setBinding("zen-01", "a")
+	pool.MarkGatePass("a")
+	r.SeatFollowsFallback("zen-01", "direct")
+	if got := r.BoundExit("zen-01"); got != "a" {
+		t.Fatalf("admitted seat moved to %s", got)
+	}
+
+	spent := poolOf(t, "spent", "direct")
+	r2 := New("", spent, testLogger())
+	if err := r2.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+	r2.setBinding("zen-01", "spent")
+	r2.SeatFollowsFallback("zen-01", "direct")
+	if got := r2.BoundExit("zen-01"); got != "direct" {
+		t.Fatalf("unadmitted seat stayed on %s", got)
+	}
+}
+
 func TestGatedSessionRebindsOffUnadmittedExit(t *testing.T) {
 	pool := poolOf(t, "a", "b", "c")
 	r := New("", pool, testLogger())

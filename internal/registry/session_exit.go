@@ -439,6 +439,18 @@ func (r *Registry) seatAlreadyAdmitted(accountID, nextID string) bool {
 	return true
 }
 
+// SeatFollowsFallback moves the account onto the exit that just answered,
+// unless it is already sitting on a different live admission. A quota or
+// transport fallback answers through direct and only pins the session, so
+// the seat stays on the exit that was just abandoned. The next conversation
+// then starts there and burns another round of refusals.
+func (r *Registry) SeatFollowsFallback(accountID, exitID string) {
+	if exitID == "" || r.seatAlreadyAdmitted(accountID, exitID) {
+		return
+	}
+	r.setBinding(accountID, exitID)
+}
+
 func (r *Registry) BindSession(accountID, sessionID, model, exitID string) bool {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" || r.sessions == nil || !r.sessions.Enabled() || exitID == "" {
