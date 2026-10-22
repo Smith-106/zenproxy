@@ -8,6 +8,7 @@
 package registry
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -881,6 +882,47 @@ func (r *Registry) NoteRequestHeader(accountID string, ms int64) {
 	defer r.mu.Unlock()
 	if e, ok := r.accounts[accountID]; ok {
 		e.Stats.LastHeaderMS = ms
+	}
+}
+
+type cacheNoteKey struct{}
+
+type cacheNote struct {
+	pct *int
+}
+
+// WithCacheNote returns a context the forward path can fill with the
+// cached-prefix share of the reply it is about to finish.
+func WithCacheNote(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cacheNoteKey{}, &cacheNote{})
+}
+
+// RememberCachePct stores a hit percentage for the middleware to copy
+// onto the account after the handler returns.
+func RememberCachePct(ctx context.Context, pct int) {
+	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
+	if note == nil {
+		return
+	}
+	note.pct = &pct
+}
+
+// CachePctFrom returns the hit percentage stored for this request, or nil.
+func CachePctFrom(ctx context.Context) *int {
+	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
+	if note == nil {
+		return nil
+	}
+	return note.pct
+}
+
+// NoteRequestCache records the last reply's cache hit, or clears it when
+// this request did not report usage.
+func (r *Registry) NoteRequestCache(accountID string, pct *int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.accounts[accountID]; ok {
+		e.Stats.LastCachePct = pct
 	}
 }
 

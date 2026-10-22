@@ -313,6 +313,7 @@ func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler)
 		}
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, start: start}
+		r = r.WithContext(registry.WithCacheNote(r.Context()))
 		next.ServeHTTP(rec, r)
 		if rec.status == 0 {
 			rec.status = http.StatusOK
@@ -325,6 +326,7 @@ func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler)
 		if id, _ := splitAccount(r.URL.Path); id != "" && reg != nil {
 			reg.NoteRequestDuration(id, waited)
 			reg.NoteRequestHeader(id, rec.first)
+			reg.NoteRequestCache(id, registry.CachePctFrom(r.Context()))
 		}
 		logger.Log(r.Context(), level, "request",
 			"method", r.Method,

@@ -657,7 +657,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 					cancel()
 					return
 				}
-				e.logCacheUsage(chatJSON, ent.ID, exitID, sessionID)
+				e.logCacheUsage(r.Context(), chatJSON, ent.ID, exitID, sessionID)
 				cancel()
 				return
 			}
@@ -692,7 +692,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				}
 				// One cache-accounting line per completion, logged where the
 				// usage object is in hand (same shape as writeFolded's).
-				e.logCacheUsage(out, ent.ID, exitID, sessionID)
+				e.logCacheUsage(r.Context(), out, ent.ID, exitID, sessionID)
 				writeCompleted(w, out)
 				cancel()
 				return
@@ -1205,7 +1205,7 @@ func (e *Engine) writeFolded(w http.ResponseWriter, resp *http.Response, plan *G
 	// One cache-accounting line per completion: the folded/converted body
 	// always carries the usage object, so the cached-prefix share is logged
 	// where it is measured — per account, per exit, per conversation.
-	e.logCacheUsage(out, accountID, exitID, sessionID)
+	e.logCacheUsage(context.Background(), out, accountID, exitID, sessionID)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Del("Content-Length")
 	w.Header().Del("Transfer-Encoding")
@@ -2154,7 +2154,7 @@ func usageCacheTokens(raw json.RawMessage) (cached, total int64) {
 // logCacheUsage emits the per-completion cache accounting line the cache-hit
 // work is measured against: one line per folded or converted completion, with
 // the conversation identity when one is known.
-func (e *Engine) logCacheUsage(out []byte, accountID, exitID, sessionID string) {
+func (e *Engine) logCacheUsage(ctx context.Context, out []byte, accountID, exitID, sessionID string) {
 	if e.log == nil {
 		return
 	}
@@ -2173,6 +2173,7 @@ func (e *Engine) logCacheUsage(out []byte, accountID, exitID, sessionID string) 
 	if total > 0 {
 		pct = cached * 100 / total
 	}
+	registry.RememberCachePct(ctx, int(pct))
 	if sessionID == "" {
 		sessionID = "-"
 	}

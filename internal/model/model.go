@@ -186,6 +186,9 @@ type Stats struct {
 	// One means the first exit answered. More means the client waited
 	// through a failure before the status it finally saw.
 	LastAttempts int `json:"last_attempts,omitempty"`
+	// LastCachePct is the cached-prefix share of the last folded reply.
+	// Nil means that request did not report usage. Zero means nothing was cached.
+	LastCachePct *int `json:"last_cache_pct,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 

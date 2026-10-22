@@ -789,6 +789,11 @@ function boundWord(a) {
   if (mode === 'direct' || mode === 'none') return '直连';
   return '还没粘住';
 }
+function cacheNote(st) {
+  const total = st.last_duration_ms || 0;
+  if (total < 10000 || st.last_cache_pct == null) return '';
+  return '，缓存命中 ' + st.last_cache_pct + '%';
+}
 function waitVersusProbe(a) {
   const st = a.stats || {};
   const total = st.last_duration_ms || 0;
@@ -836,6 +841,7 @@ function renderAccounts(list) {
           headerNote(st) +
           (st.last_duration_ms >= 10000 && st.last_attempts >= 1 && !(st.last_header_ms > 0) ? '，第一个字的时间没记上' : '') +
           waitVersusProbe(a) +
+          cacheNote(st) +
           '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
