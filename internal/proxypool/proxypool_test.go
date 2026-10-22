@@ -60,8 +60,8 @@ func TestPanelSnapshotMatchesTheSeparateCounts(t *testing.T) {
 	if st.Fingerprint == "" || st.Fingerprint != p.ExitTableFingerprint() {
 		t.Fatal("fingerprint diverged from the exit table")
 	}
-	if st.Clear != 0 || st.Unmeasured != st.Healthy {
-		t.Fatalf("clear=%d unmeasured=%d healthy=%d", st.Clear, st.Unmeasured, st.Healthy)
+	if st.Clear != 0 || st.Unmeasured != 0 || st.Pending != st.Healthy {
+		t.Fatalf("clear=%d unmeasured=%d pending=%d healthy=%d", st.Clear, st.Unmeasured, st.Pending, st.Healthy)
 	}
 }
 
@@ -78,22 +78,25 @@ func TestClearCountSkipsWatchingAndSlow(t *testing.T) {
 	p.members[2].latencyMS = 4000
 	p.members[2].mu.Unlock()
 	_, st := p.PanelSnapshot()
-	if st.Healthy != 3 || st.Watching != 2 || st.Slow != 2 || st.Clear != 0 || st.Unmeasured != 0 {
-		t.Fatalf("healthy=%d watch=%d slow=%d clear=%d unmeasured=%d", st.Healthy, st.Watching, st.Slow, st.Clear, st.Unmeasured)
+	if st.Healthy != 3 || st.Watching != 2 || st.Slow != 2 || st.Clear != 0 || st.Unmeasured != 0 || st.Pending != 0 {
+		t.Fatalf("healthy=%d watch=%d slow=%d clear=%d unmeasured=%d pending=%d", st.Healthy, st.Watching, st.Slow, st.Clear, st.Unmeasured, st.Pending)
 	}
 }
 
 func TestClearCountNeedsAMeasurement(t *testing.T) {
-	p := createTestPool(t, 3, config.Health{MaxLatency: time.Second})
+	p := createTestPool(t, 4, config.Health{MaxLatency: time.Second})
 	p.members[0].mu.Lock()
 	p.members[0].latencyMS = 200
 	p.members[0].mu.Unlock()
 	p.members[1].mu.Lock()
 	p.members[1].latencyMS = 1500
 	p.members[1].mu.Unlock()
+	p.members[2].mu.Lock()
+	p.members[2].lastCheck = time.Now()
+	p.members[2].mu.Unlock()
 	_, st := p.PanelSnapshot()
-	if st.Clear != 1 || st.Unmeasured != 1 || st.Slow != 1 {
-		t.Fatalf("clear=%d unmeasured=%d slow=%d", st.Clear, st.Unmeasured, st.Slow)
+	if st.Clear != 1 || st.Unmeasured != 1 || st.Slow != 1 || st.Pending != 1 {
+		t.Fatalf("clear=%d unmeasured=%d slow=%d pending=%d", st.Clear, st.Unmeasured, st.Slow, st.Pending)
 	}
 }
 

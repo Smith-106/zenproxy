@@ -282,7 +282,7 @@ function accountReplicaLine(s) {
 function renderStat(s) {
   const cards = [
     ['账号', s.accounts + ' / 启用 ' + s.accounts_enabled],
-    ['够快', (s.exits_clear || 0) + ' / 可用 ' + s.exits_healthy, '还没量过 ' + (s.exits_unmeasured || 0) + '。观察 ' + (s.exits_watching || 0) + ' 已经在失败，偏慢 ' + (s.exits_slow || 0) + ' 超过延迟上限。这三类都不算够快'],
+    ['够快', (s.exits_clear || 0) + ' / 可用 ' + s.exits_healthy, '这轮还没探到 ' + (s.exits_pending || 0) + '。探过但没有延迟 ' + (s.exits_unmeasured || 0) + '。观察 ' + (s.exits_watching || 0) + ' 已经在失败，偏慢 ' + (s.exits_slow || 0) + ' 超过延迟上限'],
     ['隔离中', (s.quarantine && s.quarantine.total) || 0],
     ['偏慢', s.exits_slow || 0, '延迟超过上限，挑选时靠后，没有退休'],
     ['可走免费', s.exits_gate || 0, '免费模型现在会挑这些出口，过一会儿这次准入就失效'],
@@ -402,11 +402,18 @@ function exitInGate(e) {
 function exitFast(e) {
   return !e.retired && e.healthy && !exitInNap(e) && !e.consecutive_failures && !e.slow && !!e.latency_ms;
 }
-function exitUntimed(e) {
+function exitNoLatency(e) {
   return !e.retired && e.healthy && !exitInNap(e) && !e.consecutive_failures && !e.slow && !e.latency_ms;
+}
+function exitPending(e) {
+  return exitNoLatency(e) && !e.last_check;
+}
+function exitUntimed(e) {
+  return exitNoLatency(e) && !!e.last_check;
 }
 function exitMatches(e, f) {
   if (f === 'fast') return exitFast(e);
+  if (f === 'pending') return exitPending(e);
   if (f === 'untimed') return exitUntimed(e);
   if (f === 'slow') return !!e.slow;
   if (f === 'watch') return exitInWatch(e);
@@ -422,6 +429,7 @@ function exitFilterButtons(list) {
   const n = {
     all: list.length,
     fast: list.filter(exitFast).length,
+    pending: list.filter(exitPending).length,
     untimed: list.filter(exitUntimed).length,
     slow: list.filter(e => e.slow).length,
     watch: list.filter(exitInWatch).length,
@@ -433,7 +441,7 @@ function exitFilterButtons(list) {
   const cur = cache.exitFilter || 'all';
   const btn = (id, label) => '<button type="button" onclick="setExitFilter(\'' + id + '\')"' +
     (cur === id ? ' style="font-weight:bold"' : '') + '>' + label + ' ' + n[id] + '</button>';
-  el.innerHTML = [btn('all', '全部'), btn('fast', '够快'), btn('untimed', '还没量过'), btn('slow', '偏慢'), btn('watch', '观察'), btn('nap', '隔离'),
+  el.innerHTML = [btn('all', '全部'), btn('fast', '够快'), btn('pending', '还没探到'), btn('untimed', '还没量过'), btn('slow', '偏慢'), btn('watch', '观察'), btn('nap', '隔离'),
     btn('prune', '可清理'), btn('split', '两边不一致'), btn('gate', '可走免费')].join(' ');
 }
 function setExitFilter(id) {
@@ -444,8 +452,11 @@ function renderExits(list) {
   cache.exits = list;
   const note = document.getElementById('untimed_note');
   if (note) {
+    const pending = list.filter(exitPending).length;
     const untimed = list.filter(exitUntimed).length;
-    note.textContent = untimed ? ('有 ' + untimed + ' 个还没量过延迟，和上面的够快不是同一批。格子里写着「还没量过」，不是坏了。') : '';
+    note.textContent = pending
+      ? ('这轮还没探到 ' + pending + ' 个。探活走完之前，不够快不是因为它们慢。')
+      : (untimed ? ('有 ' + untimed + ' 个还没量过延迟，和上面的够快不是同一批。格子里写着「还没量过」，不是坏了。') : '');
   }
   exitFilterButtons(list);
   const peer = document.getElementById('peer_ids');
