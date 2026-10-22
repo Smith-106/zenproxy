@@ -521,7 +521,8 @@ function renderExits(list) {
     if (e.gate_pass_until && new Date(e.gate_pass_until) > new Date()) {
       state += ' <span class="pill ok" title="免费模型现在会挑它。分是挑中的机会，不是延迟。准入是这次进程里通过的次数">可走免费 · 分 ' +
         (e.gate_score || 0) + ' · 准入 ' + (e.gate_passes || 0) +
-        (e.gate_drops ? ' · 丢流 ' + e.gate_drops : '') + '</span>';
+        (e.gate_drops ? ' · 丢流 ' + e.gate_drops : '') +
+        ' · <span class="gate-tick" data-until="' + esc(e.gate_pass_until) + '">还剩 ' + timeLeft(new Date(e.gate_pass_until)) + '</span></span>';
     }
     if (!e.retired && e.prunable) state += ' <span class="pill warn" title="下一次清理会把它移出轮换">可清理</span>';
     if (e.peer_retired) state += ' <span class="pill warn" title="' + esc(peerRetiredTitle(e)) + '">另一副本已退役</span>';
@@ -564,6 +565,13 @@ function refreshTicks() {
     if (td.getAttribute('data-shown') === html) return;
     td.innerHTML = html;
     td.setAttribute('data-shown', html);
+  });
+  document.querySelectorAll('#exits .gate-tick[data-until]').forEach(el => {
+    const until = new Date(el.getAttribute('data-until'));
+    const html = until > new Date() ? ('还剩 ' + timeLeft(until)) : '这次准入已过';
+    if (el.getAttribute('data-shown') === html) return;
+    el.textContent = html;
+    el.setAttribute('data-shown', html);
   });
   document.querySelectorAll('#exits td.quota-tick[data-until]').forEach(td => {
     const html = quotaCell({ quota_until: td.getAttribute('data-until'), quota_reason: td.getAttribute('data-reason') || '' });
