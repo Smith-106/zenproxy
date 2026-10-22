@@ -459,6 +459,7 @@ function setExitFilter(id) {
 }
 function renderExits(list) {
   cache.exits = list;
+  if (cache.accounts) stickyLine(cache.accounts);
   const note = document.getElementById('untimed_note');
   if (note) {
     const pending = list.filter(exitPending).length;
@@ -839,14 +840,18 @@ function stickyLine(list) {
     if (n > worst) worst = n;
     if (!least || n < least) least = n;
   }
-  const gate = (cache.exits || []).filter(exitInGate).length;
+  const gateExits = (cache.exits || []).filter(exitInGate);
+  const gate = gateExits.length;
+  let gateEmpty = 0;
+  for (const e of gateExits) if (!counts[e.id]) gateEmpty++;
   let text = bound + ' 个账号粘在 ' + used + ' 个出口上';
   if (worst > 1) {
     text += '。最挤的一个上面有 ' + worst + ' 个账号';
     if (least && least < worst) text += '，最空的一个上面有 ' + least + ' 个';
     text += '。不会自动拆开';
   }
-  if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
+  if (gateEmpty) text += '。可走免费的出口有 ' + gate + ' 个，其中 ' + gateEmpty + ' 个上面没有账号';
+  else if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
   else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
   const pins = cache.sessionPins || {};
   if (pins.live > 0) {
