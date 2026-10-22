@@ -397,7 +397,15 @@ function exitInNap(e) {
 function exitInGate(e) {
   return e.gate_pass_until && new Date(e.gate_pass_until) > new Date();
 }
+function exitFast(e) {
+  return !e.retired && e.healthy && !exitInNap(e) && !e.consecutive_failures && !e.slow && !!e.latency_ms;
+}
+function exitUntimed(e) {
+  return !e.retired && e.healthy && !exitInNap(e) && !e.consecutive_failures && !e.slow && !e.latency_ms;
+}
 function exitMatches(e, f) {
+  if (f === 'fast') return exitFast(e);
+  if (f === 'untimed') return exitUntimed(e);
   if (f === 'slow') return !!e.slow;
   if (f === 'watch') return exitInWatch(e);
   if (f === 'nap') return exitInNap(e);
@@ -411,6 +419,8 @@ function exitFilterButtons(list) {
   if (!el) return;
   const n = {
     all: list.length,
+    fast: list.filter(exitFast).length,
+    untimed: list.filter(exitUntimed).length,
     slow: list.filter(e => e.slow).length,
     watch: list.filter(exitInWatch).length,
     nap: list.filter(exitInNap).length,
@@ -421,7 +431,7 @@ function exitFilterButtons(list) {
   const cur = cache.exitFilter || 'all';
   const btn = (id, label) => '<button type="button" onclick="setExitFilter(\'' + id + '\')"' +
     (cur === id ? ' style="font-weight:bold"' : '') + '>' + label + ' ' + n[id] + '</button>';
-  el.innerHTML = [btn('all', '全部'), btn('slow', '偏慢'), btn('watch', '观察'), btn('nap', '隔离'),
+  el.innerHTML = [btn('all', '全部'), btn('fast', '够快'), btn('untimed', '还没量过'), btn('slow', '偏慢'), btn('watch', '观察'), btn('nap', '隔离'),
     btn('prune', '可清理'), btn('split', '两边不一致'), btn('gate', '可走免费')].join(' ');
 }
 function setExitFilter(id) {
@@ -432,8 +442,8 @@ function renderExits(list) {
   cache.exits = list;
   const note = document.getElementById('untimed_note');
   if (note) {
-    const untimed = list.filter(e => !e.retired && e.healthy && !e.latency_ms).length;
-    note.textContent = untimed ? ('健康出口里有 ' + untimed + ' 个这次还没量过延迟。格子里写着「还没量过」，不是坏了。') : '';
+    const untimed = list.filter(exitUntimed).length;
+    note.textContent = untimed ? ('有 ' + untimed + ' 个还没量过延迟，和上面的够快不是同一批。格子里写着「还没量过」，不是坏了。') : '';
   }
   exitFilterButtons(list);
   const peer = document.getElementById('peer_ids');
