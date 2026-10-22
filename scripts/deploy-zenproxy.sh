@@ -7,7 +7,9 @@
 # not have either.
 #
 # The swap is done with a rename rather than an in-place extract so a failed
-# build still leaves the previous tree usable for a rollback.
+# build still leaves the previous tree usable for a rollback. A successful
+# build then recreates one replica at a time. Building the image alone leaves
+# the running containers on the previous image.
 #
 # Usage: sudo ./deploy-zenproxy.sh /tmp/zenproxy-<sha>.tar.gz
 set -euo pipefail
@@ -44,3 +46,25 @@ mv "$SRC" "$PREV" 2>/dev/null || true
 mv "$STAGE" "$SRC"
 echo "  当前: $SRC"
 echo "  上一份: $PREV"
+
+echo
+echo "=== 5. 一次换一个副本，等它健康再换下一个 ==="
+cd /opt/zenproxy
+wait_healthy() {
+  local name="$1" i s
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
+    s=$(docker inspect -f '{{.State.Health.Status}}' "$name")
+    if [ "$s" = healthy ]; then
+      echo "  $name healthy $i"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "  $name stuck $s" >&2
+  return 1
+}
+docker compose up -d --no-deps --force-recreate zenproxy-a
+wait_healthy zenproxy-zenproxy-a-1
+docker compose up -d --no-deps --force-recreate zenproxy-b
+wait_healthy zenproxy-zenproxy-b-1
+docker inspect -f '{{.Name}} {{.Image}}' zenproxy-zenproxy-a-1 zenproxy-zenproxy-b-1
