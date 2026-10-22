@@ -787,6 +787,13 @@ function boundWord(a) {
   if (mode === 'direct' || mode === 'none') return '直连';
   return '还没粘住';
 }
+function headerNote(st) {
+  const total = st.last_duration_ms || 0;
+  const head = st.last_header_ms || 0;
+  if (head < 1 || total < 10000 || head > total) return '';
+  if (total - head >= 5000) return '，响应头 ' + durationWord(head) + '，剩下是在往下传';
+  return '，第一个字也是这时候';
+}
 function durationWord(ms) {
   const s = ms / 1000;
   if (s < 10) return s.toFixed(1) + ' 秒';
@@ -812,10 +819,11 @@ function renderAccounts(list) {
       '<td>' + accountIPCell(a) + '</td>' +
       '<td>' + (a.enabled ? '<span class="pill ok">启用</span>' : '<span class="pill bad">禁用</span>') + '</td>' +
       '<td>' + classPill(st.last_class) +
-        (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间。一次就通是出口没换过，秒数是上游自己用掉的。试了多次才是第一次没走通">最近一次 ' + durationWord(st.last_duration_ms) +
+        (st.last_duration_ms ? '<div class="muted" title="客户端等完这一次的时间。响应头是第一个字什么时候出来。剩下是在往下传，不是又换了出口">最近一次 ' + durationWord(st.last_duration_ms) +
           (st.last_attempts > 1 ? '，试了 ' + st.last_attempts + ' 次' : '') +
           (st.last_attempts === 1 && st.last_duration_ms >= 10000 ? '，一次就通' : '') +
-          (!st.last_attempts ? '，次数没记上' : '') + '</div>' : '') +
+          (!st.last_attempts ? '，次数没记上' : '') +
+          headerNote(st) + '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
       '<td title="左边是完成的请求，右边是请求总数。下面的尝试失败按换出口计，不能拿来当除数">' +

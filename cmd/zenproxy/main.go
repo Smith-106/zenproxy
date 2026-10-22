@@ -259,14 +259,28 @@ type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int
+	start  time.Time
+	first  int64
+}
+
+func (r *statusRecorder) mark() {
+	if r.first != 0 || r.start.IsZero() {
+		return
+	}
+	r.first = time.Since(r.start).Milliseconds()
+	if r.first < 1 {
+		r.first = 1
+	}
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
+	r.mark()
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.mark()
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
@@ -297,8 +311,8 @@ func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler)
 			next.ServeHTTP(w, r)
 			return
 		}
-		rec := &statusRecorder{ResponseWriter: w}
 		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, start: start}
 		next.ServeHTTP(rec, r)
 		if rec.status == 0 {
 			rec.status = http.StatusOK
@@ -310,12 +324,14 @@ func logRequests(logger *slog.Logger, reg *registry.Registry, next http.Handler)
 		waited := time.Since(start).Milliseconds()
 		if id, _ := splitAccount(r.URL.Path); id != "" && reg != nil {
 			reg.NoteRequestDuration(id, waited)
+			reg.NoteRequestHeader(id, rec.first)
 		}
 		logger.Log(r.Context(), level, "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rec.status,
 			"bytes", rec.bytes,
-			"duration_ms", waited)
+			"duration_ms", waited,
+			"header_ms", rec.first)
 	})
 }

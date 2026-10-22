@@ -178,6 +178,10 @@ type Stats struct {
 	// LastDurationMS is how long the client waited on the last request,
 	// including any exit changes in that request. It is not a probe latency.
 	LastDurationMS int64 `json:"last_duration_ms,omitempty"`
+	// LastHeaderMS is when the client could first see a byte of that same
+	// request. The rest of LastDurationMS is the body still coming. Zero
+	// means this process did not record it.
+	LastHeaderMS int64 `json:"last_header_ms,omitempty"`
 	// LastAttempts is how many upstream tries that same request used.
 	// One means the first exit answered. More means the client waited
 	// through a failure before the status it finally saw.
