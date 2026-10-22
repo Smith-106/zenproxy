@@ -204,6 +204,11 @@ type Stats struct {
 	// fallback, not the proxy the account had been sitting on. Nil means this
 	// request did not take that path.
 	LastViaDirect *bool `json:"last_via_direct,omitempty"`
+	// LastFailureMS is how long the last request that did not succeed made the
+	// client wait. A later success does not clear it: that success is a
+	// different request, and hiding the failed wait is how a 233s user wait
+	// showed up here as 146s.
+	LastFailureMS *int `json:"last_failure_ms,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 

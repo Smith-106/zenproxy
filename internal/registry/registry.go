@@ -967,6 +967,20 @@ func (r *Registry) NoteRequestCache(accountID string, pct, prompt, completion *i
 	}
 }
 
+// NoteRequestFailure records a request that did not succeed. A later success
+// does not clear it.
+func (r *Registry) NoteRequestFailure(accountID string, ms int64) {
+	if ms < 1 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.accounts[accountID]; ok {
+		n := int(ms)
+		e.Stats.LastFailureMS = &n
+	}
+}
+
 // NoteRequestDuration records how long the client waited on the last request.
 func (r *Registry) NoteRequestDuration(accountID string, ms int64) {
 	if ms < 0 {

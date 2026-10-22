@@ -864,6 +864,7 @@ function renderAccounts(list) {
           (st.last_duration_ms >= 10000 && st.last_attempts >= 1 && !(st.last_header_ms > 0) ? '，第一个字的时间没记上' : '') +
           waitVersusProbe(a) +
           cacheNote(st) +
+          (st.last_failure_ms >= 1000 && st.last_failure_ms !== st.last_duration_ms ? '。上一回没走通，用了 ' + durationWord(st.last_failure_ms) : '') +
           '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
