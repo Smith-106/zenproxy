@@ -1943,6 +1943,7 @@ func (p *Pool) Unbind(exitID, accountID string) {
 type PanelPoolStats struct {
 	Healthy     int
 	Watching    int
+	Clear       int
 	Retired     int
 	Slow        int
 	Gate        int
@@ -1962,6 +1963,7 @@ func (p *Pool) PanelSnapshot() ([]model.ProxyHealth, PanelPoolStats) {
 	st := PanelPoolStats{
 		Healthy:    tally.healthy,
 		Watching:   tally.watching,
+		Clear:      tally.clear,
 		Retired:    tally.retired,
 		Slow:       tally.slow,
 		Gate:       tally.gate,
@@ -1972,8 +1974,8 @@ func (p *Pool) PanelSnapshot() ([]model.ProxyHealth, PanelPoolStats) {
 }
 
 type panelTally struct {
-	healthy, watching, retired, slow, gate int
-	q                                      QuarantineBreakdown
+	healthy, watching, clear, retired, slow, gate int
+	q                                             QuarantineBreakdown
 }
 
 func (p *Pool) collect() ([]model.ProxyHealth, panelTally) {
@@ -2054,11 +2056,15 @@ func (p *Pool) collect() ([]model.ProxyHealth, panelTally) {
 			}
 		case m.healthy:
 			tally.healthy++
-			if m.consecFails > 0 {
+			watch := m.consecFails > 0
+			if watch {
 				tally.watching++
 			}
 			if h.Slow {
 				tally.slow++
+			}
+			if !watch && !h.Slow {
+				tally.clear++
 			}
 		}
 		if h.GatePassUntil != nil {

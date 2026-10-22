@@ -60,6 +60,27 @@ func TestPanelSnapshotMatchesTheSeparateCounts(t *testing.T) {
 	if st.Fingerprint == "" || st.Fingerprint != p.ExitTableFingerprint() {
 		t.Fatal("fingerprint diverged from the exit table")
 	}
+	if st.Clear != st.Healthy-st.Watching-st.Slow {
+		t.Fatalf("clear=%d healthy=%d watch=%d slow=%d", st.Clear, st.Healthy, st.Watching, st.Slow)
+	}
+}
+
+func TestClearCountSkipsWatchingAndSlow(t *testing.T) {
+	p := createTestPool(t, 3, config.Health{MaxLatency: time.Second})
+	p.members[0].mu.Lock()
+	p.members[0].consecFails = 1
+	p.members[0].mu.Unlock()
+	p.members[1].mu.Lock()
+	p.members[1].latencyMS = 1500
+	p.members[1].mu.Unlock()
+	p.members[2].mu.Lock()
+	p.members[2].consecFails = 2
+	p.members[2].latencyMS = 4000
+	p.members[2].mu.Unlock()
+	_, st := p.PanelSnapshot()
+	if st.Healthy != 3 || st.Watching != 2 || st.Slow != 2 || st.Clear != 0 {
+		t.Fatalf("healthy=%d watch=%d slow=%d clear=%d", st.Healthy, st.Watching, st.Slow, st.Clear)
+	}
 }
 
 // outageStateOf packs the breaker's tri-state for compact assertions.

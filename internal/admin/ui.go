@@ -282,7 +282,7 @@ function accountReplicaLine(s) {
 function renderStat(s) {
   const cards = [
     ['账号', s.accounts + ' / 启用 ' + s.accounts_enabled],
-    ['可用', s.exits_healthy + ' / ' + s.exits, '还在轮换里，含观察 ' + (s.exits_watching || 0) + '、偏慢 ' + (s.exits_slow || 0) + '。这两类行上另有标记，隔离和退休不算'],
+    ['够快', (s.exits_clear || 0) + ' / 可用 ' + s.exits_healthy, '观察 ' + (s.exits_watching || 0) + ' 和偏慢 ' + (s.exits_slow || 0) + ' 还在轮换里，但已经在失败，或延迟超过上限。隔离和退休不算'],
     ['隔离中', (s.quarantine && s.quarantine.total) || 0],
     ['偏慢', s.exits_slow || 0, '延迟超过上限，挑选时靠后，没有退休'],
     ['可走免费', s.exits_gate || 0, '免费模型现在会挑这些出口，过一会儿这次准入就失效'],
