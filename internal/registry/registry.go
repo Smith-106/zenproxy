@@ -90,6 +90,8 @@ type View struct {
 	// a slow exit. Both clear once a latency is recorded.
 	BoundPending bool `json:"bound_pending,omitempty"`
 	BoundUntimed bool `json:"bound_untimed,omitempty"`
+	// BoundLatencyMS is the bound exit's last probe, not the client's wait.
+	BoundLatencyMS int64 `json:"bound_latency_ms,omitempty"`
 	BoundPrunable    bool              `json:"bound_prunable,omitempty"`
 	BoundQuarantine  bool              `json:"bound_quarantine,omitempty"`
 	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
@@ -446,6 +448,9 @@ func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins, byID
 		v.BoundExitIPNote = h.ExitIPNote
 		v.BoundSlow = h.Slow
 		v.BoundGate = h.GatePassUntil != nil
+		if h.LatencyMS > 0 {
+			v.BoundLatencyMS = h.LatencyMS
+		}
 		if h.Healthy && !h.Retired && h.QuarantinedTill == nil && h.LatencyMS == 0 {
 			if h.LastCheck == nil || h.LastCheck.IsZero() {
 				v.BoundPending = true

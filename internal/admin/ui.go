@@ -789,6 +789,13 @@ function boundWord(a) {
   if (mode === 'direct' || mode === 'none') return '直连';
   return '还没粘住';
 }
+function waitVersusProbe(a) {
+  const st = a.stats || {};
+  const total = st.last_duration_ms || 0;
+  const probe = a.bound_latency_ms || 0;
+  if (total < 10000 || probe < 1 || total < probe * 3) return '';
+  return '，探活 ' + durationWord(probe) + '，多出来的不是这条出口在拨号';
+}
 function headerNote(st) {
   const total = st.last_duration_ms || 0;
   const head = st.last_header_ms || 0;
@@ -827,6 +834,7 @@ function renderAccounts(list) {
           (!st.last_attempts ? '，次数没记上' : '') +
           headerNote(st) +
           (st.last_duration_ms >= 10000 && st.last_attempts >= 1 && !(st.last_header_ms > 0) ? '，第一个字的时间没记上' : '') +
+          waitVersusProbe(a) +
           '</div>' : '') +
         '</td>' +
       '<td>' + (st.requests || 0) + '</td>' +
