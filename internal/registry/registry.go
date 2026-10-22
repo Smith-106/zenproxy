@@ -90,6 +90,7 @@ type View struct {
 	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
 	SessionPins      int               `json:"session_pins,omitempty"`
 	SessionExits     int               `json:"session_exits,omitempty"`
+	SessionNotGate   int               `json:"session_not_gate,omitempty"`
 	Headers          map[string]string `json:"headers,omitempty"`
 	Stats            model.Stats       `json:"stats"`
 }
@@ -363,7 +364,22 @@ func (r *Registry) accountPins() map[string]SessionAccountPins {
 	if r.sessions == nil {
 		return nil
 	}
-	return r.sessions.AccountPins()
+	raw := r.sessions.accountPinExits()
+	out := make(map[string]SessionAccountPins, len(raw))
+	for account, exits := range raw {
+		p := SessionAccountPins{Exits: len(exits)}
+		for exitID, n := range exits {
+			p.Pins += n
+			if r.pool == nil {
+				continue
+			}
+			if passing, _ := r.pool.GatePassing(exitID); !passing {
+				p.NotGate += n
+			}
+		}
+		out[account] = p
+	}
+	return out
 }
 
 func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View {
@@ -384,6 +400,7 @@ func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View
 	if p, ok := pins[e.ID]; ok {
 		v.SessionPins = p.Pins
 		v.SessionExits = p.Exits
+		v.SessionNotGate = p.NotGate
 	}
 	v.Stats.LastError = model.PanelReason(v.Stats.LastError)
 	if v.BoundExit != "" && r.pool != nil {

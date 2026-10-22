@@ -264,3 +264,24 @@ func TestAccountPinsCountsEachAccount(t *testing.T) {
 		t.Fatalf("pins = %+v", got)
 	}
 }
+
+func TestListCountsPinsOffTheGate(t *testing.T) {
+	pool := poolOf(t, "a", "b")
+	pool.MarkGatePass("a")
+	r := New("", pool, testLogger())
+	r.SetSessionExitCache(NewSessionExitCache(time.Hour, 64))
+	if err := r.Upsert(account("zen-01", "k")); err != nil {
+		t.Fatal(err)
+	}
+	r.sessions.Set("zen-01", "s1", "m", "a")
+	r.sessions.Set("zen-01", "s2", "m", "b")
+	var got View
+	for _, v := range r.List() {
+		if v.ID == "zen-01" {
+			got = v
+		}
+	}
+	if got.SessionPins != 2 || got.SessionExits != 2 || got.SessionNotGate != 1 {
+		t.Fatalf("pins=%d exits=%d not_gate=%d", got.SessionPins, got.SessionExits, got.SessionNotGate)
+	}
+}

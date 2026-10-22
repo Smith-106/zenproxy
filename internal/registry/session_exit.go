@@ -118,43 +118,53 @@ func (c *SessionExitCache) PinStats() SessionPinStats {
 
 // SessionAccountPins is one account's pin count. Exit ids stay out of it.
 type SessionAccountPins struct {
-	Pins  int
-	Exits int
+	Pins    int
+	Exits   int
+	NotGate int
 }
 
 // AccountPins counts live pins per account. The panel uses it so the operator
 // can see which 换出口 button moves a pile, not just the pool-wide total.
 func (c *SessionExitCache) AccountPins() map[string]SessionAccountPins {
+	raw := c.accountPinExits()
+	if raw == nil {
+		return nil
+	}
+	out := make(map[string]SessionAccountPins, len(raw))
+	for id, exits := range raw {
+		p := SessionAccountPins{Exits: len(exits)}
+		for _, n := range exits {
+			p.Pins += n
+		}
+		out[id] = p
+	}
+	return out
+}
+
+// accountPinExits counts live pins per account and exit. The registry joins
+// this with gate admission and must not put the exit ids on the API.
+func (c *SessionExitCache) accountPinExits() map[string]map[string]int {
 	if c == nil || !c.Enabled() {
 		return nil
 	}
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	type acc struct {
-		pins  int
-		exits map[string]struct{}
-	}
-	raw := map[string]*acc{}
+	out := map[string]map[string]int{}
 	for key, ent := range c.entries {
-		if now.After(ent.expiresAt) {
+		if now.After(ent.expiresAt) || ent.exit == "" {
 			continue
 		}
 		account := key
 		if i := strings.Index(key, "::"); i >= 0 {
 			account = key[:i]
 		}
-		slot := raw[account]
+		slot := out[account]
 		if slot == nil {
-			slot = &acc{exits: map[string]struct{}{}}
-			raw[account] = slot
+			slot = map[string]int{}
+			out[account] = slot
 		}
-		slot.pins++
-		slot.exits[ent.exit] = struct{}{}
-	}
-	out := make(map[string]SessionAccountPins, len(raw))
-	for id, slot := range raw {
-		out[id] = SessionAccountPins{Pins: slot.pins, Exits: len(slot.exits)}
+		slot[ent.exit]++
 	}
 	return out
 }
