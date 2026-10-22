@@ -24,6 +24,19 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestProbeOrderPrefersGateThenBound(t *testing.T) {
+	p := createTestPool(t, 4, config.Health{})
+	p.members[3].mu.Lock()
+	p.members[3].gatePassUntil = time.Now().Add(time.Minute)
+	p.members[3].mu.Unlock()
+	p.Bind(p.members[1].ID, "zen-02")
+	order := p.probeOrder()
+	if len(order) != 4 || order[0].ID != p.members[3].ID || order[1].ID != p.members[1].ID {
+		got := []string{order[0].ID, order[1].ID, order[2].ID, order[3].ID}
+		t.Fatalf("probe order = %v, want gate then bound first", got)
+	}
+}
+
 func TestExitTableFingerprintIgnoresLastCheck(t *testing.T) {
 	p := createTestPool(t, 1, config.Health{})
 	p.members[0].mu.Lock()

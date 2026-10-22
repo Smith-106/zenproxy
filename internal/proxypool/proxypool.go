@@ -2452,7 +2452,11 @@ func (p *Pool) ProbeAll(ctx context.Context) {
 		cap = 64
 	}
 	sem := make(chan struct{}, cap)
-	for _, m := range p.members {
+	// Gate exits and exits an account is sitting on go first. A full round
+	// takes about a minute, and until an exit is probed its latency stays 0.
+	// Measured at 65s into a round: 998 exits already had a latency, while the
+	// exit holding three accounts was still untouched.
+	for _, m := range p.probeOrder() {
 		m.mu.Lock()
 		ret := m.retired
 		m.mu.Unlock()
@@ -2472,6 +2476,32 @@ func (p *Pool) ProbeAll(ctx context.Context) {
 		}(m)
 	}
 	wg.Wait()
+}
+
+// probeOrder returns members with free-tier admissions first, then exits an
+// account is currently bound to, then everyone else. Order inside a group
+// stays the pool's existing order.
+func (p *Pool) probeOrder() []*member {
+	p.mu.RLock()
+	members := append([]*member(nil), p.members...)
+	p.mu.RUnlock()
+	now := time.Now()
+	sort.SliceStable(members, func(i, j int) bool {
+		return probeRank(members[i], now) < probeRank(members[j], now)
+	})
+	return members
+}
+
+func probeRank(m *member, now time.Time) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.gatePassUntil.IsZero() && now.Before(m.gatePassUntil) {
+		return 0
+	}
+	if len(m.boundAccounts) > 0 {
+		return 1
+	}
+	return 2
 }
 
 // ProbeOne probes a single exit by id.
