@@ -843,6 +843,18 @@ func (r *Registry) Record(accountID string, class model.ErrorClass, err error) {
 	}
 }
 
+// NoteRequestAttempts records how many upstream tries the last request used.
+func (r *Registry) NoteRequestAttempts(accountID string, tries int) {
+	if tries < 1 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e, ok := r.accounts[accountID]; ok {
+		e.Stats.LastAttempts = tries
+	}
+}
+
 // NoteRequestDuration records how long the client waited on the last request.
 func (r *Registry) NoteRequestDuration(accountID string, ms int64) {
 	if ms < 0 {

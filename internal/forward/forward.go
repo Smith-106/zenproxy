@@ -471,7 +471,14 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 	// Requests are counted per account actually used, so a pool that had to
 	// switch accounts does not credit the one that failed.
 	counted := ""
+	tries := 0
+	defer func() {
+		if counted != "" {
+			e.reg.NoteRequestAttempts(counted, tries)
+		}
+	}()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		tries++
 		ent := cur.ent
 		if counted != ent.ID {
 			e.reg.BeginRequest(ent.ID)
