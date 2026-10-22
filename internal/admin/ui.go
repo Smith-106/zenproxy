@@ -899,6 +899,17 @@ function stickyLine(list) {
     let emptyNotWorse = 0;
     for (const e of gateExits) if (!counts[e.id] && (e.gate_score || 0) >= occupiedScore) emptyNotWorse++;
     if (emptyNotWorse) text += '。空着的里面有 ' + emptyNotWorse + ' 条分数并不更低，账号是粘住的，不是因为它更差';
+    let satLatency = 0;
+    for (const e of gateExits) if (counts[e.id] && (e.latency_ms || 0) > satLatency) satLatency = e.latency_ms;
+    let fasterEmpty = 0;
+    let fasterMs = 0;
+    for (const e of gateExits) {
+      const lat = e.latency_ms || 0;
+      if (counts[e.id] || lat < 1 || satLatency < 1 || lat >= satLatency) continue;
+      fasterEmpty++;
+      if (!fasterMs || lat < fasterMs) fasterMs = lat;
+    }
+    if (fasterEmpty) text += '。空着的里面有 ' + fasterEmpty + ' 条探活更短，最短 ' + durationWord(fasterMs) + '，坐着的是 ' + durationWord(satLatency);
   }
   else if (gate > used) text += '。可走免费的出口有 ' + gate + ' 个，比粘住的多';
   else if (gate) text += '。可走免费的出口有 ' + gate + ' 个';
