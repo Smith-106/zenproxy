@@ -171,6 +171,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"exits":             s.pool.Len(),
 		"exits_healthy":     panel.Healthy,
 		"exits_clear":       panel.Clear,
+		"exits_unmeasured":  panel.Unmeasured,
 		"exits_watching":    panel.Watching,
 		"exits_retired":     panel.Retired,
 		"exits_slow":        panel.Slow,

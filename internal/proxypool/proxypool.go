@@ -1944,6 +1944,7 @@ type PanelPoolStats struct {
 	Healthy     int
 	Watching    int
 	Clear       int
+	Unmeasured  int
 	Retired     int
 	Slow        int
 	Gate        int
@@ -1964,6 +1965,7 @@ func (p *Pool) PanelSnapshot() ([]model.ProxyHealth, PanelPoolStats) {
 		Healthy:    tally.healthy,
 		Watching:   tally.watching,
 		Clear:      tally.clear,
+		Unmeasured: tally.unmeasured,
 		Retired:    tally.retired,
 		Slow:       tally.slow,
 		Gate:       tally.gate,
@@ -1974,8 +1976,8 @@ func (p *Pool) PanelSnapshot() ([]model.ProxyHealth, PanelPoolStats) {
 }
 
 type panelTally struct {
-	healthy, watching, clear, retired, slow, gate int
-	q                                             QuarantineBreakdown
+	healthy, watching, clear, unmeasured, retired, slow, gate int
+	q                                                         QuarantineBreakdown
 }
 
 func (p *Pool) collect() ([]model.ProxyHealth, panelTally) {
@@ -2064,7 +2066,11 @@ func (p *Pool) collect() ([]model.ProxyHealth, panelTally) {
 				tally.slow++
 			}
 			if !watch && !h.Slow {
-				tally.clear++
+				if m.latencyMS > 0 {
+					tally.clear++
+				} else {
+					tally.unmeasured++
+				}
 			}
 		}
 		if h.GatePassUntil != nil {
