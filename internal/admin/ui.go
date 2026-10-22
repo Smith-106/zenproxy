@@ -148,7 +148,7 @@ const dashboardHTML = `<!doctype html>
     </form>
     <table id="accounts"><thead><tr>
       <th>账号</th><th>上游</th><th>Key</th><th>策略</th><th>出口</th><th>出口 IP</th><th>状态</th>
-      <th>最近分类</th><th>累计请求</th><th>累计成功/请求</th><th title="每成功换一次绑定的出口记一笔。公网 IP 不一定变了">换出口</th><th>最近错误</th><th>操作</th>
+      <th>最近分类</th><th>本副本累计请求</th><th>本副本累计成功/请求</th><th title="每成功换一次绑定的出口记一笔。公网 IP 不一定变了">换出口</th><th>最近错误</th><th>操作</th>
     </tr></thead><tbody></tbody></table>
     <p class="muted" id="sticky_line" style="margin-top:8px"></p>
     <p class="muted">
@@ -156,7 +156,7 @@ const dashboardHTML = `<!doctype html>
       「策略」是账号的出口选择（Cred）：<code>auto</code> 从池子里挑并保持亲和，
       <code>direct</code> 直连，写出口 ID 则优先落到它。
       备注和自定义头空着保存都会清空。钥匙留空才是不改。
-      「累计成功/请求」的右边是开服至今的请求数，不是这一分钟。尝试失败按每一次上游调用计，写在同一格下面：
+      「本副本累计成功/请求」的右边是这个副本开服至今的请求数，不是这一分钟，也不含另一个副本。尝试失败按每一次上游调用计，写在同一格下面：
       一次请求换几个出口就会记几笔，不能拿来当除数。
     </p>
   </section>
@@ -290,8 +290,8 @@ function renderStat(s) {
     ['地区限制', (s.region && s.region.count) || 0, '一个出口加一个模型被地区拒绝。这个出口还能服务别的模型'],
     ['熔断', (s.outage_breaker && s.outage_breaker.open) ? ('开 · ' + (s.outage_breaker.consecutive_failures || 0) + '/' + (s.outage_breaker.threshold || 0)) : '关', '连续失败到阈值就打开，打开后不再因为大面积拨号失败而退休出口'],
     ['退休出口', s.exits_retired],
-    ['累计请求', s.requests || 0, '从这些账号记数开始算，不是这一分钟'],
-    ['累计成功', (s.success || 0) + ' / ' + (s.requests || 0), '跟累计请求同一段。这一分钟成不成功，看账号行的最近分类'],
+    ['本副本累计请求', s.requests || 0, '只算这个副本，从这些账号记数开始算，不是这一分钟'],
+    ['本副本累计成功', (s.success || 0) + ' / ' + (s.requests || 0), '跟上面同一段，不含另一个副本。这一分钟成不成功，看账号行的最近分类'],
     ['尝试失败', (s.failures || 0) + ' 次', '一次请求换出口会记多次，不是失败的请求数'],
     ['换出口', (s.rotations || 0) + ' 次', '失败后自动改绑定记一笔，不是按钮点出来的。公网 IP 不一定变了'],
     ['在线', uptimeWord(s.uptime_seconds)],
@@ -313,6 +313,8 @@ function renderStat(s) {
   if ((s.rotations || 0) > (s.requests || 0)) {
     shape += '换出口 ' + s.rotations + ' 次，比请求 ' + (s.requests || 0) + ' 个多。这是失败后自动改绑定，不是按钮点出来的，公网 IP 也不一定变了。';
   }
+  const peerReq = (s.account_replicas || []).reduce((n, r) => n + (r.self ? 0 : (r.requests || 0)), 0);
+  if (peerReq) shape += '另一副本另有请求 ' + peerReq + ' 个。上面的累计只算本副本。';
   document.getElementById('pool_shape').textContent = shape;
 }
 
