@@ -212,6 +212,7 @@ func TestDashboardServesAndReadsItsOwnAPI(t *testing.T) {
 		`sticky_line`, `个账号粘在`, `最挤的一个上面有`,
 		`换出口`, `公网 IP 不一定变了`, `uptimeWord`,
 		`sessionPins`, `点换出口会把这个账号的对话钉一起改到新出口`, `pins_moved`,
+		`session_pins`, `个对话钉在`,
 		`weight_hint`, `poolUsesWeight`, `不看权重`, `权重不参与挑选`,
 		`不再把出口 ID 铺开`, `另一边记下的是`, `这边在冷却、另一边没有`,
 		`latencyCell`, `还没量过`, `这次进程还没有一次成功计时`,

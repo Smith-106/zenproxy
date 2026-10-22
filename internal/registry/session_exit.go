@@ -116,6 +116,49 @@ func (c *SessionExitCache) PinStats() SessionPinStats {
 	return SessionPinStats{Live: live, Exits: len(exits), AccountsOnSeveralExits: split}
 }
 
+// SessionAccountPins is one account's pin count. Exit ids stay out of it.
+type SessionAccountPins struct {
+	Pins  int
+	Exits int
+}
+
+// AccountPins counts live pins per account. The panel uses it so the operator
+// can see which 换出口 button moves a pile, not just the pool-wide total.
+func (c *SessionExitCache) AccountPins() map[string]SessionAccountPins {
+	if c == nil || !c.Enabled() {
+		return nil
+	}
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	type acc struct {
+		pins  int
+		exits map[string]struct{}
+	}
+	raw := map[string]*acc{}
+	for key, ent := range c.entries {
+		if now.After(ent.expiresAt) {
+			continue
+		}
+		account := key
+		if i := strings.Index(key, "::"); i >= 0 {
+			account = key[:i]
+		}
+		slot := raw[account]
+		if slot == nil {
+			slot = &acc{exits: map[string]struct{}{}}
+			raw[account] = slot
+		}
+		slot.pins++
+		slot.exits[ent.exit] = struct{}{}
+	}
+	out := make(map[string]SessionAccountPins, len(raw))
+	for id, slot := range raw {
+		out[id] = SessionAccountPins{Pins: slot.pins, Exits: len(slot.exits)}
+	}
+	return out
+}
+
 // RebindAccount moves this account's live pins onto exitID and refreshes
 // their TTL, so the next conversation cannot pull the account back to the
 // exit it just left. Other accounts are left alone. Pins already on exitID

@@ -88,6 +88,8 @@ type View struct {
 	BoundPrunable    bool              `json:"bound_prunable,omitempty"`
 	BoundQuarantine  bool              `json:"bound_quarantine,omitempty"`
 	BoundPeerRetired bool              `json:"bound_peer_retired,omitempty"`
+	SessionPins      int               `json:"session_pins,omitempty"`
+	SessionExits     int               `json:"session_exits,omitempty"`
 	Headers          map[string]string `json:"headers,omitempty"`
 	Stats            model.Stats       `json:"stats"`
 }
@@ -334,11 +336,12 @@ func (r *Registry) Get(id string) (*Entry, bool) {
 
 // List snapshots every account for the admin API, sorted by id.
 func (r *Registry) List() []View {
+	pins := r.accountPins()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make([]View, 0, len(r.accounts))
 	for _, e := range r.accounts {
-		out = append(out, r.viewLocked(e))
+		out = append(out, r.viewLocked(e, pins))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -346,16 +349,24 @@ func (r *Registry) List() []View {
 
 // View projects a single account without credentials.
 func (r *Registry) View(id string) (View, bool) {
+	pins := r.accountPins()
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.accounts[id]
 	if !ok {
 		return View{}, false
 	}
-	return r.viewLocked(e), true
+	return r.viewLocked(e, pins), true
 }
 
-func (r *Registry) viewLocked(e *Entry) View {
+func (r *Registry) accountPins() map[string]SessionAccountPins {
+	if r.sessions == nil {
+		return nil
+	}
+	return r.sessions.AccountPins()
+}
+
+func (r *Registry) viewLocked(e *Entry, pins map[string]SessionAccountPins) View {
 	v := View{
 		ID:        e.ID,
 		Name:      e.Name,
@@ -369,6 +380,10 @@ func (r *Registry) viewLocked(e *Entry) View {
 		BoundExit: r.bindings[e.ID],
 		Headers:   e.Headers,
 		Stats:     e.Stats,
+	}
+	if p, ok := pins[e.ID]; ok {
+		v.SessionPins = p.Pins
+		v.SessionExits = p.Exits
 	}
 	v.Stats.LastError = model.PanelReason(v.Stats.LastError)
 	if v.BoundExit != "" && r.pool != nil {

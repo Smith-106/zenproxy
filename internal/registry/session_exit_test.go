@@ -253,3 +253,14 @@ func TestRebindAccountMovesOnlyThatAccount(t *testing.T) {
 		t.Fatalf("second rebind moved %d", n)
 	}
 }
+
+func TestAccountPinsCountsEachAccount(t *testing.T) {
+	c := NewSessionExitCache(time.Hour, 64)
+	c.Set("zen-01", "s1", "m", "a")
+	c.Set("zen-01", "s2", "m", "b")
+	c.Set("zen-02", "s3", "m", "a")
+	got := c.AccountPins()
+	if got["zen-01"].Pins != 2 || got["zen-01"].Exits != 2 || got["zen-02"].Pins != 1 || got["zen-02"].Exits != 1 {
+		t.Fatalf("pins = %+v", got)
+	}
+}
