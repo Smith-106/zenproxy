@@ -536,6 +536,17 @@ func TestMarkFailureQuarantinesAfterThreshold(t *testing.T) {
 	}
 }
 
+func TestMarkSuccessZeroKeepsProbeLatency(t *testing.T) {
+	pool, _ := healthyPool(t, 1)
+	pool.MarkSuccess("a", 592*time.Millisecond)
+	pool.MarkSuccess("a", 0)
+	for _, e := range pool.Health() {
+		if e.ID == "a" && e.LatencyMS != 592 {
+			t.Fatalf("latency = %d, want the probe's 592", e.LatencyMS)
+		}
+	}
+}
+
 func TestMarkSuccessClearsQuarantine(t *testing.T) {
 	pool, _ := healthyPool(t, 2)
 	pool.MarkFailure("a", "x")

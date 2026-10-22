@@ -543,7 +543,6 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			writeClientError(w, http.StatusInternalServerError, "bad_request", "could not build the upstream request")
 			return
 		}
-		start := time.Now()
 		resp, err := e.clientFor(proxy, plan != nil).Do(req)
 		if err != nil {
 			cancel()
@@ -581,13 +580,16 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			break
 		}
 		if exitID != "" {
-			e.pool.MarkSuccess(exitID, time.Since(start))
+			// A client wait is not a probe. Passing the header time here
+			// replaced a 592ms probe with 3623ms and pushed the exit over the
+			// slow line. The probe is the only writer of latency.
+			e.pool.MarkSuccess(exitID, 0)
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			e.reg.Record(ent.ID, model.ClassOK, nil)
 			if exitID != "" {
-				e.pool.MarkSuccess(exitID, time.Since(start))
+				e.pool.MarkSuccess(exitID, 0)
 				e.pool.ClearFreeTier(exitID)
 				if plan != nil {
 					// The only positive free-tier signal in the system: this
