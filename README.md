@@ -143,6 +143,8 @@ curl -s -H 'X-Admin-Token: dev-token' localhost:9000/admin/api/status
 | GET | `/healthz` | 存活探测，免鉴权 |
 | GET | `/metrics` | Prometheus 文本格式 |
 | GET | `/admin/` | 控制台（令牌可走 `?token=`）：总览卡、免费额度区、运行配置（只读）、出口表、账号表；账号支持编辑回填、启用/禁用、换出口、删；出口支持退休/恢复 |
+
+账号行上的「最近一次」按这次请求本身来说，不把客户端多等的时间算进来：试了几次、前面没走通用了多久、剩下多少秒不是这条出口在拨号、写出了多少 token、大约每秒多少个、缓存命中多少、要的是整包、这次是直接连上的。失败且等了至少 10 秒写「这次没走通」。成功之后仍留着「上一回没走通用了多久」。逐条记录在 [`CHANGELOG.md`](CHANGELOG.md) 的 v0.3.0。这个仓库没有单独的文档站，接入说明在 [`docs/`](docs/)。
 | GET | `/admin/api/status` | 概览（含 `free_tier`、`policy`、`health` 只读块与 `exits_retired`） |
 | GET/POST | `/admin/api/accounts` | 列出 / 新增或修改账号 |
 | DELETE | `/admin/api/accounts/{id}` | 删除账号 |

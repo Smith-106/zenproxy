@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [v0.3.0] — 2026-10-22
+
+自 v0.2.4 之后，控制台把一次等待说完整：试了几次、前面没走通用了多久、剩下的时间、写出多少 token、大约每秒多少个、缓存命中、整包、直接连上，以及上一回失败用了多久。失败且等了至少 10 秒时写「这次没走通」，不再写成「一次就通」。
+
+v0.2.0 和 v0.2.4 当时打了标签，没有写入本文件。下面也保留了更早仍标成未发布的记录。
+
 ### 修复（2026-10-22：没走通就别写一次就通）
 
 - 同一次用户请求里，有一个账号大约 70 秒返回了失败。这种一次就结束的失败，行上会写成「一次就通」，还会说多出来的时间不是在拨号。
@@ -1379,7 +1385,10 @@
 - `docs/RESIN.md`：Resin 出口池的用法。
 - `deploy/README.md`：部署路线、拓扑与远端安全查看控制台的方式。
 
-[Unreleased]: https://github.com/Smith-106/zenproxy/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Smith-106/zenproxy/compare/v0.3.0...HEAD
+[v0.3.0]: https://github.com/Smith-106/zenproxy/compare/v0.2.4...v0.3.0
+[v0.2.4]: https://github.com/Smith-106/zenproxy/releases/tag/v0.2.4
+[v0.2.0]: https://github.com/Smith-106/zenproxy/releases/tag/v0.2.0
 [v0.1.0]: https://github.com/Smith-106/zenproxy/releases/tag/v0.1.0
 
 ### 修复
