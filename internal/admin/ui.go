@@ -791,8 +791,12 @@ function boundWord(a) {
 }
 function cacheNote(st) {
   const total = st.last_duration_ms || 0;
-  if (total < 10000 || st.last_cache_pct == null) return '';
-  return '，缓存命中 ' + st.last_cache_pct + '%';
+  if (total < 10000) return '';
+  let s = '';
+  if (st.last_completion_tokens > 0) s += '，写出了 ' + st.last_completion_tokens + ' 个 token';
+  if (st.last_cache_pct == null) return s;
+  if (st.last_cache_pct === 0 && st.last_prompt_tokens > 0) return s + '，前文 ' + st.last_prompt_tokens + ' 个 token 都没命中';
+  return s + '，缓存命中 ' + st.last_cache_pct + '%';
 }
 function waitVersusProbe(a) {
   const st = a.stats || {};
@@ -805,7 +809,9 @@ function waitVersusProbe(a) {
 function headerNote(st) {
   const total = st.last_duration_ms || 0;
   const head = st.last_header_ms || 0;
-  if (head < 1 || total < 10000 || head > total) return '';
+  if (total < 10000) return '';
+  if (st.last_whole_body === true && (head < 1 || (head <= total && total - head < 5000))) return '，要的是整包';
+  if (head < 1 || head > total) return '';
   if (total - head >= 5000) return '，响应头 ' + durationWord(head) + '，剩下是在往下传';
   if (total >= 45000) return '，超过 45 秒还是结束才看到字，要的是整包';
   return '，第一个字也是这时候';

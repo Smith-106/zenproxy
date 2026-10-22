@@ -610,6 +610,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				e.reg.BindSession(ent.ID, sessionID, askedModel, exitID)
 			}
 			if plan != nil && plan.ReplyAsChat && plan.Stream {
+				registry.RememberWholeBody(r.Context(), false)
 				// Streaming chat clients get a synthetic chat SSE built from the
 				// folded Responses object; translating every Responses event live
 				// is a larger contract than this bridge needs. The fold runs
@@ -693,6 +694,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 				// One cache-accounting line per completion, logged where the
 				// usage object is in hand (same shape as writeFolded's).
 				e.logCacheUsage(r.Context(), out, ent.ID, exitID, sessionID)
+				registry.RememberWholeBody(r.Context(), true)
 				writeCompleted(w, out)
 				cancel()
 				return
@@ -703,6 +705,7 @@ func (e *Engine) proxyLoop(w http.ResponseWriter, r *http.Request, ch chooser, b
 			if e.pol.StreamIdleTimeout > 0 {
 				resp.Body = newIdleGuard(resp.Body, e.pol.StreamIdleTimeout, cancel)
 			}
+			registry.RememberWholeBody(r.Context(), false)
 			e.writeStream(w, resp)
 			cancel()
 			return
@@ -2151,6 +2154,20 @@ func usageCacheTokens(raw json.RawMessage) (cached, total int64) {
 	return cached, total
 }
 
+func completionTokens(raw json.RawMessage) int64 {
+	var u struct {
+		CompletionTokens int64 `json:"completion_tokens"`
+		OutputTokens     int64 `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return 0
+	}
+	if u.CompletionTokens > 0 {
+		return u.CompletionTokens
+	}
+	return u.OutputTokens
+}
+
 // logCacheUsage emits the per-completion cache accounting line the cache-hit
 // work is measured against: one line per folded or converted completion, with
 // the conversation identity when one is known.
@@ -2173,7 +2190,7 @@ func (e *Engine) logCacheUsage(ctx context.Context, out []byte, accountID, exitI
 	if total > 0 {
 		pct = cached * 100 / total
 	}
-	registry.RememberCachePct(ctx, int(pct))
+	registry.RememberUsage(ctx, int(pct), int(total), int(completionTokens(obj.Usage)))
 	if sessionID == "" {
 		sessionID = "-"
 	}

@@ -888,7 +888,10 @@ func (r *Registry) NoteRequestHeader(accountID string, ms int64) {
 type cacheNoteKey struct{}
 
 type cacheNote struct {
-	pct *int
+	pct        *int
+	prompt     *int
+	completion *int
+	whole      *bool
 }
 
 // WithCacheNote returns a context the forward path can fill with the
@@ -897,32 +900,47 @@ func WithCacheNote(ctx context.Context) context.Context {
 	return context.WithValue(ctx, cacheNoteKey{}, &cacheNote{})
 }
 
-// RememberCachePct stores a hit percentage for the middleware to copy
-// onto the account after the handler returns.
-func RememberCachePct(ctx context.Context, pct int) {
+// RememberUsage stores the reply's cache hit and token counts for the
+// middleware to copy onto the account after the handler returns.
+func RememberUsage(ctx context.Context, pct, prompt, completion int) {
 	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
 	if note == nil {
 		return
 	}
 	note.pct = &pct
+	note.prompt = &prompt
+	note.completion = &completion
 }
 
-// CachePctFrom returns the hit percentage stored for this request, or nil.
-func CachePctFrom(ctx context.Context) *int {
+// RememberWholeBody records whether the client asked for one JSON object.
+func RememberWholeBody(ctx context.Context, whole bool) {
 	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
 	if note == nil {
-		return nil
+		return
 	}
-	return note.pct
+	note.whole = &whole
 }
 
-// NoteRequestCache records the last reply's cache hit, or clears it when
-// this request did not report usage.
-func (r *Registry) NoteRequestCache(accountID string, pct *int) {
+// CacheNoteParts returns the usage and reply shape stored for this request.
+// A nil pointer means that part was not recorded.
+func CacheNoteParts(ctx context.Context) (pct, prompt, completion *int, whole *bool) {
+	note, _ := ctx.Value(cacheNoteKey{}).(*cacheNote)
+	if note == nil {
+		return nil, nil, nil, nil
+	}
+	return note.pct, note.prompt, note.completion, note.whole
+}
+
+// NoteRequestCache records the last reply's cache hit and token counts, or
+// clears them when this request did not report usage.
+func (r *Registry) NoteRequestCache(accountID string, pct, prompt, completion *int, whole *bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if e, ok := r.accounts[accountID]; ok {
 		e.Stats.LastCachePct = pct
+		e.Stats.LastPromptTokens = prompt
+		e.Stats.LastCompletionTokens = completion
+		e.Stats.LastWholeBody = whole
 	}
 }
 

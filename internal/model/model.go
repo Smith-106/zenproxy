@@ -189,6 +189,13 @@ type Stats struct {
 	// LastCachePct is the cached-prefix share of the last folded reply.
 	// Nil means that request did not report usage. Zero means nothing was cached.
 	LastCachePct *int `json:"last_cache_pct,omitempty"`
+	// LastPromptTokens and LastCompletionTokens are that same reply's usage.
+	// Nil means usage was absent. Zero is a real count.
+	LastPromptTokens     *int `json:"last_prompt_tokens,omitempty"`
+	LastCompletionTokens *int `json:"last_completion_tokens,omitempty"`
+	// LastWholeBody is true when the client asked for one JSON object, so the
+	// first byte waits for the whole answer. Nil means this process did not record it.
+	LastWholeBody *bool `json:"last_whole_body,omitempty"`
 	UpstreamMsgs int64      `json:"upstream_calls"`
 }
 
